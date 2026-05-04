@@ -1,0 +1,23 @@
+@import "tailwindcss";
+:root {
+  --text: #6b6375;
+  --bg: #121212;
+
+  --font-sans: "Inter", system-ui, sans-serif;
+  --font-serif: Georgia, serif;
+  --font-mono: "JetBrains Mono", ui-monospace, monospace;
+
+  color-scheme: dark;
+  color: var(--text);
+  background: var(--bg);
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  
+  background-color: var(--bg);
+}
+
+body {
+  margin: 0;
+}
