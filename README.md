@@ -1,38 +1,57 @@
-# FXServer Installer, Built with Svelte + TS + Tauri + Vite + Redbull
-# Styling done with Tailwind CSS + Shadcn
+# FXServer Installer (Svelte + TS + Tauri + Vite + Redbull)
+> A simple tool to install and set up an FXServer without the usual hassle.
 
-I've seen a lot of people struggle with installing servers. For some it might be very simple, but for new server owners this might be uncharted territory, this is where this project comes in!
-This app does streamline things and make it a lot faster, meaning that it's useful even for users that knows how to setup servers as it can be a drag to install everything one by one on new machines!
+## Tech Stack
+- Svelte (TypeScript) — UI
+- Tauri — backend/runtime
+- Tailwind CSS v4 + shadcn-svelte — styling
+- Vite — dev/build tooling
+- npm — package management
+
+## Why?
+
+I've seen a lot of people struggle with installing servers. For some, it’s simple, but for new server owners, it can feel like uncharted territory.
+
+That’s where this project comes in.
+
+This app streamlines the process and makes everything a lot faster. Even if you already know how to set things up, it saves you from doing the same repetitive steps every time you’re on a new machine.
 
 ## What does it do?
-Glad you asked!
-1. Install [MariaDB](https://mariadb.org/)
-2. Setup MariaDB (Credentials and so on)
-3. Install healthy artifact (Fetched from [Artifacts JG Scripts](https://artifacts.jgscripts.com/). Thank you [JG](https://github.com/jgscripts)!)
-4. Give you instructions on what to do while it's installing.
-5. Extract installed .zip file.
-6. Run the FXServer.exe file inside the installed artifact to start the server installation process.
-7. Provide you with management features of MariaDB service but also extra tips and tricks.
-8. Provide you with extra utilities that you may need.
 
-## Why do such a thing?
+Glad you asked:
 
-Honestly, how effective this project will be is a big question mark. It might be a very stupid project to do or a brilliant project to do. Someone else might have done this or not, didn't really research.
-I was just wanting to create an application using (Svelte + TS + Tauri). This was my first project using Tauri so it was a good chance to learn what I can do with it.
+1. Installs [MariaDB](https://mariadb.org/)
+2. Sets up MariaDB (credentials and basic configuration)
+3. Downloads a healthy artifact (from [Artifacts @ JG Scripts](https://artifacts.jgscripts.com/). Big thanks to [JG](https://github.com/jgscripts)!)
+4. Guides you through what’s happening during installation
+5. Extracts the downloaded `.zip`
+6. Runs the FXServer executable to kick off setup
+7. Provides basic MariaDB management tools + helpful tips
+8. Includes extra utilities you might need
 
-## What's planned ahead?
+## Why did I make this?
 
-- Making it functional for Linux
-- Config editor. Drop in your config file or open it to change values.
-- Profiler Display. Drop in your profiler's .json file to view the profiler values and optimize your server.
+Honestly, I didn’t overthink it too much.
 
-So far this is what I've got. This makes it branch away from being just a "FXServer Installer", although I don't think that there's anything wrong with that. Also I might do these things and I might not. It really depends, so it's not really a guarantee.
+I wanted to build something with Svelte + Tauri and learn what I could do with it. This just felt like a useful (and practical) idea to explore.
+
+My main goal isn’t to get as many users as possible. I just want to learn how to build applications using Tauri and properly use GitHub without turning my commit history into chaos (still working on that).
+
+If it ends up helping people, great. If not, I still learned a lot building it.
+
+## What's planned?
+
+- Linux support
+- Config editor (drop in or edit your config files directly)
+- Profiler viewer (load `.json` files to analyze performance)
+
+No strict promises here, it's just ideas I’d like to explore next (if all goes well).
 
 ## Legal
 
 This project is dedicated to the public domain under CC0 1.0.
 
 You can use, modify, distribute, and sell this software without restriction.  
-No attribution is required.
+No attribution required.
 
 See the [LICENSE](./LICENSE) file for details.
