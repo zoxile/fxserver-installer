@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { onMount } from "svelte";
 	import { getCurrentWindow } from "@tauri-apps/api/window";
+	import icon from "./assets/icon128x128.png";
 
 	const appWindow = getCurrentWindow();
 	let appTitle = $state("FXServer Installer");
@@ -21,13 +22,11 @@
 </script>
 
 <div data-tauri-drag-region class="titlebar">
-	<!-- LEFT: icon + app name -->
 	<div class="left" data-tauri-drag-region>
-		<img src="/icon.png" alt="icon" class="icon" />
+		<img src={icon} alt="icon" class="icon" />
 		<span class="title">{appTitle}</span>
 	</div>
 
-	<!-- RIGHT: controls -->
 	<div class="controls">
 		<button bind:this={minimizeBtn} title="Minimize" class="btn">
 			<svg width="14" height="14" viewBox="0 0 24 24">
@@ -56,8 +55,7 @@
 		justify-content: space-between;
 		align-items: center;
 
-		/* shadcn-like */
-		background: hsl(240 10% 3.9%);
+		background: rgba(9, 9, 11, 0.5);
 		color: hsl(0 0% 98%);
 		border-bottom: 1px solid hsl(240 3.7% 15.9%);
 
@@ -103,7 +101,7 @@
 		border: none;
 		color: inherit;
 
-		transition: background 0.15s ease;
+		transition: background 0.1s ease-in-out;
 
 		app-region: no-drag;
 	}
