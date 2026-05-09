@@ -22,7 +22,7 @@ Glad you asked:
 
 1. Installs [MariaDB](https://mariadb.org/)
 2. Sets up MariaDB (credentials and basic configuration)
-3. Downloads a healthy artifact (from [Artifacts @ JG Scripts](https://artifacts.jgscripts.com/). Big thanks to [JG](https://github.com/jgscripts)!)
+3. Downloads a healthy artifact (from [JG Scripts Artifacts](https://artifacts.jgscripts.com/). Big thanks to [JG](https://github.com/jgscripts)!)
 4. Guides you through what’s happening during installation
 5. Extracts the downloaded `.zip`
 6. Runs the FXServer executable to kick off setup
@@ -49,9 +49,8 @@ No strict promises here, it's just ideas I’d like to explore next (if all goes
 
 ## Legal
 
-This project is dedicated to the public domain under CC0 1.0.
+This project is licensed under the MIT License.
 
-You can use, modify, distribute, and sell this software without restriction.  
-No attribution required.
+You are free to use, modify, distribute, and sell this software, provided that the original copyright notice and license are included in copies or substantial portions of the software.
 
 See the [LICENSE](./LICENSE) file for details.
