@@ -240,7 +240,7 @@
 		<MariaDBNotice {message} {error} onDismiss={() => ((message = ""), (error = ""))} />
 	{/if}
 
-	<div class="grid items-start gap-4 xl:grid-cols-12">
+	<div class="grid gap-4 xl:grid-cols-12">
 		{#if status && !status.installed}
 			<div class="xl:col-span-12">
 				<InstallConfigCard bind:installOptions {busy} onInstall={install} />
@@ -252,10 +252,10 @@
 		<div class="xl:col-span-6">
 			<ConnectionCard bind:credentials {busy} onApply={applyCredentials} />
 		</div>
-		<div class="xl:col-span-6">
+		<div class="xl:col-span-5">
 			<UserManagementCard bind:userConfig {busy} onSave={saveUser} />
 		</div>
-		<div class="xl:col-span-6">
+		<div class="xl:col-span-7 xl:row-span-2">
 			<ExistingUsersCard
 				{busy}
 				{users}
@@ -268,7 +268,7 @@
 				onDelete={removeExistingUser}
 			/>
 		</div>
-		<div class="xl:col-span-12">
+		<div class="xl:col-span-5">
 			<QueryConsole bind:query {busy} result={queryResult} onExecute={executeQuery} />
 		</div>
 	</div>

@@ -51,7 +51,7 @@
 				<Input bind:value={credentials.database} placeholder="Optional default schema" title="Optional database to use when running queries." />
 			</label>
 		</div>
-		<Button onclick={onApply} disabled={busy} title="Apply admin credentials and refresh MariaDB status, users, and selected user details">
+		<Button class="w-full" onclick={onApply} disabled={busy} title="Apply admin credentials and refresh MariaDB status, users, and selected user details">
 			<RefreshCwIcon class={busy ? "animate-spin" : undefined} />
 			Change Credentials
 		</Button>

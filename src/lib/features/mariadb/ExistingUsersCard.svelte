@@ -43,7 +43,7 @@
 	}: Props = $props();
 </script>
 
-<Card.Root class="h-full rounded-md border-border bg-card shadow-sm">
+<Card.Root class="h-full min-h-[34rem] rounded-md border-border bg-card shadow-sm">
 	<Card.Header class="border-b border-border pb-4">
 		<div class="flex items-start justify-between gap-3">
 			<div class="flex items-center gap-3">
@@ -80,7 +80,7 @@
 							<p class="truncate text-sm font-medium text-foreground">{user.username || "(anonymous)"}@{user.host}</p>
 							<p class="mt-1 flex items-center gap-2 truncate text-xs text-muted-foreground">
 								<ShieldIcon class="size-3.5" />
-								{user.plugin || "plugin unknown"} · locked {user.locked || "unknown"}
+								{user.plugin || "plugin unknown"} - locked {user.locked || "unknown"}
 							</p>
 							<p class="mt-1 flex items-center gap-1.5 text-xs text-muted-foreground opacity-70 transition-opacity group-hover:opacity-100">
 								<SquareMousePointerIcon class="size-3.5" />
@@ -123,7 +123,7 @@
 								{#each selectedAccess.schemaPrivileges as privilege}
 									<div class="rounded-sm bg-background/70 px-2 py-1.5 text-xs">
 										<span class="font-medium text-foreground">{privilege.database}</span>
-										<span class="text-muted-foreground"> · {privilege.privilege} · grantable {privilege.grantable}</span>
+										<span class="text-muted-foreground"> - {privilege.privilege} - grantable {privilege.grantable}</span>
 									</div>
 								{:else}
 									<p class="text-xs text-muted-foreground">No schema-level privileges found.</p>
