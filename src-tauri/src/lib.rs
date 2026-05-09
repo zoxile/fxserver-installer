@@ -1,7 +1,22 @@
+mod commands;
+mod models;
+mod services;
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .invoke_handler(tauri::generate_handler![
+            commands::mariadb::get_mariadb_status,
+            commands::mariadb::install_mariadb,
+            commands::mariadb::start_mariadb_service,
+            commands::mariadb::stop_mariadb_service,
+            commands::mariadb::restart_mariadb_service,
+            commands::mariadb::execute_mariadb_query,
+            commands::mariadb::save_mariadb_user,
+            commands::mariadb::grant_mariadb_permissions,
+            commands::mariadb::delete_mariadb_user,
+        ])
         .setup(|app| {
             if cfg!(debug_assertions) {
                 app.handle().plugin(
