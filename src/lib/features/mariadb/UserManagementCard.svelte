@@ -1,0 +1,74 @@
+<script lang="ts">
+	import Trash2Icon from "@lucide/svelte/icons/trash-2";
+	import UserRoundCogIcon from "@lucide/svelte/icons/user-round-cog";
+	import * as Card from "$lib/components/ui/card/index.js";
+	import { Button } from "$lib/components/ui/button/index.js";
+	import { Input } from "$lib/components/ui/input/index.js";
+
+	type UserForm = {
+		username: string;
+		password: string;
+		host: string;
+		database: string;
+		privileges: string;
+	};
+
+	type Props = {
+		busy: boolean;
+		userConfig: UserForm;
+		onSave: () => void;
+		onDelete: () => void;
+	};
+
+	let { busy, userConfig = $bindable(), onSave, onDelete }: Props = $props();
+</script>
+
+<Card.Root class="h-full rounded-md border-border bg-card shadow-sm">
+	<Card.Header class="border-b border-border pb-4">
+		<div class="flex items-center gap-3">
+			<div class="flex size-9 shrink-0 items-center justify-center rounded-sm bg-muted text-muted-foreground ring-1 ring-border">
+				<UserRoundCogIcon class="size-5" />
+			</div>
+			<div>
+				<Card.Title>Database Users</Card.Title>
+				<Card.Description>Create users, rotate passwords, grant permissions, or remove accounts.</Card.Description>
+			</div>
+		</div>
+	</Card.Header>
+
+	<Card.Content class="space-y-5">
+		<div class="grid gap-4 sm:grid-cols-2">
+			<label class="grid gap-2">
+				<span class="text-xs font-medium text-muted-foreground">Username</span>
+				<Input bind:value={userConfig.username} placeholder="fxserver" title="Database username to create or update." />
+			</label>
+			<label class="grid gap-2">
+				<span class="text-xs font-medium text-muted-foreground">Password</span>
+				<Input type="password" bind:value={userConfig.password} placeholder="User password" title="Password for this database user." />
+			</label>
+			<label class="grid gap-2">
+				<span class="text-xs font-medium text-muted-foreground">Host</span>
+				<Input bind:value={userConfig.host} placeholder="localhost or %" title="Host pattern for this database account." />
+			</label>
+			<label class="grid gap-2">
+				<span class="text-xs font-medium text-muted-foreground">Database</span>
+				<Input bind:value={userConfig.database} placeholder="fxserver" title="Database to grant permissions on." />
+			</label>
+			<label class="grid gap-2 sm:col-span-2">
+				<span class="text-xs font-medium text-muted-foreground">Permissions</span>
+				<Input bind:value={userConfig.privileges} placeholder="SELECT, INSERT, UPDATE or ALL PRIVILEGES" title="Comma-separated privileges to grant." />
+			</label>
+		</div>
+
+		<div class="flex flex-wrap gap-2">
+			<Button onclick={onSave} disabled={busy} title="Create or update this MariaDB user">
+				<UserRoundCogIcon />
+				Save User
+			</Button>
+			<Button variant="destructive" onclick={onDelete} disabled={busy} title="Delete this MariaDB user if it exists">
+				<Trash2Icon />
+				Delete User
+			</Button>
+		</div>
+	</Card.Content>
+</Card.Root>
