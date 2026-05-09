@@ -4,6 +4,7 @@
 	import * as Card from "$lib/components/ui/card/index.js";
 	import { Button } from "$lib/components/ui/button/index.js";
 	import { Input } from "$lib/components/ui/input/index.js";
+	import * as ToggleGroup from "$lib/components/ui/toggle-group/index.js";
 
 	type UserForm = {
 		username: string;
@@ -20,9 +21,44 @@
 	};
 
 	let { busy, userConfig = $bindable(), onSave }: Props = $props();
+	const commonPrivileges = ["SELECT", "INSERT", "UPDATE", "DELETE", "CREATE", "ALTER", "INDEX", "DROP"];
+	const allPrivileges = "ALL PRIVILEGES";
+
+	function selectedPrivileges() {
+		return userConfig.privileges
+			.split(",")
+			.map((privilege) => privilege.trim().toUpperCase())
+			.filter(Boolean);
+	}
+
+	function toggleGroupPrivileges() {
+		return selectedPrivileges().includes(allPrivileges) ? commonPrivileges : selectedPrivileges();
+	}
+
+	function setPrivileges(privileges: string[]) {
+		if (privileges.includes(allPrivileges)) {
+			userConfig.privileges = allPrivileges;
+			return;
+		}
+
+		userConfig.privileges = privileges.join(", ");
+	}
+
+	function updatePrivileges(next: string[]) {
+		if (next.includes(allPrivileges)) {
+			setPrivileges([allPrivileges]);
+			return;
+		}
+
+		setPrivileges(next);
+	}
+
+	function useAllPrivileges() {
+		setPrivileges([allPrivileges]);
+	}
 </script>
 
-<Card.Root class="h-full rounded-md border-border bg-card shadow-sm">
+<Card.Root class="h-full min-h-[34rem] rounded-md border-border bg-card shadow-sm">
 	<Card.Header class="border-b border-border pb-4">
 		<div class="flex items-center gap-3">
 			<div class="flex size-9 shrink-0 items-center justify-center rounded-sm bg-muted text-muted-foreground ring-1 ring-border">
@@ -57,6 +93,35 @@
 				<span class="text-xs font-medium text-muted-foreground">Permissions</span>
 				<Input bind:value={userConfig.privileges} placeholder="SELECT, INSERT, UPDATE or ALL PRIVILEGES" title="Comma-separated privileges to grant." />
 			</label>
+		</div>
+
+		<div class="space-y-3 rounded-sm border border-border bg-background/60 p-3">
+			<div class="flex items-center justify-between gap-3">
+				<div>
+					<p class="text-xs font-medium text-muted-foreground">Quick permissions</p>
+					<p class="mt-1 text-xs text-muted-foreground">Toggle common grants, or choose all privileges.</p>
+				</div>
+				<Button variant="outline" size="xs" onclick={useAllPrivileges} title="Grant all privileges on the selected database">
+					All Privileges
+				</Button>
+			</div>
+			<ToggleGroup.Root
+				type="multiple"
+				value={toggleGroupPrivileges()}
+				onValueChange={updatePrivileges}
+				class="grid grid-cols-2 gap-2 sm:grid-cols-4"
+				aria-label="Database user permissions"
+			>
+				{#each commonPrivileges as privilege}
+					<ToggleGroup.Item
+						value={privilege}
+						title={`Toggle ${privilege} permission`}
+						class="w-full"
+					>
+						{privilege}
+					</ToggleGroup.Item>
+				{/each}
+			</ToggleGroup.Root>
 		</div>
 
 		<div class="flex flex-wrap gap-2">
