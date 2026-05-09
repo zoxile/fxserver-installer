@@ -2,6 +2,7 @@
 	import { onMount } from "svelte";
 	import AlertCircleIcon from "@lucide/svelte/icons/alert-circle";
 	import CheckCircle2Icon from "@lucide/svelte/icons/check-circle-2";
+	import LoaderCircleIcon from "@lucide/svelte/icons/loader-circle";
 	import ConnectionCard from "./ConnectionCard.svelte";
 	import InstallConfigCard from "./InstallConfigCard.svelte";
 	import QueryConsole from "./QueryConsole.svelte";
@@ -151,7 +152,10 @@
 			<h1 class="mt-2 text-3xl font-semibold tracking-normal text-foreground">Database Management</h1>
 			<p class="mt-2 max-w-2xl text-sm text-muted-foreground">Install MariaDB, inspect the local Windows service, manage database users, and run SQL.</p>
 		</div>
-		<div class="rounded-sm border border-border bg-card px-3 py-2 text-xs text-muted-foreground">
+		<div class="inline-flex items-center gap-2 rounded-sm border border-border bg-card px-3 py-2 text-xs text-muted-foreground">
+			{#if busy}
+				<LoaderCircleIcon class="size-3.5 animate-spin" />
+			{/if}
 			{busy ? "Working..." : "Ready"}
 		</div>
 	</div>
