@@ -58,6 +58,21 @@ export interface MariaDBUser {
 	locked?: string | null;
 }
 
+export interface MariaDBUserPrivilege {
+	database: string;
+	table?: string | null;
+	privilege: string;
+	grantable: string;
+}
+
+export interface MariaDBUserAccess {
+	username: string;
+	host: string;
+	grants: string[];
+	schemaPrivileges: MariaDBUserPrivilege[];
+	tablePrivileges: MariaDBUserPrivilege[];
+}
+
 export interface MariaDBQueryResult {
 	success: boolean;
 	stdout: string;
@@ -127,6 +142,11 @@ export function listMariaDBUsers(credentials: MariaDBCredentials) {
 export function updateMariaDBUser(credentials: MariaDBCredentials, config: MariaDBUserUpdateConfig) {
 	if (!hasTauriRuntime()) return unavailableOutsideTauri<void>();
 	return invoke<void>("update_mariadb_user", { credentials, config });
+}
+
+export function getMariaDBUserAccess(credentials: MariaDBCredentials, username: string, host: string) {
+	if (!hasTauriRuntime()) return unavailableOutsideTauri<MariaDBUserAccess>();
+	return invoke<MariaDBUserAccess>("get_mariadb_user_access", { credentials, username, host });
 }
 
 export function deleteMariaDBUser(credentials: MariaDBCredentials, username: string, host: string) {

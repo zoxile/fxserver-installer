@@ -1,6 +1,7 @@
 use crate::{
     models::mariadb::{
-        MariaDBCredentials, MariaDBUser, MariaDBUserConfig, MariaDBUserUpdateConfig,
+        MariaDBCredentials, MariaDBUser, MariaDBUserAccess, MariaDBUserConfig,
+        MariaDBUserPrivilege, MariaDBUserUpdateConfig,
     },
     services::mariadb::{
         permissions::{escape_identifier, escape_string, normalize_privileges},
@@ -86,6 +87,25 @@ pub fn update_user(
     run_admin_query(credentials, "FLUSH PRIVILEGES;".to_string())
 }
 
+pub fn get_user_access(
+    credentials: MariaDBCredentials,
+    username: String,
+    host: String,
+) -> Result<MariaDBUserAccess, String> {
+    let grants = get_grants(credentials.clone(), &username, &host)?;
+    let grantee = grantee_literal(&username, &host);
+    let schema_privileges = get_schema_privileges(credentials.clone(), &grantee)?;
+    let table_privileges = get_table_privileges(credentials, &grantee)?;
+
+    Ok(MariaDBUserAccess {
+        username,
+        host,
+        grants,
+        schema_privileges,
+        table_privileges,
+    })
+}
+
 pub fn grant_permissions(
     credentials: MariaDBCredentials,
     username: String,
@@ -116,6 +136,109 @@ fn optional_cell(value: Option<&String>) -> Option<String> {
         .map(|value| value.trim())
         .filter(|value| !value.is_empty() && *value != "NULL")
         .map(str::to_string)
+}
+
+fn get_grants(
+    credentials: MariaDBCredentials,
+    username: &str,
+    host: &str,
+) -> Result<Vec<String>, String> {
+    let result = crate::services::mariadb::query::execute_query(
+        credentials,
+        format!("SHOW GRANTS FOR {};", account(username, host)),
+    )?;
+
+    if !result.success {
+        return Err(if result.stderr.is_empty() {
+            "MariaDB rejected the grants query.".to_string()
+        } else {
+            result.stderr
+        });
+    }
+
+    Ok(result
+        .rows
+        .into_iter()
+        .filter_map(|row| row.first().cloned())
+        .collect())
+}
+
+fn get_schema_privileges(
+    credentials: MariaDBCredentials,
+    grantee: &str,
+) -> Result<Vec<MariaDBUserPrivilege>, String> {
+    let result = crate::services::mariadb::query::execute_query(
+        credentials,
+        format!(
+            "SELECT TABLE_SCHEMA, PRIVILEGE_TYPE, IS_GRANTABLE \
+             FROM information_schema.SCHEMA_PRIVILEGES \
+             WHERE GRANTEE = {} \
+             ORDER BY TABLE_SCHEMA, PRIVILEGE_TYPE;",
+            escape_string(grantee)
+        ),
+    )?;
+
+    if !result.success {
+        return Err(if result.stderr.is_empty() {
+            "MariaDB rejected the schema privilege query.".to_string()
+        } else {
+            result.stderr
+        });
+    }
+
+    Ok(result
+        .rows
+        .into_iter()
+        .map(|row| MariaDBUserPrivilege {
+            database: row.first().cloned().unwrap_or_default(),
+            table: None,
+            privilege: row.get(1).cloned().unwrap_or_default(),
+            grantable: row.get(2).cloned().unwrap_or_default(),
+        })
+        .collect())
+}
+
+fn get_table_privileges(
+    credentials: MariaDBCredentials,
+    grantee: &str,
+) -> Result<Vec<MariaDBUserPrivilege>, String> {
+    let result = crate::services::mariadb::query::execute_query(
+        credentials,
+        format!(
+            "SELECT TABLE_SCHEMA, TABLE_NAME, PRIVILEGE_TYPE, IS_GRANTABLE \
+             FROM information_schema.TABLE_PRIVILEGES \
+             WHERE GRANTEE = {} \
+             ORDER BY TABLE_SCHEMA, TABLE_NAME, PRIVILEGE_TYPE;",
+            escape_string(grantee)
+        ),
+    )?;
+
+    if !result.success {
+        return Err(if result.stderr.is_empty() {
+            "MariaDB rejected the table privilege query.".to_string()
+        } else {
+            result.stderr
+        });
+    }
+
+    Ok(result
+        .rows
+        .into_iter()
+        .map(|row| MariaDBUserPrivilege {
+            database: row.first().cloned().unwrap_or_default(),
+            table: row.get(1).cloned(),
+            privilege: row.get(2).cloned().unwrap_or_default(),
+            grantable: row.get(3).cloned().unwrap_or_default(),
+        })
+        .collect())
+}
+
+fn grantee_literal(username: &str, host: &str) -> String {
+    format!(
+        "'{}'@'{}'",
+        username.replace('\'', "''"),
+        host.replace('\'', "''")
+    )
 }
 
 fn account(username: &str, host: &str) -> String {

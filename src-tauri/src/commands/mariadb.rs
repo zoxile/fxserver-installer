@@ -1,14 +1,17 @@
 use crate::{
     models::mariadb::{
         MariaDBCredentials, MariaDBInstallOptions, MariaDBQueryResult, MariaDBStatus, MariaDBUser,
-        MariaDBUserConfig, MariaDBUserUpdateConfig,
+        MariaDBUserAccess, MariaDBUserConfig, MariaDBUserUpdateConfig,
     },
     services::mariadb::{
         detect::detect_mariadb,
         install::install_mariadb as install_mariadb_service,
         query::execute_query,
         service::{restart_service, start_service, stop_service},
-        users::{create_or_update_user, drop_user, grant_permissions, list_users, update_user},
+        users::{
+            create_or_update_user, drop_user, get_user_access, grant_permissions, list_users,
+            update_user,
+        },
     },
 };
 
@@ -67,6 +70,15 @@ pub fn update_mariadb_user(
     config: MariaDBUserUpdateConfig,
 ) -> Result<(), String> {
     update_user(credentials, config)
+}
+
+#[tauri::command]
+pub fn get_mariadb_user_access(
+    credentials: MariaDBCredentials,
+    username: String,
+    host: String,
+) -> Result<MariaDBUserAccess, String> {
+    get_user_access(credentials, username, host)
 }
 
 #[tauri::command]
