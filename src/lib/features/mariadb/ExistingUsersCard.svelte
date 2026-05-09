@@ -2,12 +2,13 @@
 	import RefreshCwIcon from "@lucide/svelte/icons/refresh-cw";
 	import SaveIcon from "@lucide/svelte/icons/save";
 	import ShieldIcon from "@lucide/svelte/icons/shield";
+	import SquareMousePointerIcon from "@lucide/svelte/icons/square-mouse-pointer";
 	import Trash2Icon from "@lucide/svelte/icons/trash-2";
 	import UsersIcon from "@lucide/svelte/icons/users";
 	import * as Card from "$lib/components/ui/card/index.js";
 	import { Button } from "$lib/components/ui/button/index.js";
 	import { Input } from "$lib/components/ui/input/index.js";
-	import type { MariaDBUser } from "$lib/modules/mariadb";
+	import type { MariaDBUser, MariaDBUserAccess } from "$lib/modules/mariadb";
 
 	type EditableUser = {
 		username: string;
@@ -20,6 +21,8 @@
 	type Props = {
 		busy: boolean;
 		users: MariaDBUser[];
+		selectedUser: MariaDBUser | null;
+		selectedAccess: MariaDBUserAccess | null;
 		editingUser: EditableUser | null;
 		onRefresh: () => void;
 		onEdit: (user: MariaDBUser) => void;
@@ -30,6 +33,8 @@
 	let {
 		busy,
 		users,
+		selectedUser,
+		selectedAccess,
 		editingUser = $bindable(),
 		onRefresh,
 		onEdit,
@@ -47,7 +52,7 @@
 				</div>
 				<div>
 					<Card.Title>Existing Users</Card.Title>
-					<Card.Description>Review, edit, and remove accounts already present in MariaDB.</Card.Description>
+					<Card.Description>Review, edit, inspect access, and remove accounts already present in MariaDB.</Card.Description>
 				</div>
 			</div>
 			<Button variant="outline" size="icon" onclick={onRefresh} disabled={busy} title="Refresh existing MariaDB users">
@@ -59,17 +64,27 @@
 	<Card.Content class="space-y-4">
 		{#if users.length === 0}
 			<div class="rounded-sm border border-dashed border-border bg-background/60 p-4 text-sm text-muted-foreground">
-				No users loaded. Refresh after entering valid connection credentials.
+				No users loaded. Press Change Credentials or refresh after entering valid admin credentials.
 			</div>
 		{:else}
 			<div class="max-h-72 space-y-2 overflow-y-auto pr-1">
 				{#each users as user}
-					<div class="flex items-center justify-between gap-3 rounded-sm border border-border bg-background/70 px-3 py-2">
-						<button class="min-w-0 flex-1 text-left" onclick={() => onEdit(user)} title={`Edit ${user.username}@${user.host}`}>
+					{@const isSelected = selectedUser?.username === user.username && selectedUser?.host === user.host}
+					<div
+						class={[
+							"group flex items-center justify-between gap-3 rounded-sm border px-3 py-2 transition-[background-color,border-color,transform] duration-150 hover:-translate-y-0.5 hover:border-primary/35 hover:bg-accent/40",
+							isSelected ? "border-primary/45 bg-accent/50" : "border-border bg-background/70",
+						]}
+					>
+						<button class="min-w-0 flex-1 text-left" onclick={() => onEdit(user)} title={`Click to edit ${user.username}@${user.host}`}>
 							<p class="truncate text-sm font-medium text-foreground">{user.username || "(anonymous)"}@{user.host}</p>
 							<p class="mt-1 flex items-center gap-2 truncate text-xs text-muted-foreground">
 								<ShieldIcon class="size-3.5" />
 								{user.plugin || "plugin unknown"} · locked {user.locked || "unknown"}
+							</p>
+							<p class="mt-1 flex items-center gap-1.5 text-xs text-muted-foreground opacity-70 transition-opacity group-hover:opacity-100">
+								<SquareMousePointerIcon class="size-3.5" />
+								Click to edit properties and inspect access
 							</p>
 						</button>
 						<Button variant="destructive" size="icon" onclick={() => onDelete(user)} disabled={busy} title={`Delete ${user.username}@${user.host}`}>
@@ -77,6 +92,62 @@
 						</Button>
 					</div>
 				{/each}
+			</div>
+		{/if}
+
+		{#if selectedUser}
+			<div class="space-y-3 rounded-sm border border-border bg-background/70 p-4">
+				<div>
+					<p class="text-sm font-medium text-foreground">Access details for {selectedUser.username || "(anonymous)"}@{selectedUser.host}</p>
+					<p class="mt-1 text-xs text-muted-foreground">Grants, schema-level privileges, and table-level privileges from the selected admin credentials.</p>
+				</div>
+
+				{#if !selectedAccess}
+					<p class="rounded-sm border border-dashed border-border p-3 text-xs text-muted-foreground">Select or refresh the user to load access details.</p>
+				{:else}
+					<div class="grid gap-3 xl:grid-cols-2">
+						<div class="space-y-2">
+							<p class="text-xs font-medium text-muted-foreground">Raw Grants</p>
+							<div class="max-h-40 space-y-2 overflow-auto rounded-sm border border-border bg-card p-2">
+								{#each selectedAccess.grants as grant}
+									<code class="block whitespace-pre-wrap break-words text-xs text-foreground">{grant}</code>
+								{:else}
+									<p class="text-xs text-muted-foreground">No raw grants returned.</p>
+								{/each}
+							</div>
+						</div>
+
+						<div class="space-y-2">
+							<p class="text-xs font-medium text-muted-foreground">Database Access</p>
+							<div class="max-h-40 space-y-2 overflow-auto rounded-sm border border-border bg-card p-2">
+								{#each selectedAccess.schemaPrivileges as privilege}
+									<div class="rounded-sm bg-background/70 px-2 py-1.5 text-xs">
+										<span class="font-medium text-foreground">{privilege.database}</span>
+										<span class="text-muted-foreground"> · {privilege.privilege} · grantable {privilege.grantable}</span>
+									</div>
+								{:else}
+									<p class="text-xs text-muted-foreground">No schema-level privileges found.</p>
+								{/each}
+							</div>
+						</div>
+					</div>
+
+					<div class="space-y-2">
+						<p class="text-xs font-medium text-muted-foreground">Table Access</p>
+						<div class="max-h-44 overflow-auto rounded-sm border border-border bg-card">
+							{#each selectedAccess.tablePrivileges as privilege}
+								<div class="grid gap-2 border-b border-border px-3 py-2 text-xs last:border-b-0 sm:grid-cols-[1fr_1fr_1fr_auto]">
+									<span class="font-medium text-foreground">{privilege.database}</span>
+									<span class="text-muted-foreground">{privilege.table || "*"}</span>
+									<span class="text-muted-foreground">{privilege.privilege}</span>
+									<span class="text-muted-foreground">grantable {privilege.grantable}</span>
+								</div>
+							{:else}
+								<p class="p-3 text-xs text-muted-foreground">No table-level privileges found.</p>
+							{/each}
+						</div>
+					</div>
+				{/if}
 			</div>
 		{/if}
 

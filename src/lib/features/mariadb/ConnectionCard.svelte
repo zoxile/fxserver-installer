@@ -1,14 +1,18 @@
 <script lang="ts">
 	import KeyRoundIcon from "@lucide/svelte/icons/key-round";
+	import RefreshCwIcon from "@lucide/svelte/icons/refresh-cw";
 	import * as Card from "$lib/components/ui/card/index.js";
+	import { Button } from "$lib/components/ui/button/index.js";
 	import { Input } from "$lib/components/ui/input/index.js";
 	import type { MariaDBCredentials } from "$lib/modules/mariadb";
 
 	type Props = {
+		busy: boolean;
 		credentials: MariaDBCredentials;
+		onApply: () => void;
 	};
 
-	let { credentials = $bindable() }: Props = $props();
+	let { busy, credentials = $bindable(), onApply }: Props = $props();
 </script>
 
 <Card.Root class="h-full rounded-md border-border bg-card shadow-sm">
@@ -24,7 +28,7 @@
 		</div>
 	</Card.Header>
 
-	<Card.Content>
+	<Card.Content class="space-y-4">
 		<div class="grid gap-4 sm:grid-cols-2">
 			<label class="grid gap-2">
 				<span class="text-xs font-medium text-muted-foreground">Host</span>
@@ -47,5 +51,9 @@
 				<Input bind:value={credentials.database} placeholder="Optional default schema" title="Optional database to use when running queries." />
 			</label>
 		</div>
+		<Button onclick={onApply} disabled={busy} title="Apply admin credentials and refresh MariaDB status, users, and selected user details">
+			<RefreshCwIcon class={busy ? "animate-spin" : undefined} />
+			Change Credentials
+		</Button>
 	</Card.Content>
 </Card.Root>

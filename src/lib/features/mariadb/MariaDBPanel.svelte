@@ -12,6 +12,7 @@
 		deleteMariaDBUser,
 		executeMariaDBQuery,
 		getMariaDBStatus,
+		getMariaDBUserAccess,
 		installMariaDB,
 		listMariaDBUsers,
 		restartMariaDBService,
@@ -24,6 +25,7 @@
 		type MariaDBQueryResult,
 		type MariaDBStatus,
 		type MariaDBUser,
+		type MariaDBUserAccess,
 	} from "$lib/modules/mariadb";
 
 	let status = $state<MariaDBStatus | null>(null);
@@ -33,6 +35,8 @@
 	let query = $state("SELECT VERSION();");
 	let queryResult = $state<MariaDBQueryResult | null>(null);
 	let users = $state<MariaDBUser[]>([]);
+	let selectedUser = $state<MariaDBUser | null>(null);
+	let selectedAccess = $state<MariaDBUserAccess | null>(null);
 	let editingUser = $state<{
 		username: string;
 		host: string;
@@ -144,10 +148,19 @@
 	}
 
 	async function refreshUsers() {
-		await runTask(() => listMariaDBUsers(credentials), "MariaDB users refreshed.", (value) => (users = value));
+		await runTask(() => listMariaDBUsers(credentials), "MariaDB users refreshed.", (value) => {
+			users = value;
+			if (selectedUser && !value.some((user) => user.username === selectedUser?.username && user.host === selectedUser?.host)) {
+				selectedUser = null;
+				selectedAccess = null;
+				editingUser = null;
+			}
+		});
 	}
 
-	function editUser(user: MariaDBUser) {
+	async function editUser(user: MariaDBUser) {
+		selectedUser = user;
+		selectedAccess = null;
 		editingUser = {
 			username: user.username,
 			host: user.host,
@@ -155,6 +168,23 @@
 			database: credentials.database || "",
 			privileges: "ALL PRIVILEGES",
 		};
+		await refreshUserAccess(user);
+	}
+
+	async function refreshUserAccess(user = selectedUser) {
+		if (!user) return;
+		await runTask(
+			() => getMariaDBUserAccess(credentials, user.username, user.host),
+			"MariaDB user access refreshed.",
+			(value) => (selectedAccess = value),
+		);
+	}
+
+	async function applyCredentials() {
+		selectedAccess = null;
+		await refreshStatus();
+		await refreshUsers();
+		await refreshUserAccess();
 	}
 
 	async function saveExistingUser() {
@@ -174,6 +204,7 @@
 			"Database user updated.",
 		);
 		await refreshUsers();
+		await refreshUserAccess();
 	}
 
 	async function removeExistingUser(user: MariaDBUser) {
@@ -219,7 +250,7 @@
 			<StatusOverview {status} {busy} onRefresh={refreshStatus} onStart={startService} onStop={stopService} onRestart={restartService} />
 		</div>
 		<div class="xl:col-span-6">
-			<ConnectionCard bind:credentials />
+			<ConnectionCard bind:credentials {busy} onApply={applyCredentials} />
 		</div>
 		<div class="xl:col-span-6">
 			<UserManagementCard bind:userConfig {busy} onSave={saveUser} />
@@ -228,6 +259,8 @@
 			<ExistingUsersCard
 				{busy}
 				{users}
+				{selectedUser}
+				{selectedAccess}
 				bind:editingUser
 				onRefresh={refreshUsers}
 				onEdit={editUser}
