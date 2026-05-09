@@ -6,7 +6,7 @@
 @custom-variant dark (&:is(.dark *));
 :root {
   --text: #6b6375;
-  --bg: #121212;
+  --bg: #0A0A0A;
 
   --font-sans: "Inter", system-ui, sans-serif;
   --font-serif: Georgia, serif;
@@ -68,7 +68,7 @@
 
   --chart-5: oklch(0.269 0 0);
 
-  --radius: 0.625rem;
+  --radius: 0.375rem;
 
   --sidebar: oklch(0.985 0 0);
 
@@ -90,6 +90,7 @@
 body {
   margin: 0;
   background-color: var(--bg);
+  overflow: hidden;
 }
 
 .dark {
@@ -118,8 +119,8 @@ body {
   --chart-5: oklch(0.269 0 0);
   --sidebar: oklch(0.205 0 0);
   --sidebar-foreground: oklch(0.985 0 0);
-  --sidebar-primary: oklch(0.488 0.243 264.376);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
+  --sidebar-primary: oklch(0.922 0 0);
+  --sidebar-primary-foreground: oklch(0.205 0 0);
   --sidebar-accent: oklch(0.269 0 0);
   --sidebar-accent-foreground: oklch(0.985 0 0);
   --sidebar-border: oklch(1 0 0 / 10%);
@@ -178,4 +179,13 @@ body {
 	html {
 		@apply font-sans;
   }
+}
+
+.scrollbar-hidden {
+	-ms-overflow-style: none;
+	scrollbar-width: none;
+}
+
+.scrollbar-hidden::-webkit-scrollbar {
+	display: none;
 }
