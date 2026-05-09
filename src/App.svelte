@@ -6,6 +6,7 @@
 	import JsonFormatterPage from "$lib/features/json/JsonFormatterPage.svelte";
 	import MariaDBPanel from "$lib/features/mariadb/MariaDBPanel.svelte";
 	import PlaceholderPage from "$lib/features/placeholder/PlaceholderPage.svelte";
+	import ProfilerPage from "$lib/features/profiler/ProfilerPage.svelte";
 	import type { PageId } from "$lib/navigation";
 	import { getPageLabel } from "$lib/navigation";
 
@@ -57,6 +58,8 @@
 					<MariaDBPanel />
 				{:else if activePage === "json-formatter"}
 					<JsonFormatterPage />
+				{:else if activePage === "profiler"}
+					<ProfilerPage />
 				{:else}
 					<PlaceholderPage title={getPageLabel(activePage)} description={placeholders[activePage]} />
 				{/if}
