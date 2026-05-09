@@ -69,6 +69,26 @@
 			critical: "border-red-400/30 bg-red-400/10 text-red-200",
 		}[state];
 	}
+
+	function stateBarClass(state: ResourceState) {
+		return {
+			excellent: "bg-emerald-400",
+			good: "bg-sky-400",
+			watch: "bg-amber-400",
+			heavy: "bg-orange-500",
+			critical: "bg-red-500",
+		}[state];
+	}
+
+	function stateTextClass(state: ResourceState) {
+		return {
+			excellent: "text-emerald-300",
+			good: "text-sky-300",
+			watch: "text-amber-300",
+			heavy: "text-orange-300",
+			critical: "text-red-300",
+		}[state];
+	}
 </script>
 
 <section class="space-y-5 pb-8">
@@ -106,7 +126,9 @@
 					<div class="min-w-0">
 						<p class="text-sm font-medium text-foreground">Record a short profiler sample</p>
 						<p class="mt-1 text-xs text-muted-foreground">Run this in the FiveM console while the server is under normal load.</p>
-						<code class="mt-2 block max-w-full rounded-sm bg-muted px-2 py-2 font-mono text-xs whitespace-normal text-foreground break-words">profiler record 500</code>
+						<code class="mt-2 block max-w-full rounded-sm border border-border bg-black/50 px-3 py-2 font-mono text-xs whitespace-normal text-sky-100 shadow-inner break-words">
+							<span class="text-muted-foreground">$</span> profiler record 500
+						</code>
 					</div>
 				</div>
 				<div class="grid min-w-0 gap-3 rounded-sm border border-border bg-background/60 p-3 sm:grid-cols-[2rem_minmax(0,1fr)]">
@@ -114,7 +136,9 @@
 					<div class="min-w-0">
 						<p class="text-sm font-medium text-foreground">Save the finished capture</p>
 						<p class="mt-1 text-xs text-muted-foreground">After the recording finishes, export it as JSON.</p>
-						<code class="mt-2 block max-w-full rounded-sm bg-muted px-2 py-2 font-mono text-xs whitespace-normal text-foreground break-words">profiler saveJSON profiler.json</code>
+						<code class="mt-2 block max-w-full rounded-sm border border-border bg-black/50 px-3 py-2 font-mono text-xs whitespace-normal text-sky-100 shadow-inner break-words">
+							<span class="text-muted-foreground">$</span> profiler saveJSON profiler.json
+						</code>
 					</div>
 				</div>
 				<div class="grid min-w-0 gap-3 rounded-sm border border-border bg-background/60 p-3 sm:grid-cols-[2rem_minmax(0,1fr)]">
@@ -122,7 +146,9 @@
 					<div class="min-w-0">
 						<p class="text-sm font-medium text-foreground">Upload the generated file</p>
 						<p class="mt-1 text-xs text-muted-foreground">FiveM usually writes the capture inside the citizen profiler folder.</p>
-						<code class="mt-2 block max-w-full rounded-sm bg-muted px-2 py-2 font-mono text-xs whitespace-normal text-foreground break-words">FiveM/FiveM.app/citizen/profiler.json</code>
+						<code class="mt-2 block max-w-full rounded-sm border border-border bg-black/50 px-3 py-2 font-mono text-xs whitespace-normal text-emerald-100 shadow-inner break-words">
+							FiveM/FiveM.app/citizen/profiler.json
+						</code>
 					</div>
 				</div>
 			</Card.Content>
@@ -174,13 +200,14 @@
 	</div>
 
 	{#if analysis}
-		<div class="grid gap-4 md:grid-cols-2 xl:grid-cols-5">
+		<div class="grid gap-4 md:grid-cols-2 xl:grid-cols-6">
 			{#each [
 				{ label: "Recording", value: formatMs(analysis.stats.recordingMs) },
-				{ label: "Script CPU", value: formatMs(analysis.stats.totalScriptMs) },
+				{ label: "Avg script / frame", value: formatMs(analysis.stats.averageScriptMsPerFrame) },
 				{ label: "Resources", value: formatNumber(analysis.stats.resourceCount) },
-				{ label: "Hitches", value: formatNumber(analysis.stats.hitchCount) },
-				{ label: "Worst Hitch", value: formatMs(analysis.stats.worstHitchMs) },
+				{ label: "Profiler entries", value: formatNumber(analysis.stats.entryCount) },
+				{ label: "Heavy frames", value: `${formatPercent(analysis.stats.hitchPercent)} (${formatNumber(analysis.stats.hitchCount)})` },
+				{ label: "Resource manager", value: `${formatMs(analysis.stats.resourceManagerTotalMs)} / ${formatNumber(analysis.stats.resourceManagerCalls)}` },
 			] as stat}
 				<Card.Root class="group relative overflow-hidden rounded-sm border-border bg-card shadow-sm transition-transform duration-300 hover:-translate-y-0.5">
 					<div class="pointer-events-none absolute inset-x-4 top-0 h-px bg-gradient-to-r from-transparent via-primary/70 to-transparent opacity-0 transition-opacity duration-300 group-hover:opacity-100"></div>
@@ -202,7 +229,7 @@
 						</div>
 						<div>
 							<Card.Title>Top CPU Time Graph</Card.Title>
-							<Card.Description>Largest total script-time consumers in this sample.</Card.Description>
+							<Card.Description>Largest measured profiler entries in this sample.</Card.Description>
 						</div>
 					</div>
 				</Card.Header>
@@ -211,11 +238,11 @@
 						<div class="grid gap-2 sm:grid-cols-[minmax(0,12rem)_1fr_auto] sm:items-center">
 							<div class="min-w-0">
 								<p class="truncate text-sm font-medium text-foreground">{resource.name}</p>
-								<p class="text-xs text-muted-foreground">{stateLabels[resource.state]} / {resource.dominantKind}</p>
+								<p class="text-xs text-muted-foreground">{stateLabels[resource.state]} / {resource.kind}</p>
 							</div>
 							<div class="h-3 overflow-hidden rounded-sm bg-muted">
 								<div
-									class="h-full rounded-sm bg-gradient-to-r from-primary via-sky-400 to-emerald-300"
+									class={["h-full rounded-sm", stateBarClass(resource.state)]}
 									style={`width: ${barWidth(resource.totalMs, analysis.graph[0]?.totalMs ?? 0)}%`}
 								></div>
 							</div>
@@ -246,23 +273,62 @@
 			</Card.Root>
 		</div>
 
+		<Card.Root class="group relative overflow-hidden rounded-sm border-border bg-card shadow-sm transition-transform duration-300 hover:-translate-y-0.5">
+			<div class="pointer-events-none absolute inset-x-4 top-0 h-px bg-gradient-to-r from-transparent via-primary/70 to-transparent opacity-0 transition-opacity duration-300 group-hover:opacity-100"></div>
+			<Card.Header class="border-b border-border pb-4">
+				<div class="flex items-center justify-between gap-4">
+					<div>
+						<Card.Title>Frame Timeline</Card.Title>
+						<Card.Description>Resource Manager Tick duration per frame. The dashed marker is the 25ms script budget.</Card.Description>
+					</div>
+					<div class="hidden items-center gap-3 text-xs text-muted-foreground sm:flex">
+						<span class="inline-flex items-center gap-1"><span class="size-2 rounded-full bg-emerald-400"></span> Normal</span>
+						<span class="inline-flex items-center gap-1"><span class="size-2 rounded-full bg-amber-400"></span> Watch</span>
+						<span class="inline-flex items-center gap-1"><span class="size-2 rounded-full bg-red-500"></span> Critical</span>
+					</div>
+				</div>
+			</Card.Header>
+			<Card.Content>
+				{#if analysis.frameTimeline.length}
+					<div class="relative h-52 overflow-hidden rounded-sm border border-border bg-background/70 px-3 pt-6 pb-8">
+						<div class="absolute right-3 left-3 border-t border-dashed border-amber-400/50" style={`bottom: ${Math.min(86, barWidth(25, Math.max(25, analysis.stats.worstFrameMs)))}%`}>
+							<span class="absolute -top-5 left-0 text-[10px] text-amber-200">25ms script budget</span>
+						</div>
+						<div class="flex h-full items-end gap-px">
+							{#each analysis.frameTimeline as frame}
+								<div
+									class={["min-w-0 flex-1 rounded-t-[1px]", stateBarClass(frame.state)]}
+									style={`height: ${barWidth(frame.durationMs, Math.max(25, analysis.stats.worstFrameMs))}%`}
+									title={`Frame ${frame.index}: ${formatMs(frame.durationMs)}${frame.topEntry ? ` / top ${frame.topEntry}` : ""}`}
+								></div>
+							{/each}
+						</div>
+					</div>
+				{:else}
+					<div class="rounded-sm border border-dashed border-border bg-background/60 p-4 text-sm text-muted-foreground">
+						No Resource Manager Tick frames were found in this profiler export.
+					</div>
+				{/if}
+			</Card.Content>
+		</Card.Root>
+
 		<div class="grid gap-4 xl:grid-cols-3">
 			{#each [
 				{
 					title: "Most Total CPU Time",
-					description: "Top 20 resources by all measured resource spans.",
+					description: "Top 20 entries by total measured time.",
 					resources: analysis.topTotal,
 					metric: "total",
 				},
 				{
 					title: "Worst Single Tick",
-					description: "Top 20 by worst single tick, thread, or event span.",
+					description: "Top 20 by worst single frame, tick, thread, event, or ref span.",
 					resources: analysis.topWorst,
 					metric: "worst",
 				},
 				{
 					title: "Present During Hitches",
-					description: "Resources active during Resource Manager Tick hitches.",
+					description: "Entries active during frames over the 25ms budget.",
 					resources: analysis.topHitches,
 					metric: "hitch",
 				},
@@ -282,9 +348,9 @@
 											<p class="truncate text-sm font-medium text-foreground">{index + 1}. {resource.name}</p>
 											<p class="mt-1 text-xs text-muted-foreground">
 												{#if ranking.metric === "total"}
-													{formatPercent(resource.percentage)} of scripts / {resource.dominantKind}
+													{formatPercent(resource.percentage)} of scripts / {resource.kind}
 												{:else if ranking.metric === "worst"}
-													worst {resource.worstKind} / avg {formatMs(resource.averageMs)}
+													worst {resource.kind} / avg {formatMs(resource.averageMs)}
 												{:else}
 													{formatNumber(resource.hitchHits)} hitch hits / {formatMs(resource.hitchMs)} overlap
 												{/if}
@@ -295,6 +361,12 @@
 										</span>
 									</div>
 									<div class="mt-3 flex items-center justify-between gap-3 text-xs text-muted-foreground">
+										<div class="h-1.5 min-w-0 flex-1 overflow-hidden rounded-sm bg-muted">
+											<div
+												class={["h-full rounded-sm", stateBarClass(resource.state)]}
+												style={`width: ${barWidth(resource.totalMs, ranking.resources[0]?.totalMs ?? 0)}%`}
+											></div>
+										</div>
 										<span>
 											{#if ranking.metric === "total"}
 												{formatMs(resource.totalMs)}
@@ -326,33 +398,39 @@
 						<FileJsonIcon class="size-5" />
 					</div>
 					<div>
-						<Card.Title>Complete Resource List</Card.Title>
-						<Card.Description>Total ms, script share, average span, worst span, and calls for every resource found.</Card.Description>
+						<Card.Title>Complete Profiler Entry List</Card.Title>
+						<Card.Description>
+							{formatNumber(analysis.stats.entryCount)} entries across {formatNumber(analysis.stats.resourceCount)} resources.
+							Trace includes {formatNumber(analysis.stats.totalEvents)} events, {formatNumber(analysis.stats.browserFrames)} browser frames,
+							and {formatNumber(analysis.stats.screenshots)} screenshots.
+						</Card.Description>
 					</div>
 				</div>
 			</Card.Header>
 			<Card.Content>
 				<div class="overflow-x-auto">
-					<table class="w-full min-w-[860px] text-left text-sm">
+					<table class="w-full min-w-[960px] text-left text-sm">
 						<thead class="text-xs text-muted-foreground">
 							<tr class="border-b border-border">
-								<th class="py-3 pr-4 font-medium">Resource</th>
+								<th class="py-3 pr-4 font-medium">Entry</th>
+								<th class="py-3 pr-4 font-medium">Type</th>
 								<th class="py-3 pr-4 font-medium">State</th>
 								<th class="py-3 pr-4 font-medium">Total</th>
 								<th class="py-3 pr-4 font-medium">% Scripts</th>
-								<th class="py-3 pr-4 font-medium">Avg/Tick</th>
+								<th class="py-3 pr-4 font-medium">Avg/Call</th>
 								<th class="py-3 pr-4 font-medium">Worst</th>
 								<th class="py-3 pr-4 font-medium">Calls</th>
-								<th class="py-3 pr-4 font-medium">Threads / Ticks</th>
+								<th class="py-3 pr-4 font-medium">Weight</th>
 							</tr>
 						</thead>
 						<tbody>
 							{#each analysis.resources as resource}
 								<tr class="border-b border-border/70 transition-colors hover:bg-muted/30">
-									<td class="max-w-64 py-3 pr-4">
+									<td class="max-w-96 py-3 pr-4">
 										<p class="truncate font-medium text-foreground">{resource.name}</p>
-										<p class="text-xs text-muted-foreground">dominant {resource.dominantKind}</p>
+										<p class="text-xs text-muted-foreground">{resource.resource ?? "trace runtime"}</p>
 									</td>
+									<td class="py-3 pr-4 text-muted-foreground">{resource.kind}</td>
 									<td class="py-3 pr-4">
 										<span class={["inline-flex rounded-sm border px-2 py-1 text-xs", stateClass(resource.state)]}>
 											{stateLabels[resource.state]}
@@ -361,9 +439,16 @@
 									<td class="py-3 pr-4 text-muted-foreground">{formatMs(resource.totalMs)}</td>
 									<td class="py-3 pr-4 text-muted-foreground">{formatPercent(resource.percentage)}</td>
 									<td class="py-3 pr-4 text-muted-foreground">{formatMs(resource.averageMs)}</td>
-									<td class="py-3 pr-4 text-muted-foreground">{formatMs(resource.worstMs)} <span class="text-xs">({resource.worstKind})</span></td>
+									<td class={["py-3 pr-4", stateTextClass(resource.state)]}>{formatMs(resource.worstMs)}</td>
 									<td class="py-3 pr-4 text-muted-foreground">{formatNumber(resource.calls)}</td>
-									<td class="py-3 pr-4 text-muted-foreground">{formatNumber(resource.threadCalls)} / {formatNumber(resource.tickCalls)}</td>
+									<td class="py-3 pr-4">
+										<div class="h-1.5 w-24 overflow-hidden rounded-sm bg-muted">
+											<div
+												class={["h-full rounded-sm", stateBarClass(resource.state)]}
+												style={`width: ${barWidth(resource.totalMs, analysis.resources[0]?.totalMs ?? 0)}%`}
+											></div>
+										</div>
+									</td>
 								</tr>
 							{/each}
 						</tbody>

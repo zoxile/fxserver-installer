@@ -1,9 +1,11 @@
 export type ResourceState = "excellent" | "good" | "watch" | "heavy" | "critical";
-export type SpanKind = "tick" | "thread" | "event";
+export type SpanKind = "frame" | "tick" | "thread" | "event" | "ref";
 
 export type ResourceProfile = {
 	name: string;
+	resource?: string;
 	state: ResourceState;
+	kind: SpanKind;
 	dominantKind: SpanKind;
 	score: number;
 	totalTime: number;
@@ -17,14 +19,17 @@ export type ResourceProfile = {
 	worstMs: number;
 	worstKind: SpanKind;
 	calls: number;
-	tickCalls: number;
-	threadCalls: number;
-	eventCalls: number;
-	tickMs: number;
-	threadMs: number;
-	eventMs: number;
 	hitchHits: number;
 	hitchMs: number;
+};
+
+export type FrameProfile = {
+	index: number;
+	startMs: number;
+	durationMs: number;
+	state: ResourceState;
+	entryCount: number;
+	topEntry?: string;
 };
 
 export type ProfilerStats = {
@@ -33,9 +38,18 @@ export type ProfilerStats = {
 	totalScriptMs: number;
 	recordingMs: number;
 	resourceCount: number;
+	entryCount: number;
+	frameCount: number;
+	averageScriptMsPerFrame: number;
 	hitchCount: number;
+	hitchPercent: number;
 	worstHitchMs: number;
 	averageHitchMs: number;
+	worstFrameMs: number;
+	resourceManagerTotalMs: number;
+	resourceManagerCalls: number;
+	browserFrames: number;
+	screenshots: number;
 };
 
 export type ProfilerAnalysis = {
@@ -46,6 +60,7 @@ export type ProfilerAnalysis = {
 	topWorst: ResourceProfile[];
 	topHitches: ResourceProfile[];
 	graph: ResourceProfile[];
+	frameTimeline: FrameProfile[];
 	tips: string[];
 };
 
@@ -70,18 +85,13 @@ type CompletedSpan = OpenSpan & {
 	end: number;
 };
 
-type ResourceAccumulator = {
+type EntryAccumulator = {
 	name: string;
+	resource?: string;
+	kind: SpanKind;
 	totalMs: number;
-	tickMs: number;
-	threadMs: number;
-	eventMs: number;
 	calls: number;
-	tickCalls: number;
-	threadCalls: number;
-	eventCalls: number;
 	worstMs: number;
-	worstKind: SpanKind;
 	hitchHits: number;
 	hitchMs: number;
 };
@@ -92,27 +102,42 @@ type HitchWindow = {
 	durationMs: number;
 };
 
-const hitchThresholdMs = 50;
+const scriptBudgetMs = 25;
 const topLimit = 20;
 
 export function analyzeProfilerJson(value: unknown): ProfilerAnalysis {
 	const events = getTraceEvents(value);
-	const { spans, hitches, firstTs, lastTs } = pairTraceSpans(events);
-	const resources = aggregateResources(spans, hitches);
-	const totalScriptMs = resources.reduce((sum, resource) => sum + resource.totalMs, 0);
-	const profiles = resources
-		.map((resource) => toProfile(resource, totalScriptMs))
+	const { spans, firstTs, lastTs } = pairTraceSpans(events);
+	const frames = spans.filter((span) => span.kind === "frame").sort((left, right) => left.start - right.start);
+	const hitches = frames.filter((frame) => frame.durationMs >= scriptBudgetMs).map(toHitchWindow);
+	const entries = aggregateEntries(spans, hitches);
+	const totalScriptMs = entries.reduce((sum, entry) => sum + entry.totalMs, 0);
+	const profiles = entries
+		.map((entry) => toProfile(entry, totalScriptMs))
 		.sort((left, right) => right.totalMs - left.totalMs);
+	const resourceNames = new Set(profiles.map((profile) => profile.resource).filter((resource): resource is string => Boolean(resource)));
+	const frameTimeline = buildFrameTimeline(frames, spans, firstTs ?? 0);
+	const resourceManager = profiles.find((profile) => profile.name === "Resource Manager Tick");
+	const frameCount = frames.length || frameTimeline.length;
 
 	const stats: ProfilerStats = {
 		totalEvents: events.length,
 		totalSpans: spans.length,
 		totalScriptMs,
 		recordingMs: firstTs === undefined || lastTs === undefined ? 0 : Math.max(0, (lastTs - firstTs) / 1000),
-		resourceCount: profiles.length,
+		resourceCount: resourceNames.size,
+		entryCount: profiles.length,
+		frameCount,
+		averageScriptMsPerFrame: frameCount ? totalScriptMs / frameCount : 0,
 		hitchCount: hitches.length,
+		hitchPercent: frameCount ? (hitches.length / frameCount) * 100 : 0,
 		worstHitchMs: hitches.reduce((max, hitch) => Math.max(max, hitch.durationMs), 0),
 		averageHitchMs: hitches.length ? hitches.reduce((sum, hitch) => sum + hitch.durationMs, 0) / hitches.length : 0,
+		worstFrameMs: frames.reduce((max, frame) => Math.max(max, frame.durationMs), 0),
+		resourceManagerTotalMs: resourceManager?.totalMs ?? 0,
+		resourceManagerCalls: resourceManager?.calls ?? 0,
+		browserFrames: countEvents(events, "BeginFrame"),
+		screenshots: countEvents(events, "Screenshot"),
 	};
 
 	return {
@@ -122,10 +147,11 @@ export function analyzeProfilerJson(value: unknown): ProfilerAnalysis {
 		topTotal: profiles.slice(0, topLimit),
 		topWorst: [...profiles].sort((left, right) => right.worstMs - left.worstMs).slice(0, topLimit),
 		topHitches: [...profiles]
-			.filter((resource) => resource.hitchHits > 0)
+			.filter((profile) => profile.hitchHits > 0)
 			.sort((left, right) => right.hitchHits - left.hitchHits || right.hitchMs - left.hitchMs || right.worstMs - left.worstMs)
 			.slice(0, topLimit),
 		graph: profiles.slice(0, 10),
+		frameTimeline,
 		tips: buildTips(profiles, stats),
 	};
 }
@@ -146,7 +172,6 @@ function getTraceEvents(value: unknown): TraceEvent[] {
 function pairTraceSpans(events: TraceEvent[]) {
 	const stacks = new Map<string, OpenSpan[]>();
 	const spans: CompletedSpan[] = [];
-	const hitches: HitchWindow[] = [];
 	let firstTs: number | undefined;
 	let lastTs: number | undefined;
 
@@ -165,7 +190,7 @@ function pairTraceSpans(events: TraceEvent[]) {
 		if (phase === "B") {
 			stack.push({
 				name,
-				...getResourceSpanInfo(name),
+				...getSpanInfo(name),
 				start: ts,
 				threadKey,
 			});
@@ -180,15 +205,10 @@ function pairTraceSpans(events: TraceEvent[]) {
 
 		const [open] = stack.splice(index, 1);
 		const durationMs = Math.max(0, (ts - open.start) / 1000);
-		const completed = { ...open, end: ts, durationMs };
-		spans.push(completed);
-
-		if (name === "Resource Manager Tick" && durationMs >= hitchThresholdMs) {
-			hitches.push({ start: open.start, end: ts, durationMs });
-		}
+		spans.push({ ...open, end: ts, durationMs });
 	}
 
-	return { spans, hitches, firstTs, lastTs };
+	return { spans, firstTs, lastTs };
 }
 
 function findOpenSpanIndex(stack: OpenSpan[], name: string) {
@@ -199,7 +219,11 @@ function findOpenSpanIndex(stack: OpenSpan[], name: string) {
 	return -1;
 }
 
-function getResourceSpanInfo(name: string): Pick<OpenSpan, "kind" | "resource"> {
+function getSpanInfo(name: string): Pick<OpenSpan, "kind" | "resource"> {
+	if (name === "Resource Manager Tick") {
+		return { kind: "frame", resource: "Resource Manager" };
+	}
+
 	const tickResource = /^tick \(([^)]+)\)$/.exec(name)?.[1];
 	if (tickResource) {
 		return { kind: "tick", resource: normalizeResourceName(tickResource) };
@@ -209,8 +233,12 @@ function getResourceSpanInfo(name: string): Pick<OpenSpan, "kind" | "resource"> 
 		return { kind: "thread", resource: extractResourceFromPath(name) };
 	}
 
-	if (name.startsWith("event ")) {
+	if (name.startsWith("event ") && name.includes("@")) {
 		return { kind: "event", resource: extractResourceFromPath(name) };
+	}
+
+	if (name.includes("@")) {
+		return { kind: "ref", resource: extractResourceFromPath(name) };
 	}
 
 	return {};
@@ -225,51 +253,37 @@ function normalizeResourceName(name: string) {
 	return name.trim().replace(/^@/, "") || undefined;
 }
 
-function aggregateResources(spans: CompletedSpan[], hitches: HitchWindow[]) {
-	const resources = new Map<string, ResourceAccumulator>();
+function aggregateEntries(spans: CompletedSpan[], hitches: HitchWindow[]) {
+	const entries = new Map<string, EntryAccumulator>();
 
 	for (const span of spans) {
-		if (!span.resource || !span.kind || span.durationMs <= 0) continue;
+		if (!span.kind || span.durationMs <= 0) continue;
 
-		const resource = resources.get(span.resource) ?? createAccumulator(span.resource);
-		resource.totalMs += span.durationMs;
-		resource.calls += 1;
-		resource[`${span.kind}Ms`] += span.durationMs;
-		resource[`${span.kind}Calls`] += 1;
+		const entry = entries.get(span.name) ?? {
+			name: span.name,
+			resource: span.resource,
+			kind: span.kind,
+			totalMs: 0,
+			calls: 0,
+			worstMs: 0,
+			hitchHits: 0,
+			hitchMs: 0,
+		};
 
-		if (span.durationMs > resource.worstMs) {
-			resource.worstMs = span.durationMs;
-			resource.worstKind = span.kind;
-		}
+		entry.totalMs += span.durationMs;
+		entry.calls += 1;
+		entry.worstMs = Math.max(entry.worstMs, span.durationMs);
 
 		const hitchOverlap = getHitchOverlap(span, hitches);
 		if (hitchOverlap > 0) {
-			resource.hitchHits += 1;
-			resource.hitchMs += hitchOverlap;
+			entry.hitchHits += 1;
+			entry.hitchMs += hitchOverlap;
 		}
 
-		resources.set(span.resource, resource);
+		entries.set(span.name, entry);
 	}
 
-	return [...resources.values()];
-}
-
-function createAccumulator(name: string): ResourceAccumulator {
-	return {
-		name,
-		totalMs: 0,
-		tickMs: 0,
-		threadMs: 0,
-		eventMs: 0,
-		calls: 0,
-		tickCalls: 0,
-		threadCalls: 0,
-		eventCalls: 0,
-		worstMs: 0,
-		worstKind: "tick",
-		hitchHits: 0,
-		hitchMs: 0,
-	};
+	return [...entries.values()];
 }
 
 function getHitchOverlap(span: CompletedSpan, hitches: HitchWindow[]) {
@@ -285,39 +299,58 @@ function getHitchOverlap(span: CompletedSpan, hitches: HitchWindow[]) {
 	return overlapMs;
 }
 
-function toProfile(resource: ResourceAccumulator, totalScriptMs: number): ResourceProfile {
-	const dominantKind = getDominantKind(resource);
-	const averageMs = resource.calls ? resource.totalMs / resource.calls : 0;
-	const percentage = totalScriptMs ? (resource.totalMs / totalScriptMs) * 100 : 0;
+function toProfile(entry: EntryAccumulator, totalScriptMs: number): ResourceProfile {
+	const averageMs = entry.calls ? entry.totalMs / entry.calls : 0;
+	const percentage = totalScriptMs ? (entry.totalMs / totalScriptMs) * 100 : 0;
+	const state = getState({ averageMs, worstMs: entry.worstMs, percentage, hitchHits: entry.hitchHits });
 
 	return {
-		...resource,
-		state: getResourceState({ ...resource, averageMs, percentage }),
-		dominantKind,
-		score: resource.totalMs,
-		totalTime: resource.totalMs,
-		selfTime: resource.threadMs + resource.eventMs,
+		...entry,
+		state,
+		dominantKind: entry.kind,
+		score: entry.totalMs,
+		totalTime: entry.totalMs,
+		selfTime: entry.kind === "frame" ? 0 : entry.totalMs,
 		averageTime: averageMs,
-		ticks: resource.calls,
-		samples: resource.calls,
+		ticks: entry.calls,
+		samples: entry.calls,
 		averageMs,
 		percentage,
+		worstKind: entry.kind,
 	};
 }
 
-function getDominantKind(resource: ResourceAccumulator): SpanKind {
-	const entries: Array<[SpanKind, number]> = [
-		["tick", resource.tickMs],
-		["thread", resource.threadMs],
-		["event", resource.eventMs],
-	];
+function buildFrameTimeline(frames: CompletedSpan[], spans: CompletedSpan[], firstTs: number) {
+	return frames.map((frame, index) => {
+		const childSpans = spans.filter((span) => span !== frame && span.kind && span.start >= frame.start && span.end <= frame.end);
+		const topEntry = [...childSpans].sort((left, right) => right.durationMs - left.durationMs)[0]?.name;
 
-	return entries.sort((left, right) => right[1] - left[1])[0][0];
+		return {
+			index: index + 1,
+			startMs: (frame.start - firstTs) / 1000,
+			durationMs: frame.durationMs,
+			state: getState({ averageMs: frame.durationMs, worstMs: frame.durationMs, percentage: 0, hitchHits: frame.durationMs >= scriptBudgetMs ? 1 : 0 }),
+			entryCount: childSpans.length,
+			topEntry,
+		};
+	});
 }
 
-function getResourceState(resource: ResourceAccumulator & { averageMs: number; percentage: number }): ResourceState {
+function toHitchWindow(frame: CompletedSpan): HitchWindow {
+	return {
+		start: frame.start,
+		end: frame.end,
+		durationMs: frame.durationMs,
+	};
+}
+
+function countEvents(events: TraceEvent[], name: string) {
+	return events.filter((event) => event.name === name && event.ph === "B").length;
+}
+
+function getState(resource: { averageMs: number; worstMs: number; percentage: number; hitchHits: number }): ResourceState {
 	if (resource.worstMs >= 50 || resource.averageMs >= 5 || resource.percentage >= 20 || resource.hitchHits >= 10) return "critical";
-	if (resource.worstMs >= 16 || resource.averageMs >= 2 || resource.percentage >= 10 || resource.hitchHits >= 4) return "heavy";
+	if (resource.worstMs >= 25 || resource.averageMs >= 2 || resource.percentage >= 10 || resource.hitchHits >= 4) return "heavy";
 	if (resource.worstMs >= 8 || resource.averageMs >= 1 || resource.percentage >= 5 || resource.hitchHits >= 1) return "watch";
 	if (resource.worstMs < 1 && resource.averageMs < 0.25 && resource.percentage < 1) return "excellent";
 	return "good";
@@ -330,21 +363,21 @@ function buildTips(resources: ResourceProfile[], stats: ProfilerStats) {
 	const topHitch = [...resources].sort((left, right) => right.hitchHits - left.hitchHits || right.hitchMs - left.hitchMs)[0];
 
 	if (!topTotal) {
-		return ["No resource timings were found. Confirm this is a FiveM profiler JSON created with profiler saveJSON."];
+		return ["No profiler entries were found. Confirm this is a FiveM profiler JSON created with profiler saveJSON."];
 	}
 
-	tips.push(`${topTotal.name} uses the most script time at ${topTotal.percentage.toFixed(1)}% of measured resource work. Start there before tuning smaller resources.`);
+	tips.push(`Open ${topTotal.name} first. It is a ${topTotal.kind} entry using ${topTotal.percentage.toFixed(1)}% of measured script time.`);
 
 	if (topWorst) {
-		tips.push(`${topWorst.name} has the worst single ${topWorst.worstKind} at ${topWorst.worstMs.toFixed(2)} ms. Look for loops, sync exports, heavy events, or missing waits near that path.`);
+		tips.push(`${topWorst.name} has the worst single ${topWorst.kind} at ${topWorst.worstMs.toFixed(2)} ms. Look for loops, sync exports, heavy events, or missing waits near that path.`);
 	}
 
 	if (stats.hitchCount && topHitch?.hitchHits) {
-		tips.push(`${topHitch.name} was present during ${topHitch.hitchHits} hitch span${topHitch.hitchHits === 1 ? "" : "s"}. Compare its tick and thread totals against the hitch timestamps.`);
+		tips.push(`${topHitch.name} was present during ${topHitch.hitchHits} heavy frame${topHitch.hitchHits === 1 ? "" : "s"}. Compare it against the frame timeline.`);
 	}
 
-	if (resources.some((resource) => resource.state === "critical")) {
-		tips.push("Critical resources usually need structural changes: split work across ticks, cache repeated calculations, and avoid doing database or file work inside hot loops.");
+	if (stats.browserFrames || stats.screenshots) {
+		tips.push(`The trace also contains ${stats.browserFrames.toLocaleString()} browser frame markers and ${stats.screenshots.toLocaleString()} screenshots, which helps align script spikes with visual frame timing.`);
 	}
 
 	return tips;
