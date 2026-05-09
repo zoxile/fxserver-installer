@@ -7,7 +7,10 @@
 		title: string;
 		description: string;
 		icon: Component;
-		size?: "feature" | "default";
+		size?: "hero" | "feature" | "wide" | "compact";
+		kicker?: string;
+		highlights?: string[];
+		className?: string;
 		actionLabel?: string;
 		onclick: () => void;
 	};
@@ -16,7 +19,10 @@
 		title,
 		description,
 		icon: Icon,
-		size = "default",
+		size = "compact",
+		kicker,
+		highlights = [],
+		className = "",
 		actionLabel = "Open",
 		onclick,
 	}: Props = $props();
@@ -24,40 +30,48 @@
 
 <Card.Root
 	class={[
-		"flex h-full min-h-44 flex-col rounded-md border-border bg-card shadow-sm",
-		size === "feature" && "md:col-span-2",
+		"group relative flex h-full min-h-40 flex-col overflow-hidden rounded-md border-border bg-card shadow-sm transition-[background-color,transform] duration-200 hover:-translate-y-0.5 hover:bg-card/95",
+		size === "hero" && "min-h-80",
+		size === "feature" && "min-h-64",
+		size === "wide" && "min-h-40",
+		size === "compact" && "min-h-36",
+		className,
 	]}
 >
-	<Card.Header class="border-b border-border pb-4">
+	<div class="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-primary/40 to-transparent opacity-0 transition-opacity duration-200 group-hover:opacity-100"></div>
+	<Card.Header class={["shrink-0 border-b border-border pb-3", size === "compact" ? "space-y-1" : "space-y-2"]}>
 		<div class="flex items-start gap-3">
-			<div class="flex size-9 shrink-0 items-center justify-center rounded-sm bg-muted text-muted-foreground ring-1 ring-border">
+			<div class="flex size-9 shrink-0 items-center justify-center rounded-sm bg-muted text-muted-foreground ring-1 ring-border transition-transform duration-200 group-hover:scale-105">
 				<Icon class="size-4" />
 			</div>
 			<div class="min-w-0">
-				<Card.Title>{title}</Card.Title>
-				<Card.Description>{description}</Card.Description>
+				{#if kicker}
+					<p class="mb-1 text-xs font-medium text-muted-foreground">{kicker}</p>
+				{/if}
+				<Card.Title class={size === "hero" ? "text-xl" : undefined}>{title}</Card.Title>
+				<Card.Description
+					class={[
+						"overflow-hidden [display:-webkit-box] [-webkit-box-orient:vertical]",
+						size === "compact" ? "[-webkit-line-clamp:2]" : "[-webkit-line-clamp:3]",
+					]}
+				>
+					{description}
+				</Card.Description>
 			</div>
 		</div>
 	</Card.Header>
-	<Card.Content class="flex flex-1 flex-col justify-between gap-5">
-		{#if title === "MariaDB"}
-			<div class="grid gap-2 text-sm text-muted-foreground sm:grid-cols-3">
-				<div class="rounded-sm border border-border bg-background p-3">
-					<p class="font-medium text-foreground">Detect</p>
-					<p class="mt-1 text-xs">Find the local service.</p>
-				</div>
-				<div class="rounded-sm border border-border bg-background p-3">
-					<p class="font-medium text-foreground">Configure</p>
-					<p class="mt-1 text-xs">Prepare users and grants.</p>
-				</div>
-				<div class="rounded-sm border border-border bg-background p-3">
-					<p class="font-medium text-foreground">Query</p>
-					<p class="mt-1 text-xs">Inspect live data.</p>
-				</div>
+	<Card.Content class="flex min-h-0 flex-1 flex-col justify-between gap-3">
+		{#if highlights.length}
+			<div class={["grid min-h-0 gap-2 text-sm text-muted-foreground", size === "hero" ? "sm:grid-cols-3" : "grid-cols-1"]}>
+				{#each highlights as highlight}
+					<div class="rounded-sm border border-border bg-background/70 p-2.5">
+						<p class="font-medium text-foreground">{highlight}</p>
+					</div>
+				{/each}
 			</div>
 		{/if}
 
-		<Button variant="outline" {onclick} title={`${actionLabel} ${title}`} class="w-fit">
+		<Button variant="outline" {onclick} title={`${actionLabel} ${title}`} class="mt-auto h-8 w-fit shrink-0 rounded-sm px-3 text-xs">
 			{actionLabel}
 		</Button>
 	</Card.Content>
