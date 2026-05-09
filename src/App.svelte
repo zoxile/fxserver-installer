@@ -3,6 +3,7 @@
 	import Titlebar from "./Titlebar.svelte";
 	import Sidebar from "$lib/components/layout/Sidebar.svelte";
 	import HomePage from "$lib/features/home/HomePage.svelte";
+	import JsonFormatterPage from "$lib/features/json/JsonFormatterPage.svelte";
 	import MariaDBPanel from "$lib/features/mariadb/MariaDBPanel.svelte";
 	import PlaceholderPage from "$lib/features/placeholder/PlaceholderPage.svelte";
 	import type { PageId } from "$lib/navigation";
@@ -59,6 +60,8 @@
 					<HomePage onNavigate={navigate} />
 				{:else if activePage === "mariadb"}
 					<MariaDBPanel />
+				{:else if activePage === "json-formatter"}
+					<JsonFormatterPage />
 				{:else}
 					<PlaceholderPage title={getPageLabel(activePage)} description={placeholders[activePage]} />
 				{/if}
