@@ -52,6 +52,26 @@ pub struct MariaDBUserConfig {
 
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
+pub struct MariaDBUserUpdateConfig {
+    pub username: String,
+    pub host: String,
+    pub password: Option<String>,
+    pub database: Option<String>,
+    pub privileges: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct MariaDBUser {
+    pub username: String,
+    pub host: String,
+    pub plugin: Option<String>,
+    pub password_expired: Option<String>,
+    pub locked: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct MariaDBQueryResult {
     pub success: bool,
     pub stdout: String,

@@ -14,6 +14,8 @@ pub fn run() {
             commands::mariadb::restart_mariadb_service,
             commands::mariadb::execute_mariadb_query,
             commands::mariadb::save_mariadb_user,
+            commands::mariadb::list_mariadb_users,
+            commands::mariadb::update_mariadb_user,
             commands::mariadb::grant_mariadb_permissions,
             commands::mariadb::delete_mariadb_user,
         ])
