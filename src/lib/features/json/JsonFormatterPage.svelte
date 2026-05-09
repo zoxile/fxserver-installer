@@ -95,9 +95,7 @@
 		<div>
 			<p class="text-xs font-semibold tracking-wide text-muted-foreground uppercase">Tools</p>
 			<h1 class="mt-2 text-3xl font-semibold tracking-normal text-foreground">JSON Formatter</h1>
-			<p class="mt-2 max-w-2xl text-sm text-muted-foreground">
-				Format, minify, validate, and repair common JSON syntax mistakes before using resource data.
-			</p>
+			<p class="mt-2 max-w-2xl text-sm text-muted-foreground">Format, minify, validate, and repair common JSON syntax mistakes before using resource data.</p>
 		</div>
 		<div class="inline-flex items-center gap-2 rounded-sm border border-border bg-card px-3 py-2 text-xs text-muted-foreground">
 			<FileJsonIcon class="size-3.5" />
@@ -128,7 +126,7 @@
 					spellcheck="false"
 					placeholder={inputPlaceholder}
 					title="JSON input to validate, format, minify, or repair."
-					class="min-h-[420px] w-full resize-y rounded-sm border border-input bg-background px-3 py-3 font-mono text-sm leading-6 text-foreground outline-none transition-colors placeholder:text-muted-foreground focus:border-ring focus:ring-2 focus:ring-ring/30"
+					class="min-h-48 w-full resize-y rounded-sm border border-input bg-background px-3 py-3 font-mono text-sm leading-6 text-foreground outline-none transition-colors placeholder:text-muted-foreground focus:border-ring focus:ring-2 focus:ring-ring/30"
 				></textarea>
 				<div class="flex flex-wrap gap-2">
 					<Button onclick={formatInput} title="Format and validate JSON">
