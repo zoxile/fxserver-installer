@@ -42,6 +42,22 @@ export interface MariaDBUserConfig {
 	privileges: string[];
 }
 
+export interface MariaDBUserUpdateConfig {
+	username: string;
+	host: string;
+	password?: string | null;
+	database?: string | null;
+	privileges: string[];
+}
+
+export interface MariaDBUser {
+	username: string;
+	host: string;
+	plugin?: string | null;
+	passwordExpired?: string | null;
+	locked?: string | null;
+}
+
 export interface MariaDBQueryResult {
 	success: boolean;
 	stdout: string;
@@ -101,6 +117,16 @@ export function executeMariaDBQuery(credentials: MariaDBCredentials, query: stri
 export function saveMariaDBUser(credentials: MariaDBCredentials, config: MariaDBUserConfig) {
 	if (!hasTauriRuntime()) return unavailableOutsideTauri<void>();
 	return invoke<void>("save_mariadb_user", { credentials, config });
+}
+
+export function listMariaDBUsers(credentials: MariaDBCredentials) {
+	if (!hasTauriRuntime()) return unavailableOutsideTauri<MariaDBUser[]>();
+	return invoke<MariaDBUser[]>("list_mariadb_users", { credentials });
+}
+
+export function updateMariaDBUser(credentials: MariaDBCredentials, config: MariaDBUserUpdateConfig) {
+	if (!hasTauriRuntime()) return unavailableOutsideTauri<void>();
+	return invoke<void>("update_mariadb_user", { credentials, config });
 }
 
 export function deleteMariaDBUser(credentials: MariaDBCredentials, username: string, host: string) {

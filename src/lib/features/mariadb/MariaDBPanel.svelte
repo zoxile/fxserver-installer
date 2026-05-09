@@ -1,10 +1,10 @@
 <script lang="ts">
 	import { onMount } from "svelte";
-	import AlertCircleIcon from "@lucide/svelte/icons/alert-circle";
-	import CheckCircle2Icon from "@lucide/svelte/icons/check-circle-2";
 	import LoaderCircleIcon from "@lucide/svelte/icons/loader-circle";
 	import ConnectionCard from "./ConnectionCard.svelte";
+	import ExistingUsersCard from "./ExistingUsersCard.svelte";
 	import InstallConfigCard from "./InstallConfigCard.svelte";
+	import MariaDBNotice from "./MariaDBNotice.svelte";
 	import QueryConsole from "./QueryConsole.svelte";
 	import StatusOverview from "./StatusOverview.svelte";
 	import UserManagementCard from "./UserManagementCard.svelte";
@@ -13,14 +13,17 @@
 		executeMariaDBQuery,
 		getMariaDBStatus,
 		installMariaDB,
+		listMariaDBUsers,
 		restartMariaDBService,
 		saveMariaDBUser,
 		startMariaDBService,
 		stopMariaDBService,
+		updateMariaDBUser,
 		type MariaDBCredentials,
 		type MariaDBInstallOptions,
 		type MariaDBQueryResult,
 		type MariaDBStatus,
+		type MariaDBUser,
 	} from "$lib/modules/mariadb";
 
 	let status = $state<MariaDBStatus | null>(null);
@@ -29,6 +32,14 @@
 	let error = $state("");
 	let query = $state("SELECT VERSION();");
 	let queryResult = $state<MariaDBQueryResult | null>(null);
+	let users = $state<MariaDBUser[]>([]);
+	let editingUser = $state<{
+		username: string;
+		host: string;
+		password: string;
+		database: string;
+		privileges: string;
+	} | null>(null);
 	let credentials = $state<MariaDBCredentials>({
 		host: "127.0.0.1",
 		port: 3306,
@@ -128,12 +139,46 @@
 						.map((privilege) => privilege.trim())
 						.filter(Boolean),
 				}),
-			"Database user saved.",
+			"Database user added.",
 		);
 	}
 
-	async function removeUser() {
-		await runTask(() => deleteMariaDBUser(credentials, userConfig.username, userConfig.host), "Database user deleted.");
+	async function refreshUsers() {
+		await runTask(() => listMariaDBUsers(credentials), "MariaDB users refreshed.", (value) => (users = value));
+	}
+
+	function editUser(user: MariaDBUser) {
+		editingUser = {
+			username: user.username,
+			host: user.host,
+			password: "",
+			database: credentials.database || "",
+			privileges: "ALL PRIVILEGES",
+		};
+	}
+
+	async function saveExistingUser() {
+		if (!editingUser) return;
+		const config = editingUser;
+
+		await runTask(
+			() =>
+				updateMariaDBUser(credentials, {
+					...config,
+					password: config.password || null,
+					privileges: config.privileges
+						.split(",")
+						.map((privilege) => privilege.trim())
+						.filter(Boolean),
+				}),
+			"Database user updated.",
+		);
+		await refreshUsers();
+	}
+
+	async function removeExistingUser(user: MariaDBUser) {
+		await runTask(() => deleteMariaDBUser(credentials, user.username, user.host), "Database user deleted.");
+		await refreshUsers();
 	}
 
 	async function executeQuery() {
@@ -161,14 +206,7 @@
 	</div>
 
 	{#if message || error}
-		<div class={["flex items-center gap-2 rounded-md border px-3 py-2 text-sm", error ? "border-destructive/30 bg-destructive/10 text-destructive" : "border-border bg-muted/40 text-foreground"]}>
-			{#if error}
-				<AlertCircleIcon class="size-4 shrink-0" />
-			{:else}
-				<CheckCircle2Icon class="size-4 shrink-0" />
-			{/if}
-			<span>{error || message}</span>
-		</div>
+		<MariaDBNotice {message} {error} onDismiss={() => ((message = ""), (error = ""))} />
 	{/if}
 
 	<div class="grid items-start gap-4 xl:grid-cols-12">
@@ -184,9 +222,20 @@
 			<ConnectionCard bind:credentials />
 		</div>
 		<div class="xl:col-span-6">
-			<UserManagementCard bind:userConfig {busy} onSave={saveUser} onDelete={removeUser} />
+			<UserManagementCard bind:userConfig {busy} onSave={saveUser} />
 		</div>
 		<div class="xl:col-span-6">
+			<ExistingUsersCard
+				{busy}
+				{users}
+				bind:editingUser
+				onRefresh={refreshUsers}
+				onEdit={editUser}
+				onSave={saveExistingUser}
+				onDelete={removeExistingUser}
+			/>
+		</div>
+		<div class="xl:col-span-12">
 			<QueryConsole bind:query {busy} result={queryResult} onExecute={executeQuery} />
 		</div>
 	</div>

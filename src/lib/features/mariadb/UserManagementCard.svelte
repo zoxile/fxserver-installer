@@ -1,5 +1,5 @@
 <script lang="ts">
-	import Trash2Icon from "@lucide/svelte/icons/trash-2";
+	import UserPlusIcon from "@lucide/svelte/icons/user-plus";
 	import UserRoundCogIcon from "@lucide/svelte/icons/user-round-cog";
 	import * as Card from "$lib/components/ui/card/index.js";
 	import { Button } from "$lib/components/ui/button/index.js";
@@ -17,10 +17,9 @@
 		busy: boolean;
 		userConfig: UserForm;
 		onSave: () => void;
-		onDelete: () => void;
 	};
 
-	let { busy, userConfig = $bindable(), onSave, onDelete }: Props = $props();
+	let { busy, userConfig = $bindable(), onSave }: Props = $props();
 </script>
 
 <Card.Root class="h-full rounded-md border-border bg-card shadow-sm">
@@ -30,8 +29,8 @@
 				<UserRoundCogIcon class="size-5" />
 			</div>
 			<div>
-				<Card.Title>Database Users</Card.Title>
-				<Card.Description>Create users, rotate passwords, grant permissions, or remove accounts.</Card.Description>
+				<Card.Title>Add Database User</Card.Title>
+				<Card.Description>Create a new account and optionally grant database permissions.</Card.Description>
 			</div>
 		</div>
 	</Card.Header>
@@ -62,12 +61,8 @@
 
 		<div class="flex flex-wrap gap-2">
 			<Button onclick={onSave} disabled={busy} title="Create or update this MariaDB user">
-				<UserRoundCogIcon />
-				Save User
-			</Button>
-			<Button variant="destructive" onclick={onDelete} disabled={busy} title="Delete this MariaDB user if it exists">
-				<Trash2Icon />
-				Delete User
+				<UserPlusIcon />
+				Add User
 			</Button>
 		</div>
 	</Card.Content>
