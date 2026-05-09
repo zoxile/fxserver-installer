@@ -7,12 +7,13 @@
 
 	type Props = {
 		busy: boolean;
+		canExecute: boolean;
 		query: string;
 		result: MariaDBQueryResult | null;
 		onExecute: () => void;
 	};
 
-	let { busy, query = $bindable(), result, onExecute }: Props = $props();
+	let { busy, canExecute, query = $bindable(), result, onExecute }: Props = $props();
 </script>
 
 <Card.Root class="h-full rounded-md border-border bg-card shadow-sm">
@@ -27,7 +28,7 @@
 					<Card.Description>Run SQL against MariaDB using the connection above.</Card.Description>
 				</div>
 			</div>
-			<Button onclick={onExecute} disabled={busy} title="Execute the SQL query and show returned rows">
+			<Button onclick={onExecute} disabled={busy || !canExecute} title={canExecute ? "Execute the SQL query and show returned rows" : "Apply valid admin credentials before running queries"}>
 				<PlayIcon />
 				Execute
 			</Button>
@@ -40,6 +41,7 @@
 			spellcheck="false"
 			placeholder="SELECT * FROM users LIMIT 25;"
 			title="SQL query to execute against MariaDB."
+			disabled={!canExecute}
 			class="min-h-40 w-full resize-y rounded-sm border border-input bg-background px-3 py-3 font-mono text-sm shadow-xs outline-none transition-[color,box-shadow] placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
 		></textarea>
 

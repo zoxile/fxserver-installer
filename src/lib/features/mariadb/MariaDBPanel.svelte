@@ -32,6 +32,7 @@
 	let busy = $state(false);
 	let message = $state("");
 	let error = $state("");
+	let credentialsReady = $state(false);
 	let query = $state("SELECT VERSION();");
 	let queryResult = $state<MariaDBQueryResult | null>(null);
 	let users = $state<MariaDBUser[]>([]);
@@ -134,6 +135,11 @@
 	}
 
 	async function saveUser() {
+		if (!credentialsReady) {
+			error = "Apply valid admin credentials before adding MariaDB users.";
+			return;
+		}
+
 		await runTask(
 			() =>
 				saveMariaDBUser(credentials, {
@@ -148,6 +154,11 @@
 	}
 
 	async function refreshUsers() {
+		if (!credentialsReady) {
+			error = "Apply valid admin credentials before refreshing MariaDB users.";
+			return;
+		}
+
 		await runTask(() => listMariaDBUsers(credentials), "MariaDB users refreshed.", (value) => {
 			users = value;
 			if (selectedUser && !value.some((user) => user.username === selectedUser?.username && user.host === selectedUser?.host)) {
@@ -159,6 +170,11 @@
 	}
 
 	async function editUser(user: MariaDBUser) {
+		if (!credentialsReady) {
+			error = "Apply valid admin credentials before editing MariaDB users.";
+			return;
+		}
+
 		selectedUser = user;
 		selectedAccess = null;
 		editingUser = {
@@ -172,6 +188,7 @@
 	}
 
 	async function refreshUserAccess(user = selectedUser) {
+		if (!credentialsReady) return;
 		if (!user) return;
 		await runTask(
 			() => getMariaDBUserAccess(credentials, user.username, user.host),
@@ -181,13 +198,23 @@
 	}
 
 	async function applyCredentials() {
+		credentialsReady = false;
 		selectedAccess = null;
 		await refreshStatus();
-		await refreshUsers();
-		await refreshUserAccess();
+		const loadedUsers = await runTask(() => listMariaDBUsers(credentials), "Admin credentials applied.", (value) => (users = value));
+
+		if (loadedUsers) {
+			credentialsReady = true;
+			await refreshUserAccess();
+		}
 	}
 
 	async function saveExistingUser() {
+		if (!credentialsReady) {
+			error = "Apply valid admin credentials before updating MariaDB users.";
+			return;
+		}
+
 		if (!editingUser) return;
 		const config = editingUser;
 
@@ -208,11 +235,21 @@
 	}
 
 	async function removeExistingUser(user: MariaDBUser) {
+		if (!credentialsReady) {
+			error = "Apply valid admin credentials before deleting MariaDB users.";
+			return;
+		}
+
 		await runTask(() => deleteMariaDBUser(credentials, user.username, user.host), "Database user deleted.");
 		await refreshUsers();
 	}
 
 	async function executeQuery() {
+		if (!credentialsReady) {
+			error = "Apply valid admin credentials before running MariaDB queries.";
+			return;
+		}
+
 		await runTask(
 			() => executeMariaDBQuery(credentials, query),
 			"Query executed.",
@@ -253,11 +290,12 @@
 			<ConnectionCard bind:credentials {busy} onApply={applyCredentials} />
 		</div>
 		<div class="xl:col-span-5">
-			<UserManagementCard bind:userConfig {busy} onSave={saveUser} />
+			<UserManagementCard bind:userConfig {busy} {credentialsReady} onSave={saveUser} />
 		</div>
 		<div class="xl:col-span-7 xl:row-span-2">
 			<ExistingUsersCard
 				{busy}
+				{credentialsReady}
 				{users}
 				{selectedUser}
 				{selectedAccess}
@@ -269,7 +307,7 @@
 			/>
 		</div>
 		<div class="xl:col-span-5">
-			<QueryConsole bind:query {busy} result={queryResult} onExecute={executeQuery} />
+			<QueryConsole bind:query {busy} canExecute={credentialsReady} result={queryResult} onExecute={executeQuery} />
 		</div>
 	</div>
 </section>

@@ -16,11 +16,12 @@
 
 	type Props = {
 		busy: boolean;
+		credentialsReady: boolean;
 		userConfig: UserForm;
 		onSave: () => void;
 	};
 
-	let { busy, userConfig = $bindable(), onSave }: Props = $props();
+	let { busy, credentialsReady, userConfig = $bindable(), onSave }: Props = $props();
 	const commonPrivileges = ["SELECT", "INSERT", "UPDATE", "DELETE", "CREATE", "ALTER", "INDEX", "DROP"];
 	const allPrivileges = "ALL PRIVILEGES";
 
@@ -75,23 +76,23 @@
 		<div class="grid gap-4 sm:grid-cols-2">
 			<label class="grid gap-2">
 				<span class="text-xs font-medium text-muted-foreground">Username</span>
-				<Input bind:value={userConfig.username} placeholder="fxserver" title="Database username to create or update." />
+				<Input bind:value={userConfig.username} disabled={!credentialsReady} placeholder="fxserver" title="Database username to create or update." />
 			</label>
 			<label class="grid gap-2">
 				<span class="text-xs font-medium text-muted-foreground">Password</span>
-				<Input type="password" bind:value={userConfig.password} placeholder="User password" title="Password for this database user." />
+				<Input type="password" bind:value={userConfig.password} disabled={!credentialsReady} placeholder="User password" title="Password for this database user." />
 			</label>
 			<label class="grid gap-2">
 				<span class="text-xs font-medium text-muted-foreground">Host</span>
-				<Input bind:value={userConfig.host} placeholder="localhost or %" title="Host pattern for this database account." />
+				<Input bind:value={userConfig.host} disabled={!credentialsReady} placeholder="localhost or %" title="Host pattern for this database account." />
 			</label>
 			<label class="grid gap-2">
 				<span class="text-xs font-medium text-muted-foreground">Database</span>
-				<Input bind:value={userConfig.database} placeholder="fxserver" title="Database to grant permissions on." />
+				<Input bind:value={userConfig.database} disabled={!credentialsReady} placeholder="fxserver" title="Database to grant permissions on." />
 			</label>
 			<label class="grid gap-2 sm:col-span-2">
 				<span class="text-xs font-medium text-muted-foreground">Permissions</span>
-				<Input bind:value={userConfig.privileges} placeholder="SELECT, INSERT, UPDATE or ALL PRIVILEGES" title="Comma-separated privileges to grant." />
+				<Input bind:value={userConfig.privileges} disabled={!credentialsReady} placeholder="SELECT, INSERT, UPDATE or ALL PRIVILEGES" title="Comma-separated privileges to grant." />
 			</label>
 		</div>
 
@@ -101,7 +102,7 @@
 					<p class="text-xs font-medium text-muted-foreground">Quick permissions</p>
 					<p class="mt-1 text-xs text-muted-foreground">Toggle common grants, or choose all privileges.</p>
 				</div>
-				<Button variant="outline" size="xs" onclick={useAllPrivileges} title="Grant all privileges on the selected database">
+				<Button variant="outline" size="xs" onclick={useAllPrivileges} disabled={!credentialsReady} title="Grant all privileges on the selected database">
 					All Privileges
 				</Button>
 			</div>
@@ -109,6 +110,7 @@
 				type="multiple"
 				value={toggleGroupPrivileges()}
 				onValueChange={updatePrivileges}
+				disabled={!credentialsReady}
 				class="grid grid-cols-2 gap-2 sm:grid-cols-4"
 				aria-label="Database user permissions"
 			>
@@ -125,7 +127,7 @@
 		</div>
 
 		<div class="flex flex-wrap gap-2">
-			<Button onclick={onSave} disabled={busy} title="Create or update this MariaDB user">
+			<Button onclick={onSave} disabled={busy || !credentialsReady} title={credentialsReady ? "Create or update this MariaDB user" : "Apply valid admin credentials before adding users"}>
 				<UserPlusIcon />
 				Add User
 			</Button>

@@ -20,6 +20,7 @@
 
 	type Props = {
 		busy: boolean;
+		credentialsReady: boolean;
 		users: MariaDBUser[];
 		selectedUser: MariaDBUser | null;
 		selectedAccess: MariaDBUserAccess | null;
@@ -32,6 +33,7 @@
 
 	let {
 		busy,
+		credentialsReady,
 		users,
 		selectedUser,
 		selectedAccess,
@@ -55,7 +57,7 @@
 					<Card.Description>Review, edit, inspect access, and remove accounts already present in MariaDB.</Card.Description>
 				</div>
 			</div>
-			<Button variant="outline" size="icon" onclick={onRefresh} disabled={busy} title="Refresh existing MariaDB users">
+			<Button variant="outline" size="icon" onclick={onRefresh} disabled={busy || !credentialsReady} title={credentialsReady ? "Refresh existing MariaDB users" : "Apply valid admin credentials before refreshing users"}>
 				<RefreshCwIcon class={busy ? "animate-spin" : undefined} />
 			</Button>
 		</div>
@@ -64,7 +66,7 @@
 	<Card.Content class="space-y-4">
 		{#if users.length === 0}
 			<div class="rounded-sm border border-dashed border-border bg-background/60 p-4 text-sm text-muted-foreground">
-				No users loaded. Press Change Credentials or refresh after entering valid admin credentials.
+				{credentialsReady ? "No users loaded. Refresh to fetch accounts from MariaDB." : "Apply valid admin credentials before loading users."}
 			</div>
 		{:else}
 			<div class="max-h-72 space-y-2 overflow-y-auto pr-1">
@@ -76,7 +78,7 @@
 							isSelected ? "border-primary/45 bg-accent/50" : "border-border bg-background/70",
 						]}
 					>
-						<button class="min-w-0 flex-1 text-left" onclick={() => onEdit(user)} title={`Click to edit ${user.username}@${user.host}`}>
+						<button class="min-w-0 flex-1 text-left disabled:cursor-not-allowed disabled:opacity-60" disabled={!credentialsReady} onclick={() => onEdit(user)} title={`Click to edit ${user.username}@${user.host}`}>
 							<p class="truncate text-sm font-medium text-foreground">{user.username || "(anonymous)"}@{user.host}</p>
 							<p class="mt-1 flex items-center gap-2 truncate text-xs text-muted-foreground">
 								<ShieldIcon class="size-3.5" />
@@ -87,7 +89,7 @@
 								Click to edit properties and inspect access
 							</p>
 						</button>
-						<Button variant="destructive" size="icon" onclick={() => onDelete(user)} disabled={busy} title={`Delete ${user.username}@${user.host}`}>
+						<Button variant="destructive" size="icon" onclick={() => onDelete(user)} disabled={busy || !credentialsReady} title={`Delete ${user.username}@${user.host}`}>
 							<Trash2Icon />
 						</Button>
 					</div>
@@ -160,18 +162,18 @@
 				<div class="grid gap-4 sm:grid-cols-2">
 					<label class="grid gap-2">
 						<span class="text-xs font-medium text-muted-foreground">Password</span>
-						<Input type="password" bind:value={editingUser.password} placeholder="New password or blank" title="New password for this MariaDB user." />
+						<Input type="password" bind:value={editingUser.password} disabled={!credentialsReady} placeholder="New password or blank" title="New password for this MariaDB user." />
 					</label>
 					<label class="grid gap-2">
 						<span class="text-xs font-medium text-muted-foreground">Database</span>
-						<Input bind:value={editingUser.database} placeholder="fxserver" title="Database to grant permissions on." />
+						<Input bind:value={editingUser.database} disabled={!credentialsReady} placeholder="fxserver" title="Database to grant permissions on." />
 					</label>
 					<label class="grid gap-2 sm:col-span-2">
 						<span class="text-xs font-medium text-muted-foreground">Permissions</span>
-						<Input bind:value={editingUser.privileges} placeholder="SELECT, INSERT, UPDATE or ALL PRIVILEGES" title="Comma-separated permissions to grant." />
+						<Input bind:value={editingUser.privileges} disabled={!credentialsReady} placeholder="SELECT, INSERT, UPDATE or ALL PRIVILEGES" title="Comma-separated permissions to grant." />
 					</label>
 				</div>
-				<Button onclick={onSave} disabled={busy} title="Save edits for this MariaDB user">
+				<Button onclick={onSave} disabled={busy || !credentialsReady} title="Save edits for this MariaDB user">
 					<SaveIcon />
 					Save Changes
 				</Button>
