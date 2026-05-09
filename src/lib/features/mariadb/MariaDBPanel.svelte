@@ -60,7 +60,11 @@
 	});
 
 	onMount(() => {
-		refreshStatus();
+		const timer = window.setTimeout(() => {
+			void refreshStatus();
+		}, 80);
+
+		return () => window.clearTimeout(timer);
 	});
 
 	async function runTask<T>(task: () => Promise<T>, success: string, after?: (value: T) => void) {

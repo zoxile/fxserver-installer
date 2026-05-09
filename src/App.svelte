@@ -10,6 +10,7 @@
 
 	let sidebarCollapsed = $state(false);
 	let activePage = $state<PageId>("home");
+	let navigationFrame = 0;
 
 	const placeholders: Record<Exclude<PageId, "home" | "mariadb">, string> = {
 		"artifact-install": "Download and prepare the selected FXServer artifact.",
@@ -21,7 +22,16 @@
 	};
 
 	function navigate(page: PageId) {
-		activePage = page;
+		if (page === activePage) return;
+
+		if (navigationFrame) {
+			cancelAnimationFrame(navigationFrame);
+		}
+
+		navigationFrame = requestAnimationFrame(() => {
+			activePage = page;
+			navigationFrame = 0;
+		});
 	}
 </script>
 

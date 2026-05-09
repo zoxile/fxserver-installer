@@ -1,6 +1,8 @@
 <script lang="ts">
+	import { onMount } from "svelte";
 	import PanelLeftCloseIcon from "@lucide/svelte/icons/panel-left-close";
 	import PanelLeftOpenIcon from "@lucide/svelte/icons/panel-left-open";
+	import SidebarNavButton from "./SidebarNavButton.svelte";
 	import type { PageId } from "$lib/navigation";
 	import { navigation } from "$lib/navigation";
 
@@ -14,7 +16,19 @@
 	let { activePage, collapsed, onNavigate, onToggle }: Props = $props();
 	let showExpandedContent = $state(false);
 	let openSections = $state<Set<string>>(new Set());
+	let isNarrow = $state(false);
 	let expandTimer: ReturnType<typeof setTimeout> | null = null;
+	let effectiveCollapsed = $derived(collapsed || isNarrow);
+
+	onMount(() => {
+		const media = window.matchMedia("(max-width: 1023px)");
+		const update = () => (isNarrow = media.matches);
+
+		update();
+		media.addEventListener("change", update);
+
+		return () => media.removeEventListener("change", update);
+	});
 
 	$effect(() => {
 		if (expandTimer) {
@@ -22,7 +36,7 @@
 			expandTimer = null;
 		}
 
-		if (collapsed) {
+		if (effectiveCollapsed) {
 			showExpandedContent = false;
 			openSections = new Set();
 			return;
@@ -30,7 +44,25 @@
 
 		expandTimer = setTimeout(() => {
 			showExpandedContent = true;
-		}, 210);
+		}, 280);
+
+		return () => {
+			if (expandTimer) {
+				clearTimeout(expandTimer);
+				expandTimer = null;
+			}
+		};
+	});
+
+	$effect(() => {
+		const parent = navigation.find((item) => item.children?.some((child) => child.id === activePage));
+
+		if (!parent || effectiveCollapsed) return;
+		if (openSections.has(parent.id)) return;
+
+		const next = new Set(openSections);
+		next.add(parent.id);
+		openSections = next;
 	});
 
 	function isSectionActive(item: (typeof navigation)[number]) {
@@ -52,12 +84,25 @@
 
 <aside
 	class={[
-		"hidden shrink-0 border-r border-sidebar-border bg-sidebar text-sidebar-foreground transition-[width] duration-200 lg:block",
-		collapsed ? "w-16 px-2" : "w-64 px-4",
+		"relative block shrink-0 border-r border-sidebar-border bg-sidebar text-sidebar-foreground transition-[width] duration-300 ease-out will-change-[width]",
+		effectiveCollapsed ? "w-16 px-2" : "w-64 px-4",
 	]}
 >
-	<div class="flex h-[calc(100vh-2.25rem)] flex-col py-5">
-		<div class={["mb-6 min-h-12", collapsed ? "px-0" : "px-2"]}>
+	<button
+		class="absolute top-1/2 -right-3 z-10 flex h-12 w-6 -translate-y-1/2 items-center justify-center rounded-r-md bg-sidebar text-muted-foreground shadow-lg shadow-background/30 transition-colors hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
+		onclick={onToggle}
+		title={effectiveCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+		aria-label={effectiveCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+	>
+		{#if effectiveCollapsed}
+			<PanelLeftOpenIcon class="size-3.5" />
+		{:else}
+			<PanelLeftCloseIcon class="size-3.5" />
+		{/if}
+	</button>
+
+	<div class="flex h-[calc(100vh-2.25rem)] flex-col overflow-hidden py-5">
+		<div class={["mb-6 min-h-12", effectiveCollapsed ? "px-0" : "px-2"]}>
 			{#if showExpandedContent}
 				<div class="min-w-0">
 					<p class="text-xs font-semibold tracking-wide text-muted-foreground uppercase">FXServer Installer</p>
@@ -66,76 +111,45 @@
 			{/if}
 		</div>
 
-	<nav class="flex-1 space-y-1" aria-label="Workspace navigation">
-		{#each navigation as item}
-			{@const Icon = item.icon}
-			{@const parentIsDirectPage = !item.children}
-			{@const sectionActive = isSectionActive(item)}
-			{@const sectionOpen = openSections.has(item.id)}
-			<button
-				class={[
-					"flex h-10 w-full items-center gap-3 rounded-sm px-3 text-left text-sm font-medium transition-colors",
-					collapsed && "justify-center px-0",
-					sectionActive
-						? "bg-sidebar-primary text-sidebar-primary-foreground shadow-sm"
-						: "text-muted-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground",
-				]}
-				onclick={() => (parentIsDirectPage ? onNavigate(item.id as PageId) : toggleSection(item.id))}
-				aria-current={item.id === activePage ? "page" : undefined}
-				aria-expanded={item.children ? sectionOpen : undefined}
-				title={item.label}
-			>
-				<Icon class="size-4" />
-				{#if showExpandedContent}
-					<span>{item.label}</span>
-				{/if}
-			</button>
+		<nav class="flex-1 space-y-1" aria-label="Workspace navigation">
+			{#each navigation as item}
+				{@const parentIsDirectPage = !item.children}
+				{@const sectionActive = isSectionActive(item)}
+				{@const sectionOpen = openSections.has(item.id)}
+				<SidebarNavButton
+					icon={item.icon}
+					label={item.label}
+					active={sectionActive}
+					collapsed={!showExpandedContent}
+					expanded={item.children ? sectionOpen : undefined}
+					onclick={() => (parentIsDirectPage ? onNavigate(item.id as PageId) : toggleSection(item.id))}
+				/>
 
-			{#if item.children && showExpandedContent && sectionOpen}
-				<div class="ml-4 border-l border-sidebar-border py-1 pl-3">
-					{#each item.children as child}
-						{@const ChildIcon = child.icon}
-						<button
-							class={[
-								"flex h-8 w-full items-center gap-2 rounded-sm px-2 text-left text-xs transition-colors",
-								activePage === child.id
-									? "bg-sidebar-accent text-sidebar-accent-foreground"
-									: "text-muted-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground",
-							]}
-							onclick={() => onNavigate(child.id)}
-							aria-current={activePage === child.id ? "page" : undefined}
-							title={child.label}
-						>
-							{#if ChildIcon}
-								<ChildIcon class="size-3.5" />
-							{/if}
-							{child.label}
-						</button>
-					{/each}
-				</div>
-			{/if}
-		{/each}
-	</nav>
-
-		<div class="mt-4 border-t border-sidebar-border pt-3">
-			<button
-				class={[
-					"flex h-10 w-full items-center gap-3 rounded-sm px-3 text-sm font-medium text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-sidebar-accent-foreground",
-					collapsed && "justify-center px-0",
-				]}
-				onclick={onToggle}
-				title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
-				aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
-			>
-				{#if collapsed}
-					<PanelLeftOpenIcon class="size-4" />
-				{:else}
-					<PanelLeftCloseIcon class="size-4" />
+				{#if item.children && showExpandedContent}
+					<div
+						class={[
+							"grid will-change-[grid-template-rows,opacity] transition-[grid-template-rows,opacity] duration-200 ease-out",
+							sectionOpen ? "grid-rows-[1fr] opacity-100" : "grid-rows-[0fr] opacity-0",
+						]}
+					>
+						<div class="overflow-hidden">
+							<div class="ml-4 border-l border-sidebar-border py-1 pl-3">
+								{#each item.children as child}
+									{#if child.icon}
+										<SidebarNavButton
+											icon={child.icon}
+											label={child.label}
+											size="child"
+											active={activePage === child.id}
+											onclick={() => onNavigate(child.id)}
+										/>
+									{/if}
+								{/each}
+							</div>
+						</div>
+					</div>
 				{/if}
-				{#if showExpandedContent}
-					<span>Collapse</span>
-				{/if}
-			</button>
-		</div>
+			{/each}
+		</nav>
 	</div>
 </aside>
