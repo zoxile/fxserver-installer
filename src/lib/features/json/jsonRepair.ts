@@ -34,6 +34,7 @@ export function repairJson(input: string): RepairResult | null {
 		[quoteUnquotedObjectKeys, "Quoted unquoted object keys"],
 		[replaceSingleQuotedStrings, "Converted single-quoted strings"],
 		[removeTrailingCommas, "Removed trailing commas"],
+		[closeMissingBrackets, "Added missing closing brackets"],
 	];
 
 	let candidate = input;
@@ -130,7 +131,7 @@ function stripJsonComments(input: string) {
 }
 
 function normalizeSmartQuotes(input: string) {
-	return input.replace(/[“”]/g, '"').replace(/[‘’]/g, "'");
+	return input.replace(/[\u201C\u201D]/g, '"').replace(/[\u2018\u2019]/g, "'");
 }
 
 function quoteUnquotedObjectKeys(input: string) {
@@ -184,4 +185,49 @@ function removeTrailingCommas(input: string) {
 	}
 
 	return output;
+}
+
+function closeMissingBrackets(input: string) {
+	const stack: string[] = [];
+	let inString = false;
+	let quote = "";
+
+	for (let index = 0; index < input.length; index += 1) {
+		const current = input[index];
+
+		if (inString) {
+			if (current === "\\" && input[index + 1]) {
+				index += 1;
+			} else if (current === quote) {
+				inString = false;
+			}
+			continue;
+		}
+
+		if (current === '"' || current === "'") {
+			inString = true;
+			quote = current;
+			continue;
+		}
+
+		if (current === "{") {
+			stack.push("}");
+			continue;
+		}
+
+		if (current === "[") {
+			stack.push("]");
+			continue;
+		}
+
+		if (current === "}" || current === "]") {
+			if (stack.pop() !== current) {
+				return input;
+			}
+		}
+	}
+
+	if (inString || stack.length === 0) return input;
+
+	return `${input}${stack.reverse().join("")}`;
 }
