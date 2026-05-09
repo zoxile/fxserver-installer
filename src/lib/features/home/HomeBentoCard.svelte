@@ -30,7 +30,7 @@
 
 <Card.Root
 	class={[
-		"group relative flex h-full min-h-40 flex-col overflow-hidden rounded-md border-border bg-card shadow-sm transition-[background-color,transform] duration-200 hover:-translate-y-0.5 hover:bg-card/95",
+		"group flex h-full min-h-40 flex-col rounded-md border-border bg-card shadow-sm",
 		size === "hero" && "min-h-80",
 		size === "feature" && "min-h-64",
 		size === "wide" && "min-h-40",
@@ -38,7 +38,6 @@
 		className,
 	]}
 >
-	<div class="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-primary/40 to-transparent opacity-0 transition-opacity duration-200 group-hover:opacity-100"></div>
 	<Card.Header class={["shrink-0 border-b border-border pb-3", size === "compact" ? "space-y-1" : "space-y-2"]}>
 		<div class="flex items-start gap-3">
 			<div class="flex size-9 shrink-0 items-center justify-center rounded-sm bg-muted text-muted-foreground ring-1 ring-border transition-transform duration-200 group-hover:scale-105">

@@ -32,18 +32,13 @@
 					<Card.Description>Detected MariaDB installation and Windows service state.</Card.Description>
 				</div>
 			</div>
-			<span
-				class={[
-					"rounded-sm px-2.5 py-1 text-xs font-semibold",
-					status?.running ? "bg-primary/10 text-primary" : "bg-destructive/10 text-destructive",
-				]}
-			>
+			<span class={["rounded-sm px-2.5 py-1 text-xs font-semibold", status?.running ? "bg-primary/10 text-primary" : "bg-destructive/10 text-destructive"]}>
 				{status?.running ? "Running" : "Stopped"}
 			</span>
 		</div>
 	</Card.Header>
 
-	<Card.Content class="space-y-5">
+	<Card.Content class="flex flex-1 flex-col space-y-5">
 		<div class="grid gap-3 sm:grid-cols-2">
 			<div class="rounded-sm border border-border bg-background p-3">
 				<p class="text-xs text-muted-foreground">Installed</p>
@@ -63,7 +58,7 @@
 			</div>
 		</div>
 
-		<div class="flex flex-wrap gap-2">
+		<div class="mt-auto flex flex-wrap gap-2">
 			<Button variant="outline" onclick={onRefresh} disabled={busy} title="Refresh MariaDB status">
 				<RefreshCwIcon />
 				Refresh
