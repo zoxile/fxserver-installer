@@ -85,7 +85,7 @@
 
 <aside
 	class={[
-		"relative block shrink-0 border-r border-sidebar-border bg-sidebar text-sidebar-foreground transition-[width] duration-300 ease-out will-change-[width]",
+		"relative block shrink-0 border-r border-sidebar-border bg-sidebar/85 pt-9 text-sidebar-foreground backdrop-blur-xl transition-[width] duration-300 ease-out will-change-[width]",
 		effectiveCollapsed ? "w-16 px-2" : "w-64 px-4",
 	]}
 >

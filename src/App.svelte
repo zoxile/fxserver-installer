@@ -38,16 +38,11 @@
 
 <Titlebar />
 
-<main class="dark h-screen overflow-hidden bg-background pt-9 text-foreground">
-	<div class="flex h-[calc(100vh-2.25rem)]">
-		<Sidebar
-			activePage={activePage}
-			collapsed={sidebarCollapsed}
-			onNavigate={navigate}
-			onToggle={() => (sidebarCollapsed = !sidebarCollapsed)}
-		/>
+<main class="dark h-screen overflow-hidden bg-background text-foreground">
+	<div class="flex h-screen">
+		<Sidebar {activePage} collapsed={sidebarCollapsed} onNavigate={navigate} onToggle={() => (sidebarCollapsed = !sidebarCollapsed)} />
 
-		<section class="min-w-0 flex-1 overflow-y-auto scrollbar-hidden">
+		<section class="min-w-0 flex-1 overflow-y-auto pt-9 scrollbar-hidden">
 			<div class="border-b border-border bg-card px-4 py-3 lg:hidden">
 				<div class="flex items-center gap-2 text-sm font-semibold">
 					<DatabaseIcon class="size-4 text-muted-foreground" />
