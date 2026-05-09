@@ -279,7 +279,7 @@
 				<div class="flex items-center justify-between gap-4">
 					<div>
 						<Card.Title>Frame Timeline</Card.Title>
-						<Card.Description>Resource Manager Tick duration per frame. The dashed marker is the 25ms script budget.</Card.Description>
+						<Card.Description>Total measured script time per profiler frame. The dashed marker is the 25ms script budget.</Card.Description>
 					</div>
 					<div class="hidden items-center gap-3 text-xs text-muted-foreground sm:flex">
 						<span class="inline-flex items-center gap-1"><span class="size-2 rounded-full bg-emerald-400"></span> Normal</span>
@@ -299,7 +299,7 @@
 								<div
 									class={["min-w-0 flex-1 rounded-t-[1px]", stateBarClass(frame.state)]}
 									style={`height: ${barWidth(frame.durationMs, Math.max(25, analysis.stats.worstFrameMs))}%`}
-									title={`Frame ${frame.index}: ${formatMs(frame.durationMs)}${frame.topEntry ? ` / top ${frame.topEntry}` : ""}`}
+									title={`Frame ${frame.index}: ${formatMs(frame.durationMs)} total / Resource Manager ${formatMs(frame.resourceManagerMs)}${frame.topEntry ? ` / top ${frame.topEntry}` : ""}`}
 								></div>
 							{/each}
 						</div>
@@ -376,7 +376,7 @@
 												{formatMs(resource.worstMs)} worst
 											{/if}
 										</span>
-										<span>{formatNumber(resource.calls)} calls</span>
+										<span>{formatNumber(resource.calls)} frames</span>
 									</div>
 								</div>
 							{/each}
@@ -419,7 +419,7 @@
 								<th class="py-3 pr-4 font-medium">% Scripts</th>
 								<th class="py-3 pr-4 font-medium">Avg/Call</th>
 								<th class="py-3 pr-4 font-medium">Worst</th>
-								<th class="py-3 pr-4 font-medium">Calls</th>
+								<th class="py-3 pr-4 font-medium">Frames</th>
 								<th class="py-3 pr-4 font-medium">Weight</th>
 							</tr>
 						</thead>
