@@ -6,6 +6,7 @@
 		label: string;
 		active?: boolean;
 		collapsed?: boolean;
+		labelVisible?: boolean;
 		size?: "default" | "child";
 		onclick: () => void;
 		expanded?: boolean;
@@ -16,6 +17,7 @@
 		label,
 		active = false,
 		collapsed = false,
+		labelVisible = !collapsed,
 		size = "default",
 		onclick,
 		expanded,
@@ -24,9 +26,9 @@
 
 <button
 	class={[
-		"flex w-full items-center gap-3 rounded-sm text-left font-medium transition-colors",
+		"group flex w-full items-center rounded-sm text-left font-medium leading-none transition-[background-color,color,padding,gap] duration-300 ease-out",
 		size === "default" ? "h-10 px-3 text-sm" : "h-8 px-2 text-xs",
-		collapsed && "justify-center px-0",
+		collapsed ? "justify-center gap-0 px-0" : "justify-start gap-3",
 		active
 			? size === "default"
 				? "bg-sidebar-primary text-sidebar-primary-foreground shadow-sm"
@@ -38,8 +40,15 @@
 	aria-expanded={expanded}
 	title={label}
 >
-	<Icon class={size === "default" ? "size-4" : "size-3.5"} />
-	{#if !collapsed}
-		<span class="truncate">{label}</span>
-	{/if}
+	<span class={["flex shrink-0 items-center justify-center leading-none transition-transform duration-300 ease-out", size === "default" ? "size-4" : "size-3.5"]}>
+		<Icon class={size === "default" ? "size-4" : "size-3.5"} />
+	</span>
+	<span
+		class={[
+			"block h-4 min-w-0 overflow-hidden truncate leading-4 transition-[max-width,opacity,transform] duration-200 ease-out",
+			labelVisible ? "max-w-40 translate-x-0 opacity-100" : "max-w-0 -translate-x-1 opacity-0",
+		]}
+	>
+		{label}
+	</span>
 </button>

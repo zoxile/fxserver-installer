@@ -19,6 +19,9 @@
 	let isNarrow = $state(false);
 	let expandTimer: ReturnType<typeof setTimeout> | null = null;
 	let effectiveCollapsed = $derived(collapsed || isNarrow);
+	let activeParentId = $derived(
+		navigation.find((item) => item.children?.some((child) => child.id === activePage))?.id,
+	);
 
 	onMount(() => {
 		const media = window.matchMedia("(max-width: 1023px)");
@@ -55,13 +58,11 @@
 	});
 
 	$effect(() => {
-		const parent = navigation.find((item) => item.children?.some((child) => child.id === activePage));
-
-		if (!parent || effectiveCollapsed) return;
-		if (openSections.has(parent.id)) return;
+		if (!activeParentId || effectiveCollapsed) return;
+		if (openSections.has(activeParentId)) return;
 
 		const next = new Set(openSections);
-		next.add(parent.id);
+		next.add(activeParentId);
 		openSections = next;
 	});
 
@@ -88,39 +89,45 @@
 		effectiveCollapsed ? "w-16 px-2" : "w-64 px-4",
 	]}
 >
-	<button
-		class="absolute top-1/2 -right-3 z-10 flex h-12 w-6 -translate-y-1/2 items-center justify-center rounded-r-md bg-sidebar text-muted-foreground shadow-lg shadow-background/30 transition-colors hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
-		onclick={onToggle}
-		title={effectiveCollapsed ? "Expand sidebar" : "Collapse sidebar"}
-		aria-label={effectiveCollapsed ? "Expand sidebar" : "Collapse sidebar"}
-	>
-		{#if effectiveCollapsed}
-			<PanelLeftOpenIcon class="size-3.5" />
-		{:else}
-			<PanelLeftCloseIcon class="size-3.5" />
-		{/if}
-	</button>
+	{#if !isNarrow}
+		<button
+			class="absolute top-1/2 -right-3 z-10 flex h-12 w-6 -translate-y-1/2 items-center justify-center rounded-r-md border-0 bg-sidebar text-muted-foreground shadow-none outline-none ring-0 transition-colors hover:bg-sidebar-accent hover:text-sidebar-accent-foreground focus-visible:ring-1 focus-visible:ring-ring"
+			onclick={onToggle}
+			title={effectiveCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+			aria-label={effectiveCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+		>
+			{#if effectiveCollapsed}
+				<PanelLeftOpenIcon class="size-3.5" />
+			{:else}
+				<PanelLeftCloseIcon class="size-3.5" />
+			{/if}
+		</button>
+	{/if}
 
 	<div class="flex h-[calc(100vh-2.25rem)] flex-col overflow-hidden py-5">
-		<div class={["mb-6 min-h-12", effectiveCollapsed ? "px-0" : "px-2"]}>
-			{#if showExpandedContent}
-				<div class="min-w-0">
-					<p class="text-xs font-semibold tracking-wide text-muted-foreground uppercase">FXServer Installer</p>
-					<h2 class="mt-2 text-lg font-semibold tracking-normal">Setup Workspace</h2>
-				</div>
-			{/if}
+		<div class={["relative mb-6 h-14 shrink-0 overflow-hidden", effectiveCollapsed ? "px-0" : "px-2"]}>
+			<div
+				class={[
+					"absolute inset-x-2 top-0 min-w-0 transition-[opacity,transform] duration-200 ease-out",
+					showExpandedContent ? "translate-y-0 opacity-100" : "-translate-y-1 opacity-0",
+				]}
+			>
+				<p class="text-xs font-semibold tracking-wide text-muted-foreground uppercase">FXServer Installer</p>
+				<h2 class="mt-1 text-lg font-semibold leading-7 tracking-normal">Setup Workspace</h2>
+			</div>
 		</div>
 
 		<nav class="flex-1 space-y-1" aria-label="Workspace navigation">
 			{#each navigation as item}
 				{@const parentIsDirectPage = !item.children}
 				{@const sectionActive = isSectionActive(item)}
-				{@const sectionOpen = openSections.has(item.id)}
+				{@const sectionOpen = openSections.has(item.id) || activeParentId === item.id}
 				<SidebarNavButton
 					icon={item.icon}
 					label={item.label}
 					active={sectionActive}
-					collapsed={!showExpandedContent}
+					collapsed={effectiveCollapsed}
+					labelVisible={showExpandedContent}
 					expanded={item.children ? sectionOpen : undefined}
 					onclick={() => (parentIsDirectPage ? onNavigate(item.id as PageId) : toggleSection(item.id))}
 				/>
@@ -141,6 +148,8 @@
 											label={child.label}
 											size="child"
 											active={activePage === child.id}
+											collapsed={false}
+											labelVisible={true}
 											onclick={() => onNavigate(child.id)}
 										/>
 									{/if}

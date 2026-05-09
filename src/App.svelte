@@ -37,8 +37,8 @@
 
 <Titlebar />
 
-<main class="dark min-h-screen bg-background text-foreground">
-	<div class="flex min-h-[calc(100vh-2.25rem)] pt-9">
+<main class="dark h-screen overflow-hidden bg-background pt-9 text-foreground">
+	<div class="flex h-[calc(100vh-2.25rem)]">
 		<Sidebar
 			activePage={activePage}
 			collapsed={sidebarCollapsed}
@@ -46,7 +46,7 @@
 			onToggle={() => (sidebarCollapsed = !sidebarCollapsed)}
 		/>
 
-		<section class="h-screen min-w-0 flex-1 overflow-y-auto pt-9 scrollbar-hidden">
+		<section class="min-w-0 flex-1 overflow-y-auto scrollbar-hidden">
 			<div class="border-b border-border bg-card px-4 py-3 lg:hidden">
 				<div class="flex items-center gap-2 text-sm font-semibold">
 					<DatabaseIcon class="size-4 text-muted-foreground" />
@@ -54,7 +54,7 @@
 				</div>
 			</div>
 
-			<div class="mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:px-8">
+			<div class="mx-auto max-w-7xl px-4 pt-6 pb-12 sm:px-6 lg:px-8">
 				{#if activePage === "home"}
 					<HomePage onNavigate={navigate} />
 				{:else if activePage === "mariadb"}
