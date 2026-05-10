@@ -32,7 +32,7 @@
 
 	const sampleNames = ["adder", "police", "s_m_y_cop_01", "weapon_pistol", "prop_roadcone02a", "WEAPON_CARBINERIFLE"].join("\n");
 	const sampleHashes = "0xB779A091\n0x79FBB0C5\n453432689\n-2084633992";
-	const defaultManifestUrl = "https://github.com/zoxile/fxserver-installer/releases/download/jooat-db/manifest.json";
+	const defaultManifestUrl = "https://raw.githubusercontent.com/zoxile/fxserver-installer/jooat-db/manifest.json";
 	const defaultDictionary = [
 		"adder",
 		"police",
