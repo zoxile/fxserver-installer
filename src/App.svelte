@@ -8,9 +8,13 @@
 	import MariaDBPanel from "$lib/features/mariadb/MariaDBPanel.svelte";
 	import PlaceholderPage from "$lib/features/placeholder/PlaceholderPage.svelte";
 	import ProfilerPage from "$lib/features/profiler/ProfilerPage.svelte";
+	import ArrowDownIcon from "@lucide/svelte/icons/arrow-down";
+	import ArrowUpIcon from "@lucide/svelte/icons/arrow-up";
 	import type { PageId } from "$lib/navigation";
 	import { getPageLabel } from "$lib/navigation";
 
+	let scrollContainer: HTMLElement;
+	let isNearBottom = $state(false);
 	let sidebarCollapsed = $state(false);
 	let activePage = $state<PageId>("home");
 	let navigationFrame = 0;
@@ -34,6 +38,23 @@
 			navigationFrame = 0;
 		});
 	}
+
+	function handleScroll() {
+		if (!scrollContainer) return;
+
+		const threshold = 120;
+
+		isNearBottom = scrollContainer.scrollHeight - scrollContainer.scrollTop - scrollContainer.clientHeight < threshold;
+	}
+
+	function toggleScroll() {
+		if (!scrollContainer) return;
+
+		scrollContainer.scrollTo({
+			top: isNearBottom ? 0 : scrollContainer.scrollHeight,
+			behavior: "smooth",
+		});
+	}
 </script>
 
 <Titlebar />
@@ -42,7 +63,7 @@
 	<div class="flex h-screen">
 		<Sidebar {activePage} collapsed={sidebarCollapsed} onNavigate={navigate} onToggle={() => (sidebarCollapsed = !sidebarCollapsed)} />
 
-		<section class="min-w-0 flex-1 overflow-y-auto pt-9 scrollbar-hidden">
+		<section bind:this={scrollContainer} onscroll={handleScroll} class="min-w-0 flex-1 overflow-y-auto pt-9 scrollbar-hidden">
 			<div class="border-b border-border bg-card px-4 py-3 lg:hidden">
 				<div class="flex items-center gap-2 text-sm font-semibold">
 					<DatabaseIcon class="size-4 text-muted-foreground" />
@@ -67,4 +88,15 @@
 			</div>
 		</section>
 	</div>
+	<button
+		onclick={toggleScroll}
+		class="fixed bottom-12 right-12 z-50 flex size-10 items-center justify-center rounded-sm border border-border backdrop-blur-sm text-foreground shadow-sm transition-all hover:bg-accent"
+		title={isNearBottom ? "Scroll to top" : "Scroll to bottom"}
+	>
+		{#if isNearBottom}
+			<ArrowUpIcon class="size-4" />
+		{:else}
+			<ArrowDownIcon class="size-4" />
+		{/if}
+	</button>
 </main>
