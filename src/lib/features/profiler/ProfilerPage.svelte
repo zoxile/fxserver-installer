@@ -7,6 +7,7 @@
 	import TerminalIcon from "@lucide/svelte/icons/terminal";
 	import UploadCloudIcon from "@lucide/svelte/icons/upload-cloud";
 	import * as Card from "$lib/components/ui/card/index.js";
+	import { Progress } from "$lib/components/ui/progress/index.js";
 	import { analyzeProfilerJson, type ProfilerAnalysis, type ResourceState } from "./profilerAnalyzer";
 
 	let analysis = $state<ProfilerAnalysis | null>(null);
@@ -44,7 +45,7 @@
 	}
 
 	function formatMs(value: number) {
-		return `${value.toLocaleString(undefined, { maximumFractionDigits: value >= 100 ? 0 : 2 })} ms`;
+		return `${value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ms`;
 	}
 
 	function formatNumber(value: number) {
@@ -96,9 +97,7 @@
 		<div>
 			<p class="text-xs font-semibold tracking-wide text-muted-foreground uppercase">Tools</p>
 			<h1 class="mt-2 text-3xl font-semibold tracking-normal text-foreground">Profiler Analyzer</h1>
-			<p class="mt-2 max-w-2xl text-sm text-muted-foreground">
-				Drop in a FiveM profiler JSON export to rank expensive resources, hitch presence, worst spans, and script-time share.
-			</p>
+			<p class="mt-2 max-w-2xl text-sm text-muted-foreground">Drop in a FiveM profiler JSON export to rank expensive resources, hitch presence, worst spans, and script-time share.</p>
 		</div>
 		<div class="inline-flex items-center gap-2 rounded-sm border border-border bg-card px-3 py-2 text-xs text-muted-foreground">
 			<GaugeIcon class="size-3.5" />
@@ -108,7 +107,9 @@
 
 	<div class="grid gap-4 xl:grid-cols-12">
 		<Card.Root class="group relative overflow-hidden rounded-sm border-border bg-card shadow-sm transition-transform duration-300 hover:-translate-y-0.5 xl:col-span-7">
-			<div class="pointer-events-none absolute inset-x-4 top-0 h-px bg-gradient-to-r from-transparent via-primary/70 to-transparent opacity-0 transition-opacity duration-300 group-hover:opacity-100"></div>
+			<div
+				class="pointer-events-none absolute inset-x-4 top-0 h-px bg-linear-to-r from-transparent via-primary/70 to-transparent opacity-0 transition-opacity duration-300 group-hover:opacity-100"
+			></div>
 			<Card.Header class="border-b border-border pb-4">
 				<div class="flex items-start gap-3">
 					<div class="flex size-9 shrink-0 items-center justify-center rounded-sm bg-muted text-muted-foreground ring-1 ring-border">
@@ -155,7 +156,9 @@
 		</Card.Root>
 
 		<Card.Root class="group relative overflow-hidden rounded-sm border-border bg-card shadow-sm transition-transform duration-300 hover:-translate-y-0.5 xl:col-span-5">
-			<div class="pointer-events-none absolute inset-x-4 top-0 h-px bg-gradient-to-r from-transparent via-primary/70 to-transparent opacity-0 transition-opacity duration-300 group-hover:opacity-100"></div>
+			<div
+				class="pointer-events-none absolute inset-x-4 top-0 h-px bg-linear-to-r from-transparent via-primary/70 to-transparent opacity-0 transition-opacity duration-300 group-hover:opacity-100"
+			></div>
 			<Card.Header class="border-b border-border pb-4">
 				<Card.Title>Upload Profile</Card.Title>
 				<Card.Description>Use the `.json` file created by `profiler saveJSON`.</Card.Description>
@@ -178,12 +181,7 @@
 						<p class="text-sm font-medium text-foreground">Drop profiler.json here</p>
 						<p class="mt-1 text-xs text-muted-foreground">or click to browse</p>
 					</div>
-					<input
-						type="file"
-						accept=".json,application/json"
-						class="sr-only"
-						onchange={(event) => void handleFile(event.currentTarget.files?.[0])}
-					/>
+					<input type="file" accept=".json,application/json" class="sr-only" onchange={(event) => void handleFile(event.currentTarget.files?.[0])} />
 				</label>
 
 				{#if fileName}
@@ -201,16 +199,11 @@
 
 	{#if analysis}
 		<div class="grid gap-4 md:grid-cols-2 xl:grid-cols-6">
-			{#each [
-				{ label: "Recording", value: formatMs(analysis.stats.recordingMs) },
-				{ label: "Avg script / frame", value: formatMs(analysis.stats.averageScriptMsPerFrame) },
-				{ label: "Resources", value: formatNumber(analysis.stats.resourceCount) },
-				{ label: "Profiler entries", value: formatNumber(analysis.stats.entryCount) },
-				{ label: "Heavy frames", value: `${formatPercent(analysis.stats.hitchPercent)} (${formatNumber(analysis.stats.hitchCount)})` },
-				{ label: "Resource manager", value: `${formatMs(analysis.stats.resourceManagerTotalMs)} / ${formatNumber(analysis.stats.resourceManagerCalls)}` },
-			] as stat}
+			{#each [{ label: "Recording", value: formatMs(analysis.stats.recordingMs) }, { label: "Avg script / frame", value: formatMs(analysis.stats.averageScriptMsPerFrame) }, { label: "Hitches", value: `${formatNumber(analysis.stats.hitchCount)} / ${formatNumber(analysis.stats.frameCount)} frames >25ms` }, { label: "Heavy ticks", value: `${formatNumber(analysis.stats.heavyTickCount)} / ${formatNumber(analysis.stats.frameCount)} ticks >25ms scripts` }, { label: "Profiler entries", value: formatNumber(analysis.stats.entryCount) }, { label: "Resource manager", value: `${formatMs(analysis.stats.resourceManagerTotalMs)} / ${formatNumber(analysis.stats.resourceManagerCalls)}` }] as stat}
 				<Card.Root class="group relative overflow-hidden rounded-sm border-border bg-card shadow-sm transition-transform duration-300 hover:-translate-y-0.5">
-					<div class="pointer-events-none absolute inset-x-4 top-0 h-px bg-gradient-to-r from-transparent via-primary/70 to-transparent opacity-0 transition-opacity duration-300 group-hover:opacity-100"></div>
+					<div
+						class="pointer-events-none absolute inset-x-4 top-0 h-px bg-linear-to-r from-transparent via-primary/70 to-transparent opacity-0 transition-opacity duration-300 group-hover:opacity-100"
+					></div>
 					<Card.Content class="p-4">
 						<p class="text-xs text-muted-foreground">{stat.label}</p>
 						<p class="mt-2 truncate text-xl font-semibold text-foreground">{stat.value}</p>
@@ -221,7 +214,9 @@
 
 		<div class="grid gap-4 xl:grid-cols-12">
 			<Card.Root class="group relative overflow-hidden rounded-sm border-border bg-card shadow-sm transition-transform duration-300 hover:-translate-y-0.5 xl:col-span-7">
-				<div class="pointer-events-none absolute inset-x-4 top-0 h-px bg-gradient-to-r from-transparent via-primary/70 to-transparent opacity-0 transition-opacity duration-300 group-hover:opacity-100"></div>
+				<div
+					class="pointer-events-none absolute inset-x-4 top-0 h-px bg-linear-to-r from-transparent via-primary/70 to-transparent opacity-0 transition-opacity duration-300 group-hover:opacity-100"
+				></div>
 				<Card.Header class="border-b border-border pb-4">
 					<div class="flex items-center gap-3">
 						<div class="flex size-9 shrink-0 items-center justify-center rounded-sm bg-muted text-muted-foreground ring-1 ring-border">
@@ -235,25 +230,26 @@
 				</Card.Header>
 				<Card.Content class="space-y-3">
 					{#each analysis.graph as resource}
-						<div class="grid gap-2 sm:grid-cols-[minmax(0,12rem)_1fr_auto] sm:items-center">
+						<div class="grid gap-2 sm:grid-cols-[minmax(0,12rem)_minmax(0,1fr)_5rem] sm:items-center">
 							<div class="min-w-0">
 								<p class="truncate text-sm font-medium text-foreground">{resource.name}</p>
 								<p class="text-xs text-muted-foreground">{stateLabels[resource.state]} / {resource.kind}</p>
 							</div>
-							<div class="h-3 overflow-hidden rounded-sm bg-muted">
-								<div
-									class={["h-full rounded-sm", stateBarClass(resource.state)]}
-									style={`width: ${barWidth(resource.totalMs, analysis.graph[0]?.totalMs ?? 0)}%`}
-								></div>
-							</div>
-							<p class="text-right text-xs text-muted-foreground">{formatMs(resource.totalMs)}</p>
+
+							<Progress value={barWidth(resource.totalMs, analysis.graph[0]?.totalMs ?? 0)} class="h-2 rounded-xs" indicatorClass={stateBarClass(resource.state)} />
+
+							<p class="w-20 text-right text-xs text-muted-foreground">
+								{formatMs(resource.totalMs)}
+							</p>
 						</div>
 					{/each}
 				</Card.Content>
 			</Card.Root>
 
 			<Card.Root class="group relative overflow-hidden rounded-sm border-border bg-card shadow-sm transition-transform duration-300 hover:-translate-y-0.5 xl:col-span-5">
-				<div class="pointer-events-none absolute inset-x-4 top-0 h-px bg-gradient-to-r from-transparent via-primary/70 to-transparent opacity-0 transition-opacity duration-300 group-hover:opacity-100"></div>
+				<div
+					class="pointer-events-none absolute inset-x-4 top-0 h-px bg-linear-to-r from-transparent via-primary/70 to-transparent opacity-0 transition-opacity duration-300 group-hover:opacity-100"
+				></div>
 				<Card.Header class="border-b border-border pb-4">
 					<div class="flex items-center gap-3">
 						<div class="flex size-9 shrink-0 items-center justify-center rounded-sm bg-muted text-muted-foreground ring-1 ring-border">
@@ -274,7 +270,9 @@
 		</div>
 
 		<Card.Root class="group relative overflow-hidden rounded-sm border-border bg-card shadow-sm transition-transform duration-300 hover:-translate-y-0.5">
-			<div class="pointer-events-none absolute inset-x-4 top-0 h-px bg-gradient-to-r from-transparent via-primary/70 to-transparent opacity-0 transition-opacity duration-300 group-hover:opacity-100"></div>
+			<div
+				class="pointer-events-none absolute inset-x-4 top-0 h-px bg-linear-to-r from-transparent via-primary/70 to-transparent opacity-0 transition-opacity duration-300 group-hover:opacity-100"
+			></div>
 			<Card.Header class="border-b border-border pb-4">
 				<div class="flex items-center justify-between gap-4">
 					<div>
@@ -290,51 +288,38 @@
 			</Card.Header>
 			<Card.Content>
 				{#if analysis.frameTimeline.length}
-					<div class="relative h-52 overflow-hidden rounded-sm border border-border bg-background/70 px-3 pt-6 pb-8">
-						<div class="absolute right-3 left-3 border-t border-dashed border-amber-400/50" style={`bottom: ${Math.min(86, barWidth(25, Math.max(25, analysis.stats.worstFrameMs)))}%`}>
-							<span class="absolute -top-5 left-0 text-[10px] text-amber-200">25ms script budget</span>
+					<div class="space-y-3 rounded-sm border border-border bg-background/70 p-3">
+						<div class="flex items-center justify-between gap-3 text-xs text-muted-foreground">
+							<span>25ms script budget</span>
+							<span>worst {formatMs(analysis.stats.worstFrameMs)}</span>
 						</div>
-						<div class="flex h-full items-end gap-px">
+						<div class="max-h-72 space-y-3 overflow-y-auto pr-1">
 							{#each analysis.frameTimeline as frame}
-								<div
-									class={["min-w-0 flex-1 rounded-t-[1px]", stateBarClass(frame.state)]}
-									style={`height: ${barWidth(frame.durationMs, Math.max(25, analysis.stats.worstFrameMs))}%`}
-									title={`Frame ${frame.index}: ${formatMs(frame.durationMs)} total / Resource Manager ${formatMs(frame.resourceManagerMs)}${frame.topEntry ? ` / top ${frame.topEntry}` : ""}`}
-								></div>
+								<div class="grid gap-2 sm:grid-cols-[5rem_minmax(0,1fr)_7rem] sm:items-center">
+									<div class="text-xs text-muted-foreground">Frame {frame.index}</div>
+									<div class="min-w-0 space-y-1.5">
+										<Progress value={barWidth(frame.durationMs, Math.max(25, analysis.stats.worstFrameMs))} class="h-2 rounded-xs" indicatorClass={stateBarClass(frame.state)} />
+										<p class="truncate text-[11px] text-muted-foreground">
+											{frame.topEntry ? `top ${frame.topEntry}` : "No dominant entry"} / Resource Manager {formatMs(frame.resourceManagerMs)}
+										</p>
+									</div>
+									<p class={["text-right text-xs", stateTextClass(frame.state)]}>{formatMs(frame.durationMs)}</p>
+								</div>
 							{/each}
 						</div>
 					</div>
 				{:else}
-					<div class="rounded-sm border border-dashed border-border bg-background/60 p-4 text-sm text-muted-foreground">
-						No Resource Manager Tick frames were found in this profiler export.
-					</div>
+					<div class="rounded-sm border border-dashed border-border bg-background/60 p-4 text-sm text-muted-foreground">No Resource Manager Tick frames were found in this profiler export.</div>
 				{/if}
 			</Card.Content>
 		</Card.Root>
 
 		<div class="grid gap-4 xl:grid-cols-3">
-			{#each [
-				{
-					title: "Most Total CPU Time",
-					description: "Top 20 entries by total measured time.",
-					resources: analysis.topTotal,
-					metric: "total",
-				},
-				{
-					title: "Worst Single Tick",
-					description: "Top 20 by worst single frame, tick, thread, event, or ref span.",
-					resources: analysis.topWorst,
-					metric: "worst",
-				},
-				{
-					title: "Present During Hitches",
-					description: "Entries active during frames over the 25ms budget.",
-					resources: analysis.topHitches,
-					metric: "hitch",
-				},
-			] as ranking}
+			{#each [{ title: "Most Total CPU Time", description: "Top 20 entries by total measured time.", resources: analysis.topTotal, metric: "total" }, { title: "Worst Single Tick", description: "Top 20 by worst single frame, tick, thread, event, or ref span.", resources: analysis.topWorst, metric: "worst" }, { title: "Present During Hitches", description: "Entries active during frames over the 25ms budget.", resources: analysis.topHitches, metric: "hitch" }] as ranking}
 				<Card.Root class="group relative overflow-hidden rounded-sm border-border bg-card shadow-sm transition-transform duration-300 hover:-translate-y-0.5">
-					<div class="pointer-events-none absolute inset-x-4 top-0 h-px bg-gradient-to-r from-transparent via-primary/70 to-transparent opacity-0 transition-opacity duration-300 group-hover:opacity-100"></div>
+					<div
+						class="pointer-events-none absolute inset-x-4 top-0 h-px bg-linear-to-r from-transparent via-primary/70 to-transparent opacity-0 transition-opacity duration-300 group-hover:opacity-100"
+					></div>
 					<Card.Header class="border-b border-border pb-4">
 						<Card.Title>{ranking.title}</Card.Title>
 						<Card.Description>{ranking.description}</Card.Description>
@@ -361,12 +346,7 @@
 										</span>
 									</div>
 									<div class="mt-3 flex items-center justify-between gap-3 text-xs text-muted-foreground">
-										<div class="h-1.5 min-w-0 flex-1 overflow-hidden rounded-sm bg-muted">
-											<div
-												class={["h-full rounded-sm", stateBarClass(resource.state)]}
-												style={`width: ${barWidth(resource.totalMs, ranking.resources[0]?.totalMs ?? 0)}%`}
-											></div>
-										</div>
+										<Progress value={barWidth(resource.totalMs, ranking.resources[0]?.totalMs ?? 0)} class="h-1.5 min-w-0 flex-1 rounded-xs" indicatorClass={stateBarClass(resource.state)} />
 										<span>
 											{#if ranking.metric === "total"}
 												{formatMs(resource.totalMs)}
@@ -381,9 +361,7 @@
 								</div>
 							{/each}
 						{:else}
-							<div class="rounded-sm border border-dashed border-border bg-background/60 p-4 text-sm text-muted-foreground">
-								No resources matched this ranking in the uploaded profile.
-							</div>
+							<div class="rounded-sm border border-dashed border-border bg-background/60 p-4 text-sm text-muted-foreground">No resources matched this ranking in the uploaded profile.</div>
 						{/if}
 					</Card.Content>
 				</Card.Root>
@@ -391,7 +369,9 @@
 		</div>
 
 		<Card.Root class="group relative overflow-hidden rounded-sm border-border bg-card shadow-sm transition-transform duration-300 hover:-translate-y-0.5">
-			<div class="pointer-events-none absolute inset-x-4 top-0 h-px bg-gradient-to-r from-transparent via-primary/70 to-transparent opacity-0 transition-opacity duration-300 group-hover:opacity-100"></div>
+			<div
+				class="pointer-events-none absolute inset-x-4 top-0 h-px bg-linear-to-r from-transparent via-primary/70 to-transparent opacity-0 transition-opacity duration-300 group-hover:opacity-100"
+			></div>
 			<Card.Header class="border-b border-border pb-4">
 				<div class="flex items-center gap-3">
 					<div class="flex size-9 shrink-0 items-center justify-center rounded-sm bg-muted text-muted-foreground ring-1 ring-border">
@@ -400,16 +380,16 @@
 					<div>
 						<Card.Title>Complete Profiler Entry List</Card.Title>
 						<Card.Description>
-							{formatNumber(analysis.stats.entryCount)} entries across {formatNumber(analysis.stats.resourceCount)} resources.
-							Trace includes {formatNumber(analysis.stats.totalEvents)} events, {formatNumber(analysis.stats.browserFrames)} browser frames,
-							and {formatNumber(analysis.stats.screenshots)} screenshots.
+							{formatNumber(analysis.stats.entryCount)} entries across {formatNumber(analysis.stats.resourceCount)} resources. Trace includes {formatNumber(analysis.stats.totalEvents)} events, {formatNumber(
+								analysis.stats.browserFrames,
+							)} browser frames, and {formatNumber(analysis.stats.screenshots)} screenshots.
 						</Card.Description>
 					</div>
 				</div>
 			</Card.Header>
 			<Card.Content>
 				<div class="overflow-x-auto">
-					<table class="w-full min-w-[960px] text-left text-sm">
+					<table class="w-full min-w-240 text-left text-sm">
 						<thead class="text-xs text-muted-foreground">
 							<tr class="border-b border-border">
 								<th class="py-3 pr-4 font-medium">Entry</th>
@@ -442,12 +422,7 @@
 									<td class={["py-3 pr-4", stateTextClass(resource.state)]}>{formatMs(resource.worstMs)}</td>
 									<td class="py-3 pr-4 text-muted-foreground">{formatNumber(resource.calls)}</td>
 									<td class="py-3 pr-4">
-										<div class="h-1.5 w-24 overflow-hidden rounded-sm bg-muted">
-											<div
-												class={["h-full rounded-sm", stateBarClass(resource.state)]}
-												style={`width: ${barWidth(resource.totalMs, analysis.resources[0]?.totalMs ?? 0)}%`}
-											></div>
-										</div>
+										<Progress value={barWidth(resource.totalMs, analysis.resources[0]?.totalMs ?? 0)} class="h-1.5 w-24 rounded-xs" indicatorClass={stateBarClass(resource.state)} />
 									</td>
 								</tr>
 							{/each}
@@ -458,7 +433,9 @@
 		</Card.Root>
 	{:else}
 		<Card.Root class="group relative overflow-hidden rounded-sm border-dashed border-border bg-card/80 shadow-sm transition-transform duration-300 hover:-translate-y-0.5">
-			<div class="pointer-events-none absolute inset-x-4 top-0 h-px bg-gradient-to-r from-transparent via-primary/70 to-transparent opacity-0 transition-opacity duration-300 group-hover:opacity-100"></div>
+			<div
+				class="pointer-events-none absolute inset-x-4 top-0 h-px bg-linear-to-r from-transparent via-primary/70 to-transparent opacity-0 transition-opacity duration-300 group-hover:opacity-100"
+			></div>
 			<Card.Content class="flex min-h-44 flex-col items-center justify-center gap-3 text-center">
 				<FileJsonIcon class="size-8 text-muted-foreground" />
 				<div>

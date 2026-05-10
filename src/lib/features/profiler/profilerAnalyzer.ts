@@ -44,6 +44,8 @@ export type ProfilerStats = {
 	averageScriptMsPerFrame: number;
 	hitchCount: number;
 	hitchPercent: number;
+	heavyTickCount: number;
+	heavyTickPercent: number;
 	worstHitchMs: number;
 	averageHitchMs: number;
 	worstFrameMs: number;
@@ -120,12 +122,10 @@ export function analyzeProfilerJson(value: unknown): ProfilerAnalysis {
 	const relevantSpans = spans.filter((span) => span.kind && span.durationMs > 0);
 	const resourceManagerSpans = relevantSpans.filter((span) => span.kind === "frame").sort((left, right) => left.start - right.start);
 	const frameBuckets = buildFrameBuckets(relevantSpans, resourceManagerSpans, firstTs, lastTs);
-	const hitches = frameBuckets.filter((frame) => frame.durationMs >= scriptBudgetMs);
+	const hitches = frameBuckets.filter(isHeavyFrame);
 	const entries = aggregateEntries(relevantSpans, frameBuckets);
 	const totalScriptMs = entries.reduce((sum, entry) => sum + entry.totalMs, 0);
-	const profiles = entries
-		.map((entry) => toProfile(entry, totalScriptMs))
-		.sort((left, right) => right.totalMs - left.totalMs);
+	const profiles = entries.map((entry) => toProfile(entry, totalScriptMs)).sort((left, right) => right.totalMs - left.totalMs);
 	const resourceNames = new Set(profiles.map((profile) => profile.resource).filter((resource): resource is string => Boolean(resource)));
 	const frameTimeline = buildFrameTimeline(frameBuckets, firstTs ?? 0);
 	const resourceManager = profiles.find((profile) => profile.name === "Resource Manager Tick");
@@ -142,6 +142,8 @@ export function analyzeProfilerJson(value: unknown): ProfilerAnalysis {
 		averageScriptMsPerFrame: frameCount ? totalScriptMs / frameCount : 0,
 		hitchCount: hitches.length,
 		hitchPercent: frameCount ? (hitches.length / frameCount) * 100 : 0,
+		heavyTickCount: hitches.length,
+		heavyTickPercent: frameCount ? (hitches.length / frameCount) * 100 : 0,
 		worstHitchMs: hitches.reduce((max, hitch) => Math.max(max, hitch.durationMs), 0),
 		averageHitchMs: hitches.length ? hitches.reduce((sum, hitch) => sum + hitch.durationMs, 0) / hitches.length : 0,
 		worstFrameMs: frameBuckets.reduce((max, frame) => Math.max(max, frame.durationMs), 0),
@@ -161,7 +163,7 @@ export function analyzeProfilerJson(value: unknown): ProfilerAnalysis {
 			.filter((profile) => profile.hitchHits > 0)
 			.sort((left, right) => right.hitchHits - left.hitchHits || right.hitchMs - left.hitchMs || right.worstMs - left.worstMs)
 			.slice(0, topLimit),
-		graph: profiles.slice(0, 10),
+		graph: profiles.slice(0, topLimit),
 		frameTimeline,
 		tips: buildTips(profiles, stats),
 	};
@@ -293,7 +295,7 @@ function aggregateEntries(spans: CompletedSpan[], frameBuckets: FrameBucket[]) {
 			entry.calls += 1;
 			entry.worstMs = Math.max(entry.worstMs, frameTotal);
 
-			if (frame.durationMs >= scriptBudgetMs) {
+			if (isHeavyFrame(frame)) {
 				entry.hitchHits += 1;
 				entry.hitchMs += frameTotal;
 			}
@@ -339,9 +341,7 @@ function buildFrameBucket(index: number, start: number, end: number, spans: Comp
 	}
 
 	const durationMs = [...entryTotals.values()].reduce((sum, total) => sum + total, 0);
-	const topEntry = [...entryTotals.entries()]
-		.filter(([name]) => name !== "Resource Manager Tick")
-		.sort((left, right) => right[1] - left[1])[0]?.[0];
+	const topEntry = [...entryTotals.entries()].filter(([name]) => name !== "Resource Manager Tick").sort((left, right) => right[1] - left[1])[0]?.[0];
 
 	return {
 		index,
@@ -381,7 +381,7 @@ function buildFrameTimeline(frames: FrameBucket[], firstTs: number) {
 		startMs: (frame.start - firstTs) / 1000,
 		durationMs: frame.durationMs,
 		resourceManagerMs: frame.resourceManagerMs,
-		state: getState({ averageMs: frame.durationMs, worstMs: frame.durationMs, percentage: 0, hitchHits: frame.durationMs >= scriptBudgetMs ? 1 : 0 }),
+		state: getState({ averageMs: frame.durationMs, worstMs: frame.durationMs, percentage: 0, hitchHits: isHeavyFrame(frame) ? 1 : 0 }),
 		entryCount: frame.entryTotals.size,
 		topEntry: frame.topEntry,
 	}));
@@ -389,6 +389,10 @@ function buildFrameTimeline(frames: FrameBucket[], firstTs: number) {
 
 function countEvents(events: TraceEvent[], name: string) {
 	return events.filter((event) => event.name === name && event.ph === "B").length;
+}
+
+function isHeavyFrame(frame: Pick<FrameBucket, "durationMs">) {
+	return frame.durationMs > scriptBudgetMs;
 }
 
 function getState(resource: { averageMs: number; worstMs: number; percentage: number; hitchHits: number }): ResourceState {
@@ -402,38 +406,45 @@ function getState(resource: { averageMs: number; worstMs: number; percentage: nu
 function buildTips(resources: ResourceProfile[], stats: ProfilerStats) {
 	const tips: string[] = [];
 	const topTotal = resources[0];
-	const topWorst = [...resources].filter((resource) => resource.kind !== "frame").sort((left, right) => right.worstMs - left.worstMs)[0];
+	const editableEntries = resources.filter((resource) => resource.kind !== "frame");
+
+	const topWorst = [...editableEntries].sort((left, right) => right.worstMs - left.worstMs)[0];
 	const topHitch = [...resources].sort((left, right) => right.hitchHits - left.hitchHits || right.hitchMs - left.hitchMs)[0];
 
 	if (!topTotal) {
 		return ["No profiler entries were found. Confirm this is a FiveM profiler JSON created with profiler saveJSON."];
 	}
 
-	const topCodeEntries = resources.filter((resource) => resource.kind !== "frame").slice(0, 2);
-	const openTargets = [resources.find((resource) => resource.kind === "frame")?.name, ...topCodeEntries.map((resource) => resource.name)].filter(
-		(target): target is string => Boolean(target),
-	);
+	if (topTotal.kind === "frame") {
+		tips.push(`${topTotal.name} is the frame budget container. It is not a script file and cannot be edited directly.`);
+		tips.push("Use the frame entry to understand total server frame cost, then inspect the resource entries below it.");
+	}
+
+	const openTargets = editableEntries.slice(0, 2).map((resource) => resource.name);
 
 	if (openTargets.length) {
-		tips.push(
-			`Open the code for ${openTargets.join(", ")}. Resource Manager Tick is the frame budget container; the tick/thread entries are the code paths using the most CPU per profiler frame. Look for loops that run every frame, calls that iterate over all players or vehicles, and work that does not need to happen 20 times a second.`,
-		);
+		tips.push(`Start by checking: ${openTargets.join(", ")}.`);
+		tips.push("These entries are the most relevant editable code paths in this profile.");
 	}
 
 	if (topWorst) {
-		tips.push(`${topWorst.name} has the worst single ${topWorst.kind} at ${topWorst.worstMs.toFixed(2)} ms. Look for loops, sync exports, heavy events, or missing waits near that path.`);
+		tips.push(`${topWorst.name} had the worst single ${topWorst.kind}: ${topWorst.worstMs.toFixed(2)} ms.`);
+		tips.push("Check for heavy loops, sync exports, large events, or missing waits.");
 	}
 
 	if (stats.hitchCount && topHitch?.hitchHits) {
-		tips.push(`${topHitch.name} was present during ${topHitch.hitchHits} heavy frame${topHitch.hitchHits === 1 ? "" : "s"}. Compare it against the frame timeline.`);
+		tips.push(`${topHitch.name} appeared during ${topHitch.hitchHits} heavy frame${topHitch.hitchHits === 1 ? "" : "s"}.`);
+		tips.push("Compare this resource against the frame timeline to confirm if it caused the hitch.");
 	}
 
 	if (stats.browserFrames || stats.screenshots) {
-		tips.push(`The trace also contains ${stats.browserFrames.toLocaleString()} browser frame markers and ${stats.screenshots.toLocaleString()} screenshots, which helps align script spikes with visual frame timing.`);
+		tips.push(`Trace includes ${stats.browserFrames.toLocaleString()} browser frame markers and ${stats.screenshots.toLocaleString()} screenshots.`);
+		tips.push("Use these markers to compare script spikes with visual frame timing.");
 	}
 
-	tips.push("If monitor or resource-manager shows up with high tick times, run txAdmin as a system service. The resource still loads, but most of its work moves outside the scripting runtime, which significantly reduces its tick time.");
-	tips.push("Scripts with Wait(0) running work every single frame will always show up in profilers. If that work does not need to run 20 times per second, change it to Wait(500) or Wait(1000).");
+	tips.push("If monitor or resource-manager has high tick time, run txAdmin as a system service.");
+	tips.push("If a script uses Wait(0), make sure the work really needs to run every frame.");
+	tips.push("For non-critical repeated work, prefer Wait(500) or Wait(1000).");
 
 	return tips;
 }
