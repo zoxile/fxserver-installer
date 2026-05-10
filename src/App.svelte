@@ -3,6 +3,7 @@
 	import Titlebar from "./Titlebar.svelte";
 	import Sidebar from "$lib/components/layout/Sidebar.svelte";
 	import HomePage from "$lib/features/home/HomePage.svelte";
+	import JooatResolverPage from "$lib/features/jooat/JooatResolverPage.svelte";
 	import JsonFormatterPage from "$lib/features/json/JsonFormatterPage.svelte";
 	import MariaDBPanel from "$lib/features/mariadb/MariaDBPanel.svelte";
 	import PlaceholderPage from "$lib/features/placeholder/PlaceholderPage.svelte";
@@ -14,13 +15,11 @@
 	let activePage = $state<PageId>("home");
 	let navigationFrame = 0;
 
-	const placeholders: Record<Exclude<PageId, "home" | "mariadb">, string> = {
+	const placeholders: Record<Exclude<PageId, "home" | "mariadb" | "json-formatter" | "profiler" | "jooat">, string> = {
 		"artifact-install": "Download and prepare the selected FXServer artifact.",
 		"artifact-info": "Inspect artifact metadata, recommended builds, and known broken versions.",
 		server: "Configure and launch the FXServer setup flow.",
 		configurator: "Build and edit server configuration files.",
-		profiler: "View captured profiler output and spot server performance issues.",
-		"json-formatter": "Format, validate, and inspect JSON resources.",
 	};
 
 	function navigate(page: PageId) {
@@ -60,6 +59,8 @@
 					<JsonFormatterPage />
 				{:else if activePage === "profiler"}
 					<ProfilerPage />
+				{:else if activePage === "jooat"}
+					<JooatResolverPage />
 				{:else}
 					<PlaceholderPage title={getPageLabel(activePage)} description={placeholders[activePage]} />
 				{/if}

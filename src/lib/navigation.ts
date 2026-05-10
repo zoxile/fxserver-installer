@@ -2,6 +2,7 @@ import ArchiveIcon from "@lucide/svelte/icons/archive";
 import DatabaseIcon from "@lucide/svelte/icons/database";
 import FileJsonIcon from "@lucide/svelte/icons/file-json";
 import FolderCogIcon from "@lucide/svelte/icons/folder-cog";
+import HashIcon from "@lucide/svelte/icons/hash";
 import HomeIcon from "@lucide/svelte/icons/home";
 import InfoIcon from "@lucide/svelte/icons/info";
 import PackagePlusIcon from "@lucide/svelte/icons/package-plus";
@@ -17,6 +18,7 @@ export type PageId =
 	| "server"
 	| "configurator"
 	| "profiler"
+	| "jooat"
 	| "json-formatter";
 
 export interface NavigationChild {
@@ -79,6 +81,11 @@ export const navigation: NavigationItem[] = [
 				id: "profiler",
 				label: "Profiler",
 				icon: InfoIcon,
+			},
+			{
+				id: "jooat",
+				label: "JOOAT Resolver & Hasher",
+				icon: HashIcon,
 			},
 			{
 				id: "json-formatter",
