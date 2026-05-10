@@ -5,6 +5,7 @@
 	import Minimize2Icon from "@lucide/svelte/icons/minimize-2";
 	import SparklesIcon from "@lucide/svelte/icons/sparkles";
 	import WandSparklesIcon from "@lucide/svelte/icons/wand-sparkles";
+	import UploadIcon from "@lucide/svelte/icons/upload";
 	import * as Card from "$lib/components/ui/card/index.js";
 	import { Button } from "$lib/components/ui/button/index.js";
 	import JsonNotice from "./JsonNotice.svelte";
@@ -15,6 +16,44 @@
 	let fixedOutput = $state("");
 	let notice = $state<{ type: "success" | "error" | "repair"; title: string; description: string } | null>(null);
 	const inputPlaceholder = '{"name":"fxserver","enabled":true}';
+
+	let fileInput: HTMLInputElement;
+
+	async function uploadJsonFile(event: Event) {
+		const target = event.target as HTMLInputElement;
+		const file = target.files?.[0];
+
+		if (!file) return;
+
+		if (!file.name.endsWith(".json")) {
+			notice = {
+				type: "error",
+				title: "Invalid file type",
+				description: "Please upload a .json file.",
+			};
+			return;
+		}
+
+		try {
+			input = await file.text();
+			output = "";
+			fixedOutput = "";
+
+			notice = {
+				type: "success",
+				title: "JSON file uploaded",
+				description: `${file.name} has been loaded into the editor.`,
+			};
+		} catch {
+			notice = {
+				type: "error",
+				title: "Could not read file",
+				description: "The selected file could not be loaded.",
+			};
+		}
+
+		target.value = "";
+	}
 
 	function formatInput() {
 		fixedOutput = "";
@@ -122,6 +161,12 @@
 			</Card.Header>
 			<Card.Content class="space-y-4">
 				<div class="flex flex-wrap gap-2">
+					<input bind:this={fileInput} type="file" accept=".json,application/json" class="hidden" onchange={uploadJsonFile} />
+
+					<Button variant="outline" onclick={() => fileInput.click()} title="Upload JSON file">
+						<UploadIcon />
+						Upload JSON
+					</Button>
 					<Button onclick={formatInput} title="Format and validate JSON">
 						<SparklesIcon />
 						Format
