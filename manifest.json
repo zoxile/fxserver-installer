@@ -1,0 +1,1546 @@
+{
+  "version": "2026.05.10-durtyfree-v3717",
+  "source": null,
+  "generatedAt": "2026-05-10T13:57:23.338Z",
+  "totalHashes": 279338,
+  "totalNames": 279338,
+  "sizeBytes": 8885079,
+  "shards": [
+    {
+      "prefix": "00",
+      "path": "shards/00.tsv",
+      "hashes": 1140,
+      "bytes": 36523
+    },
+    {
+      "prefix": "01",
+      "path": "shards/01.tsv",
+      "hashes": 1091,
+      "bytes": 34833
+    },
+    {
+      "prefix": "02",
+      "path": "shards/02.tsv",
+      "hashes": 1070,
+      "bytes": 34045
+    },
+    {
+      "prefix": "03",
+      "path": "shards/03.tsv",
+      "hashes": 961,
+      "bytes": 31050
+    },
+    {
+      "prefix": "04",
+      "path": "shards/04.tsv",
+      "hashes": 1022,
+      "bytes": 32643
+    },
+    {
+      "prefix": "05",
+      "path": "shards/05.tsv",
+      "hashes": 1092,
+      "bytes": 34997
+    },
+    {
+      "prefix": "06",
+      "path": "shards/06.tsv",
+      "hashes": 1073,
+      "bytes": 34659
+    },
+    {
+      "prefix": "07",
+      "path": "shards/07.tsv",
+      "hashes": 1123,
+      "bytes": 35737
+    },
+    {
+      "prefix": "08",
+      "path": "shards/08.tsv",
+      "hashes": 1109,
+      "bytes": 35255
+    },
+    {
+      "prefix": "09",
+      "path": "shards/09.tsv",
+      "hashes": 1132,
+      "bytes": 36828
+    },
+    {
+      "prefix": "0a",
+      "path": "shards/0a.tsv",
+      "hashes": 1086,
+      "bytes": 35007
+    },
+    {
+      "prefix": "0b",
+      "path": "shards/0b.tsv",
+      "hashes": 1058,
+      "bytes": 33205
+    },
+    {
+      "prefix": "0c",
+      "path": "shards/0c.tsv",
+      "hashes": 1097,
+      "bytes": 35334
+    },
+    {
+      "prefix": "0d",
+      "path": "shards/0d.tsv",
+      "hashes": 1104,
+      "bytes": 35086
+    },
+    {
+      "prefix": "0e",
+      "path": "shards/0e.tsv",
+      "hashes": 1074,
+      "bytes": 34140
+    },
+    {
+      "prefix": "0f",
+      "path": "shards/0f.tsv",
+      "hashes": 1151,
+      "bytes": 36400
+    },
+    {
+      "prefix": "10",
+      "path": "shards/10.tsv",
+      "hashes": 1117,
+      "bytes": 35565
+    },
+    {
+      "prefix": "11",
+      "path": "shards/11.tsv",
+      "hashes": 1048,
+      "bytes": 33311
+    },
+    {
+      "prefix": "12",
+      "path": "shards/12.tsv",
+      "hashes": 1149,
+      "bytes": 36019
+    },
+    {
+      "prefix": "13",
+      "path": "shards/13.tsv",
+      "hashes": 1147,
+      "bytes": 36191
+    },
+    {
+      "prefix": "14",
+      "path": "shards/14.tsv",
+      "hashes": 1030,
+      "bytes": 32873
+    },
+    {
+      "prefix": "15",
+      "path": "shards/15.tsv",
+      "hashes": 1073,
+      "bytes": 33988
+    },
+    {
+      "prefix": "16",
+      "path": "shards/16.tsv",
+      "hashes": 1067,
+      "bytes": 34174
+    },
+    {
+      "prefix": "17",
+      "path": "shards/17.tsv",
+      "hashes": 1102,
+      "bytes": 35012
+    },
+    {
+      "prefix": "18",
+      "path": "shards/18.tsv",
+      "hashes": 1109,
+      "bytes": 35283
+    },
+    {
+      "prefix": "19",
+      "path": "shards/19.tsv",
+      "hashes": 1086,
+      "bytes": 34110
+    },
+    {
+      "prefix": "1a",
+      "path": "shards/1a.tsv",
+      "hashes": 1090,
+      "bytes": 34708
+    },
+    {
+      "prefix": "1b",
+      "path": "shards/1b.tsv",
+      "hashes": 1087,
+      "bytes": 34076
+    },
+    {
+      "prefix": "1c",
+      "path": "shards/1c.tsv",
+      "hashes": 1101,
+      "bytes": 35196
+    },
+    {
+      "prefix": "1d",
+      "path": "shards/1d.tsv",
+      "hashes": 1089,
+      "bytes": 35114
+    },
+    {
+      "prefix": "1e",
+      "path": "shards/1e.tsv",
+      "hashes": 1039,
+      "bytes": 33224
+    },
+    {
+      "prefix": "1f",
+      "path": "shards/1f.tsv",
+      "hashes": 1040,
+      "bytes": 32824
+    },
+    {
+      "prefix": "20",
+      "path": "shards/20.tsv",
+      "hashes": 1141,
+      "bytes": 35737
+    },
+    {
+      "prefix": "21",
+      "path": "shards/21.tsv",
+      "hashes": 1193,
+      "bytes": 38204
+    },
+    {
+      "prefix": "22",
+      "path": "shards/22.tsv",
+      "hashes": 1100,
+      "bytes": 34851
+    },
+    {
+      "prefix": "23",
+      "path": "shards/23.tsv",
+      "hashes": 1094,
+      "bytes": 35343
+    },
+    {
+      "prefix": "24",
+      "path": "shards/24.tsv",
+      "hashes": 1093,
+      "bytes": 34932
+    },
+    {
+      "prefix": "25",
+      "path": "shards/25.tsv",
+      "hashes": 1054,
+      "bytes": 33101
+    },
+    {
+      "prefix": "26",
+      "path": "shards/26.tsv",
+      "hashes": 1120,
+      "bytes": 35393
+    },
+    {
+      "prefix": "27",
+      "path": "shards/27.tsv",
+      "hashes": 1071,
+      "bytes": 33987
+    },
+    {
+      "prefix": "28",
+      "path": "shards/28.tsv",
+      "hashes": 1090,
+      "bytes": 34751
+    },
+    {
+      "prefix": "29",
+      "path": "shards/29.tsv",
+      "hashes": 1102,
+      "bytes": 34834
+    },
+    {
+      "prefix": "2a",
+      "path": "shards/2a.tsv",
+      "hashes": 1072,
+      "bytes": 34285
+    },
+    {
+      "prefix": "2b",
+      "path": "shards/2b.tsv",
+      "hashes": 1075,
+      "bytes": 33972
+    },
+    {
+      "prefix": "2c",
+      "path": "shards/2c.tsv",
+      "hashes": 1138,
+      "bytes": 36341
+    },
+    {
+      "prefix": "2d",
+      "path": "shards/2d.tsv",
+      "hashes": 1120,
+      "bytes": 36094
+    },
+    {
+      "prefix": "2e",
+      "path": "shards/2e.tsv",
+      "hashes": 1092,
+      "bytes": 34203
+    },
+    {
+      "prefix": "2f",
+      "path": "shards/2f.tsv",
+      "hashes": 1095,
+      "bytes": 34572
+    },
+    {
+      "prefix": "30",
+      "path": "shards/30.tsv",
+      "hashes": 1081,
+      "bytes": 34589
+    },
+    {
+      "prefix": "31",
+      "path": "shards/31.tsv",
+      "hashes": 1111,
+      "bytes": 35645
+    },
+    {
+      "prefix": "32",
+      "path": "shards/32.tsv",
+      "hashes": 1047,
+      "bytes": 33082
+    },
+    {
+      "prefix": "33",
+      "path": "shards/33.tsv",
+      "hashes": 1111,
+      "bytes": 34781
+    },
+    {
+      "prefix": "34",
+      "path": "shards/34.tsv",
+      "hashes": 1102,
+      "bytes": 34673
+    },
+    {
+      "prefix": "35",
+      "path": "shards/35.tsv",
+      "hashes": 1107,
+      "bytes": 35228
+    },
+    {
+      "prefix": "36",
+      "path": "shards/36.tsv",
+      "hashes": 1084,
+      "bytes": 34439
+    },
+    {
+      "prefix": "37",
+      "path": "shards/37.tsv",
+      "hashes": 1159,
+      "bytes": 36965
+    },
+    {
+      "prefix": "38",
+      "path": "shards/38.tsv",
+      "hashes": 1102,
+      "bytes": 35002
+    },
+    {
+      "prefix": "39",
+      "path": "shards/39.tsv",
+      "hashes": 1092,
+      "bytes": 34953
+    },
+    {
+      "prefix": "3a",
+      "path": "shards/3a.tsv",
+      "hashes": 1073,
+      "bytes": 33771
+    },
+    {
+      "prefix": "3b",
+      "path": "shards/3b.tsv",
+      "hashes": 1098,
+      "bytes": 35196
+    },
+    {
+      "prefix": "3c",
+      "path": "shards/3c.tsv",
+      "hashes": 1150,
+      "bytes": 36774
+    },
+    {
+      "prefix": "3d",
+      "path": "shards/3d.tsv",
+      "hashes": 1120,
+      "bytes": 36129
+    },
+    {
+      "prefix": "3e",
+      "path": "shards/3e.tsv",
+      "hashes": 1140,
+      "bytes": 36500
+    },
+    {
+      "prefix": "3f",
+      "path": "shards/3f.tsv",
+      "hashes": 1035,
+      "bytes": 33073
+    },
+    {
+      "prefix": "40",
+      "path": "shards/40.tsv",
+      "hashes": 1068,
+      "bytes": 33736
+    },
+    {
+      "prefix": "41",
+      "path": "shards/41.tsv",
+      "hashes": 1107,
+      "bytes": 35550
+    },
+    {
+      "prefix": "42",
+      "path": "shards/42.tsv",
+      "hashes": 1121,
+      "bytes": 35455
+    },
+    {
+      "prefix": "43",
+      "path": "shards/43.tsv",
+      "hashes": 1035,
+      "bytes": 32125
+    },
+    {
+      "prefix": "44",
+      "path": "shards/44.tsv",
+      "hashes": 1134,
+      "bytes": 36023
+    },
+    {
+      "prefix": "45",
+      "path": "shards/45.tsv",
+      "hashes": 1081,
+      "bytes": 34599
+    },
+    {
+      "prefix": "46",
+      "path": "shards/46.tsv",
+      "hashes": 1105,
+      "bytes": 35397
+    },
+    {
+      "prefix": "47",
+      "path": "shards/47.tsv",
+      "hashes": 1135,
+      "bytes": 35514
+    },
+    {
+      "prefix": "48",
+      "path": "shards/48.tsv",
+      "hashes": 1073,
+      "bytes": 33837
+    },
+    {
+      "prefix": "49",
+      "path": "shards/49.tsv",
+      "hashes": 1085,
+      "bytes": 34376
+    },
+    {
+      "prefix": "4a",
+      "path": "shards/4a.tsv",
+      "hashes": 1089,
+      "bytes": 34622
+    },
+    {
+      "prefix": "4b",
+      "path": "shards/4b.tsv",
+      "hashes": 1075,
+      "bytes": 34440
+    },
+    {
+      "prefix": "4c",
+      "path": "shards/4c.tsv",
+      "hashes": 1092,
+      "bytes": 34353
+    },
+    {
+      "prefix": "4d",
+      "path": "shards/4d.tsv",
+      "hashes": 1075,
+      "bytes": 34563
+    },
+    {
+      "prefix": "4e",
+      "path": "shards/4e.tsv",
+      "hashes": 1038,
+      "bytes": 33083
+    },
+    {
+      "prefix": "4f",
+      "path": "shards/4f.tsv",
+      "hashes": 1080,
+      "bytes": 34098
+    },
+    {
+      "prefix": "50",
+      "path": "shards/50.tsv",
+      "hashes": 1076,
+      "bytes": 34548
+    },
+    {
+      "prefix": "51",
+      "path": "shards/51.tsv",
+      "hashes": 1132,
+      "bytes": 36261
+    },
+    {
+      "prefix": "52",
+      "path": "shards/52.tsv",
+      "hashes": 1023,
+      "bytes": 32394
+    },
+    {
+      "prefix": "53",
+      "path": "shards/53.tsv",
+      "hashes": 1102,
+      "bytes": 35246
+    },
+    {
+      "prefix": "54",
+      "path": "shards/54.tsv",
+      "hashes": 1058,
+      "bytes": 33578
+    },
+    {
+      "prefix": "55",
+      "path": "shards/55.tsv",
+      "hashes": 1087,
+      "bytes": 34581
+    },
+    {
+      "prefix": "56",
+      "path": "shards/56.tsv",
+      "hashes": 1084,
+      "bytes": 34307
+    },
+    {
+      "prefix": "57",
+      "path": "shards/57.tsv",
+      "hashes": 1070,
+      "bytes": 34231
+    },
+    {
+      "prefix": "58",
+      "path": "shards/58.tsv",
+      "hashes": 1149,
+      "bytes": 36190
+    },
+    {
+      "prefix": "59",
+      "path": "shards/59.tsv",
+      "hashes": 1038,
+      "bytes": 33144
+    },
+    {
+      "prefix": "5a",
+      "path": "shards/5a.tsv",
+      "hashes": 1141,
+      "bytes": 36440
+    },
+    {
+      "prefix": "5b",
+      "path": "shards/5b.tsv",
+      "hashes": 1066,
+      "bytes": 34404
+    },
+    {
+      "prefix": "5c",
+      "path": "shards/5c.tsv",
+      "hashes": 1115,
+      "bytes": 35186
+    },
+    {
+      "prefix": "5d",
+      "path": "shards/5d.tsv",
+      "hashes": 1091,
+      "bytes": 34760
+    },
+    {
+      "prefix": "5e",
+      "path": "shards/5e.tsv",
+      "hashes": 1081,
+      "bytes": 33957
+    },
+    {
+      "prefix": "5f",
+      "path": "shards/5f.tsv",
+      "hashes": 1070,
+      "bytes": 33966
+    },
+    {
+      "prefix": "60",
+      "path": "shards/60.tsv",
+      "hashes": 1098,
+      "bytes": 34898
+    },
+    {
+      "prefix": "61",
+      "path": "shards/61.tsv",
+      "hashes": 1087,
+      "bytes": 34713
+    },
+    {
+      "prefix": "62",
+      "path": "shards/62.tsv",
+      "hashes": 1115,
+      "bytes": 35622
+    },
+    {
+      "prefix": "63",
+      "path": "shards/63.tsv",
+      "hashes": 1097,
+      "bytes": 35432
+    },
+    {
+      "prefix": "64",
+      "path": "shards/64.tsv",
+      "hashes": 1146,
+      "bytes": 36603
+    },
+    {
+      "prefix": "65",
+      "path": "shards/65.tsv",
+      "hashes": 1119,
+      "bytes": 35229
+    },
+    {
+      "prefix": "66",
+      "path": "shards/66.tsv",
+      "hashes": 1071,
+      "bytes": 33780
+    },
+    {
+      "prefix": "67",
+      "path": "shards/67.tsv",
+      "hashes": 1080,
+      "bytes": 34134
+    },
+    {
+      "prefix": "68",
+      "path": "shards/68.tsv",
+      "hashes": 1047,
+      "bytes": 32586
+    },
+    {
+      "prefix": "69",
+      "path": "shards/69.tsv",
+      "hashes": 1087,
+      "bytes": 34222
+    },
+    {
+      "prefix": "6a",
+      "path": "shards/6a.tsv",
+      "hashes": 1097,
+      "bytes": 34733
+    },
+    {
+      "prefix": "6b",
+      "path": "shards/6b.tsv",
+      "hashes": 1064,
+      "bytes": 33863
+    },
+    {
+      "prefix": "6c",
+      "path": "shards/6c.tsv",
+      "hashes": 1048,
+      "bytes": 33306
+    },
+    {
+      "prefix": "6d",
+      "path": "shards/6d.tsv",
+      "hashes": 1046,
+      "bytes": 32542
+    },
+    {
+      "prefix": "6e",
+      "path": "shards/6e.tsv",
+      "hashes": 1132,
+      "bytes": 36075
+    },
+    {
+      "prefix": "6f",
+      "path": "shards/6f.tsv",
+      "hashes": 1094,
+      "bytes": 34258
+    },
+    {
+      "prefix": "70",
+      "path": "shards/70.tsv",
+      "hashes": 1094,
+      "bytes": 34635
+    },
+    {
+      "prefix": "71",
+      "path": "shards/71.tsv",
+      "hashes": 1096,
+      "bytes": 34665
+    },
+    {
+      "prefix": "72",
+      "path": "shards/72.tsv",
+      "hashes": 1105,
+      "bytes": 35162
+    },
+    {
+      "prefix": "73",
+      "path": "shards/73.tsv",
+      "hashes": 1098,
+      "bytes": 35014
+    },
+    {
+      "prefix": "74",
+      "path": "shards/74.tsv",
+      "hashes": 1085,
+      "bytes": 34586
+    },
+    {
+      "prefix": "75",
+      "path": "shards/75.tsv",
+      "hashes": 1064,
+      "bytes": 33671
+    },
+    {
+      "prefix": "76",
+      "path": "shards/76.tsv",
+      "hashes": 1125,
+      "bytes": 36015
+    },
+    {
+      "prefix": "77",
+      "path": "shards/77.tsv",
+      "hashes": 1091,
+      "bytes": 34828
+    },
+    {
+      "prefix": "78",
+      "path": "shards/78.tsv",
+      "hashes": 1110,
+      "bytes": 35417
+    },
+    {
+      "prefix": "79",
+      "path": "shards/79.tsv",
+      "hashes": 1119,
+      "bytes": 35469
+    },
+    {
+      "prefix": "7a",
+      "path": "shards/7a.tsv",
+      "hashes": 1114,
+      "bytes": 35228
+    },
+    {
+      "prefix": "7b",
+      "path": "shards/7b.tsv",
+      "hashes": 1096,
+      "bytes": 34555
+    },
+    {
+      "prefix": "7c",
+      "path": "shards/7c.tsv",
+      "hashes": 1086,
+      "bytes": 34842
+    },
+    {
+      "prefix": "7d",
+      "path": "shards/7d.tsv",
+      "hashes": 1066,
+      "bytes": 33738
+    },
+    {
+      "prefix": "7e",
+      "path": "shards/7e.tsv",
+      "hashes": 1095,
+      "bytes": 35014
+    },
+    {
+      "prefix": "7f",
+      "path": "shards/7f.tsv",
+      "hashes": 1068,
+      "bytes": 33674
+    },
+    {
+      "prefix": "80",
+      "path": "shards/80.tsv",
+      "hashes": 1109,
+      "bytes": 35271
+    },
+    {
+      "prefix": "81",
+      "path": "shards/81.tsv",
+      "hashes": 1077,
+      "bytes": 33580
+    },
+    {
+      "prefix": "82",
+      "path": "shards/82.tsv",
+      "hashes": 1092,
+      "bytes": 34747
+    },
+    {
+      "prefix": "83",
+      "path": "shards/83.tsv",
+      "hashes": 1112,
+      "bytes": 35553
+    },
+    {
+      "prefix": "84",
+      "path": "shards/84.tsv",
+      "hashes": 1078,
+      "bytes": 33357
+    },
+    {
+      "prefix": "85",
+      "path": "shards/85.tsv",
+      "hashes": 1108,
+      "bytes": 35658
+    },
+    {
+      "prefix": "86",
+      "path": "shards/86.tsv",
+      "hashes": 1059,
+      "bytes": 33625
+    },
+    {
+      "prefix": "87",
+      "path": "shards/87.tsv",
+      "hashes": 1068,
+      "bytes": 34022
+    },
+    {
+      "prefix": "88",
+      "path": "shards/88.tsv",
+      "hashes": 1116,
+      "bytes": 35498
+    },
+    {
+      "prefix": "89",
+      "path": "shards/89.tsv",
+      "hashes": 1076,
+      "bytes": 33914
+    },
+    {
+      "prefix": "8a",
+      "path": "shards/8a.tsv",
+      "hashes": 1057,
+      "bytes": 33543
+    },
+    {
+      "prefix": "8b",
+      "path": "shards/8b.tsv",
+      "hashes": 1044,
+      "bytes": 33299
+    },
+    {
+      "prefix": "8c",
+      "path": "shards/8c.tsv",
+      "hashes": 1100,
+      "bytes": 35580
+    },
+    {
+      "prefix": "8d",
+      "path": "shards/8d.tsv",
+      "hashes": 1118,
+      "bytes": 35816
+    },
+    {
+      "prefix": "8e",
+      "path": "shards/8e.tsv",
+      "hashes": 1106,
+      "bytes": 35152
+    },
+    {
+      "prefix": "8f",
+      "path": "shards/8f.tsv",
+      "hashes": 1162,
+      "bytes": 36997
+    },
+    {
+      "prefix": "90",
+      "path": "shards/90.tsv",
+      "hashes": 1093,
+      "bytes": 34752
+    },
+    {
+      "prefix": "91",
+      "path": "shards/91.tsv",
+      "hashes": 1101,
+      "bytes": 34412
+    },
+    {
+      "prefix": "92",
+      "path": "shards/92.tsv",
+      "hashes": 1071,
+      "bytes": 33576
+    },
+    {
+      "prefix": "93",
+      "path": "shards/93.tsv",
+      "hashes": 1110,
+      "bytes": 35483
+    },
+    {
+      "prefix": "94",
+      "path": "shards/94.tsv",
+      "hashes": 1044,
+      "bytes": 32873
+    },
+    {
+      "prefix": "95",
+      "path": "shards/95.tsv",
+      "hashes": 1047,
+      "bytes": 33979
+    },
+    {
+      "prefix": "96",
+      "path": "shards/96.tsv",
+      "hashes": 1077,
+      "bytes": 34167
+    },
+    {
+      "prefix": "97",
+      "path": "shards/97.tsv",
+      "hashes": 1059,
+      "bytes": 33301
+    },
+    {
+      "prefix": "98",
+      "path": "shards/98.tsv",
+      "hashes": 1080,
+      "bytes": 34093
+    },
+    {
+      "prefix": "99",
+      "path": "shards/99.tsv",
+      "hashes": 1128,
+      "bytes": 36125
+    },
+    {
+      "prefix": "9a",
+      "path": "shards/9a.tsv",
+      "hashes": 1098,
+      "bytes": 34961
+    },
+    {
+      "prefix": "9b",
+      "path": "shards/9b.tsv",
+      "hashes": 1118,
+      "bytes": 35584
+    },
+    {
+      "prefix": "9c",
+      "path": "shards/9c.tsv",
+      "hashes": 1061,
+      "bytes": 33556
+    },
+    {
+      "prefix": "9d",
+      "path": "shards/9d.tsv",
+      "hashes": 1105,
+      "bytes": 34949
+    },
+    {
+      "prefix": "9e",
+      "path": "shards/9e.tsv",
+      "hashes": 1100,
+      "bytes": 34797
+    },
+    {
+      "prefix": "9f",
+      "path": "shards/9f.tsv",
+      "hashes": 1100,
+      "bytes": 34772
+    },
+    {
+      "prefix": "a0",
+      "path": "shards/a0.tsv",
+      "hashes": 1078,
+      "bytes": 34686
+    },
+    {
+      "prefix": "a1",
+      "path": "shards/a1.tsv",
+      "hashes": 1107,
+      "bytes": 35154
+    },
+    {
+      "prefix": "a2",
+      "path": "shards/a2.tsv",
+      "hashes": 1145,
+      "bytes": 36171
+    },
+    {
+      "prefix": "a3",
+      "path": "shards/a3.tsv",
+      "hashes": 1035,
+      "bytes": 32948
+    },
+    {
+      "prefix": "a4",
+      "path": "shards/a4.tsv",
+      "hashes": 1131,
+      "bytes": 36343
+    },
+    {
+      "prefix": "a5",
+      "path": "shards/a5.tsv",
+      "hashes": 1088,
+      "bytes": 34191
+    },
+    {
+      "prefix": "a6",
+      "path": "shards/a6.tsv",
+      "hashes": 1087,
+      "bytes": 34434
+    },
+    {
+      "prefix": "a7",
+      "path": "shards/a7.tsv",
+      "hashes": 1076,
+      "bytes": 34096
+    },
+    {
+      "prefix": "a8",
+      "path": "shards/a8.tsv",
+      "hashes": 1089,
+      "bytes": 35096
+    },
+    {
+      "prefix": "a9",
+      "path": "shards/a9.tsv",
+      "hashes": 1071,
+      "bytes": 33651
+    },
+    {
+      "prefix": "aa",
+      "path": "shards/aa.tsv",
+      "hashes": 1061,
+      "bytes": 33798
+    },
+    {
+      "prefix": "ab",
+      "path": "shards/ab.tsv",
+      "hashes": 1116,
+      "bytes": 35633
+    },
+    {
+      "prefix": "ac",
+      "path": "shards/ac.tsv",
+      "hashes": 1094,
+      "bytes": 34510
+    },
+    {
+      "prefix": "ad",
+      "path": "shards/ad.tsv",
+      "hashes": 1094,
+      "bytes": 35309
+    },
+    {
+      "prefix": "ae",
+      "path": "shards/ae.tsv",
+      "hashes": 1034,
+      "bytes": 33205
+    },
+    {
+      "prefix": "af",
+      "path": "shards/af.tsv",
+      "hashes": 1125,
+      "bytes": 36013
+    },
+    {
+      "prefix": "b0",
+      "path": "shards/b0.tsv",
+      "hashes": 1098,
+      "bytes": 35091
+    },
+    {
+      "prefix": "b1",
+      "path": "shards/b1.tsv",
+      "hashes": 1078,
+      "bytes": 34056
+    },
+    {
+      "prefix": "b2",
+      "path": "shards/b2.tsv",
+      "hashes": 1077,
+      "bytes": 33765
+    },
+    {
+      "prefix": "b3",
+      "path": "shards/b3.tsv",
+      "hashes": 1141,
+      "bytes": 35756
+    },
+    {
+      "prefix": "b4",
+      "path": "shards/b4.tsv",
+      "hashes": 1077,
+      "bytes": 34515
+    },
+    {
+      "prefix": "b5",
+      "path": "shards/b5.tsv",
+      "hashes": 1141,
+      "bytes": 35895
+    },
+    {
+      "prefix": "b6",
+      "path": "shards/b6.tsv",
+      "hashes": 1073,
+      "bytes": 34304
+    },
+    {
+      "prefix": "b7",
+      "path": "shards/b7.tsv",
+      "hashes": 1082,
+      "bytes": 34195
+    },
+    {
+      "prefix": "b8",
+      "path": "shards/b8.tsv",
+      "hashes": 1123,
+      "bytes": 35639
+    },
+    {
+      "prefix": "b9",
+      "path": "shards/b9.tsv",
+      "hashes": 1063,
+      "bytes": 34307
+    },
+    {
+      "prefix": "ba",
+      "path": "shards/ba.tsv",
+      "hashes": 1089,
+      "bytes": 35145
+    },
+    {
+      "prefix": "bb",
+      "path": "shards/bb.tsv",
+      "hashes": 1120,
+      "bytes": 35815
+    },
+    {
+      "prefix": "bc",
+      "path": "shards/bc.tsv",
+      "hashes": 1079,
+      "bytes": 34198
+    },
+    {
+      "prefix": "bd",
+      "path": "shards/bd.tsv",
+      "hashes": 1071,
+      "bytes": 34425
+    },
+    {
+      "prefix": "be",
+      "path": "shards/be.tsv",
+      "hashes": 1092,
+      "bytes": 34231
+    },
+    {
+      "prefix": "bf",
+      "path": "shards/bf.tsv",
+      "hashes": 1021,
+      "bytes": 32074
+    },
+    {
+      "prefix": "c0",
+      "path": "shards/c0.tsv",
+      "hashes": 1124,
+      "bytes": 36168
+    },
+    {
+      "prefix": "c1",
+      "path": "shards/c1.tsv",
+      "hashes": 1142,
+      "bytes": 36341
+    },
+    {
+      "prefix": "c2",
+      "path": "shards/c2.tsv",
+      "hashes": 1050,
+      "bytes": 33829
+    },
+    {
+      "prefix": "c3",
+      "path": "shards/c3.tsv",
+      "hashes": 1140,
+      "bytes": 36365
+    },
+    {
+      "prefix": "c4",
+      "path": "shards/c4.tsv",
+      "hashes": 1098,
+      "bytes": 34501
+    },
+    {
+      "prefix": "c5",
+      "path": "shards/c5.tsv",
+      "hashes": 1107,
+      "bytes": 35416
+    },
+    {
+      "prefix": "c6",
+      "path": "shards/c6.tsv",
+      "hashes": 1107,
+      "bytes": 35338
+    },
+    {
+      "prefix": "c7",
+      "path": "shards/c7.tsv",
+      "hashes": 1103,
+      "bytes": 34769
+    },
+    {
+      "prefix": "c8",
+      "path": "shards/c8.tsv",
+      "hashes": 1104,
+      "bytes": 35061
+    },
+    {
+      "prefix": "c9",
+      "path": "shards/c9.tsv",
+      "hashes": 1079,
+      "bytes": 34421
+    },
+    {
+      "prefix": "ca",
+      "path": "shards/ca.tsv",
+      "hashes": 1170,
+      "bytes": 37562
+    },
+    {
+      "prefix": "cb",
+      "path": "shards/cb.tsv",
+      "hashes": 1070,
+      "bytes": 34332
+    },
+    {
+      "prefix": "cc",
+      "path": "shards/cc.tsv",
+      "hashes": 1095,
+      "bytes": 35379
+    },
+    {
+      "prefix": "cd",
+      "path": "shards/cd.tsv",
+      "hashes": 1061,
+      "bytes": 33719
+    },
+    {
+      "prefix": "ce",
+      "path": "shards/ce.tsv",
+      "hashes": 1095,
+      "bytes": 34664
+    },
+    {
+      "prefix": "cf",
+      "path": "shards/cf.tsv",
+      "hashes": 1107,
+      "bytes": 35120
+    },
+    {
+      "prefix": "d0",
+      "path": "shards/d0.tsv",
+      "hashes": 1083,
+      "bytes": 34195
+    },
+    {
+      "prefix": "d1",
+      "path": "shards/d1.tsv",
+      "hashes": 1122,
+      "bytes": 35807
+    },
+    {
+      "prefix": "d2",
+      "path": "shards/d2.tsv",
+      "hashes": 1124,
+      "bytes": 35334
+    },
+    {
+      "prefix": "d3",
+      "path": "shards/d3.tsv",
+      "hashes": 1067,
+      "bytes": 33826
+    },
+    {
+      "prefix": "d4",
+      "path": "shards/d4.tsv",
+      "hashes": 1082,
+      "bytes": 34694
+    },
+    {
+      "prefix": "d5",
+      "path": "shards/d5.tsv",
+      "hashes": 1110,
+      "bytes": 35060
+    },
+    {
+      "prefix": "d6",
+      "path": "shards/d6.tsv",
+      "hashes": 1074,
+      "bytes": 34506
+    },
+    {
+      "prefix": "d7",
+      "path": "shards/d7.tsv",
+      "hashes": 1138,
+      "bytes": 36389
+    },
+    {
+      "prefix": "d8",
+      "path": "shards/d8.tsv",
+      "hashes": 1117,
+      "bytes": 35635
+    },
+    {
+      "prefix": "d9",
+      "path": "shards/d9.tsv",
+      "hashes": 1087,
+      "bytes": 34432
+    },
+    {
+      "prefix": "da",
+      "path": "shards/da.tsv",
+      "hashes": 1022,
+      "bytes": 32987
+    },
+    {
+      "prefix": "db",
+      "path": "shards/db.tsv",
+      "hashes": 1080,
+      "bytes": 34345
+    },
+    {
+      "prefix": "dc",
+      "path": "shards/dc.tsv",
+      "hashes": 1072,
+      "bytes": 34365
+    },
+    {
+      "prefix": "dd",
+      "path": "shards/dd.tsv",
+      "hashes": 1088,
+      "bytes": 35116
+    },
+    {
+      "prefix": "de",
+      "path": "shards/de.tsv",
+      "hashes": 1063,
+      "bytes": 33478
+    },
+    {
+      "prefix": "df",
+      "path": "shards/df.tsv",
+      "hashes": 1075,
+      "bytes": 34317
+    },
+    {
+      "prefix": "e0",
+      "path": "shards/e0.tsv",
+      "hashes": 1135,
+      "bytes": 36919
+    },
+    {
+      "prefix": "e1",
+      "path": "shards/e1.tsv",
+      "hashes": 1053,
+      "bytes": 33170
+    },
+    {
+      "prefix": "e2",
+      "path": "shards/e2.tsv",
+      "hashes": 1077,
+      "bytes": 34695
+    },
+    {
+      "prefix": "e3",
+      "path": "shards/e3.tsv",
+      "hashes": 1028,
+      "bytes": 33138
+    },
+    {
+      "prefix": "e4",
+      "path": "shards/e4.tsv",
+      "hashes": 1142,
+      "bytes": 36220
+    },
+    {
+      "prefix": "e5",
+      "path": "shards/e5.tsv",
+      "hashes": 1073,
+      "bytes": 33821
+    },
+    {
+      "prefix": "e6",
+      "path": "shards/e6.tsv",
+      "hashes": 1139,
+      "bytes": 36348
+    },
+    {
+      "prefix": "e7",
+      "path": "shards/e7.tsv",
+      "hashes": 1099,
+      "bytes": 34707
+    },
+    {
+      "prefix": "e8",
+      "path": "shards/e8.tsv",
+      "hashes": 1107,
+      "bytes": 34984
+    },
+    {
+      "prefix": "e9",
+      "path": "shards/e9.tsv",
+      "hashes": 1097,
+      "bytes": 34080
+    },
+    {
+      "prefix": "ea",
+      "path": "shards/ea.tsv",
+      "hashes": 1116,
+      "bytes": 35836
+    },
+    {
+      "prefix": "eb",
+      "path": "shards/eb.tsv",
+      "hashes": 1027,
+      "bytes": 32663
+    },
+    {
+      "prefix": "ec",
+      "path": "shards/ec.tsv",
+      "hashes": 1088,
+      "bytes": 34957
+    },
+    {
+      "prefix": "ed",
+      "path": "shards/ed.tsv",
+      "hashes": 1137,
+      "bytes": 36062
+    },
+    {
+      "prefix": "ee",
+      "path": "shards/ee.tsv",
+      "hashes": 1051,
+      "bytes": 32838
+    },
+    {
+      "prefix": "ef",
+      "path": "shards/ef.tsv",
+      "hashes": 1108,
+      "bytes": 35322
+    },
+    {
+      "prefix": "f0",
+      "path": "shards/f0.tsv",
+      "hashes": 1080,
+      "bytes": 34118
+    },
+    {
+      "prefix": "f1",
+      "path": "shards/f1.tsv",
+      "hashes": 1064,
+      "bytes": 34676
+    },
+    {
+      "prefix": "f2",
+      "path": "shards/f2.tsv",
+      "hashes": 1047,
+      "bytes": 33729
+    },
+    {
+      "prefix": "f3",
+      "path": "shards/f3.tsv",
+      "hashes": 1143,
+      "bytes": 36283
+    },
+    {
+      "prefix": "f4",
+      "path": "shards/f4.tsv",
+      "hashes": 1050,
+      "bytes": 33826
+    },
+    {
+      "prefix": "f5",
+      "path": "shards/f5.tsv",
+      "hashes": 1101,
+      "bytes": 35444
+    },
+    {
+      "prefix": "f6",
+      "path": "shards/f6.tsv",
+      "hashes": 1119,
+      "bytes": 35772
+    },
+    {
+      "prefix": "f7",
+      "path": "shards/f7.tsv",
+      "hashes": 1050,
+      "bytes": 33668
+    },
+    {
+      "prefix": "f8",
+      "path": "shards/f8.tsv",
+      "hashes": 1106,
+      "bytes": 35537
+    },
+    {
+      "prefix": "f9",
+      "path": "shards/f9.tsv",
+      "hashes": 1070,
+      "bytes": 33702
+    },
+    {
+      "prefix": "fa",
+      "path": "shards/fa.tsv",
+      "hashes": 1094,
+      "bytes": 35081
+    },
+    {
+      "prefix": "fb",
+      "path": "shards/fb.tsv",
+      "hashes": 1123,
+      "bytes": 36234
+    },
+    {
+      "prefix": "fc",
+      "path": "shards/fc.tsv",
+      "hashes": 1145,
+      "bytes": 35944
+    },
+    {
+      "prefix": "fd",
+      "path": "shards/fd.tsv",
+      "hashes": 1066,
+      "bytes": 33898
+    },
+    {
+      "prefix": "fe",
+      "path": "shards/fe.tsv",
+      "hashes": 1021,
+      "bytes": 32098
+    },
+    {
+      "prefix": "ff",
+      "path": "shards/ff.tsv",
+      "hashes": 1061,
+      "bytes": 33914
+    }
+  ]
+}
