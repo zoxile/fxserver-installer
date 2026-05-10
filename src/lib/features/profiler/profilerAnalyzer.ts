@@ -31,6 +31,10 @@ export type FrameProfile = {
 	state: ResourceState;
 	entryCount: number;
 	topEntry?: string;
+	topEntries: Array<{
+		name: string;
+		totalMs: number;
+	}>;
 };
 
 export type ProfilerStats = {
@@ -73,6 +77,7 @@ type TraceEvent = {
 	pid?: unknown;
 	tid?: unknown;
 	ts?: unknown;
+	dur?: unknown;
 };
 
 type OpenSpan = {
@@ -110,18 +115,23 @@ type FrameBucket = HitchWindow & {
 	resourceManagerMs: number;
 	entryTotals: Map<string, number>;
 	topEntry?: string;
+	topEntries: Array<{
+		name: string;
+		totalMs: number;
+	}>;
 };
 
 const scriptBudgetMs = 25;
-const spansPerProfilerFrame = 100;
+const tickGapUs = 15_000;
 const topLimit = 20;
 
 export function analyzeProfilerJson(value: unknown): ProfilerAnalysis {
 	const events = getTraceEvents(value);
 	const { spans, firstTs, lastTs } = pairTraceSpans(events);
+	const timingSpans = spans.filter((span) => span.durationMs > 0);
 	const relevantSpans = spans.filter((span) => span.kind && span.durationMs > 0);
 	const resourceManagerSpans = relevantSpans.filter((span) => span.kind === "frame").sort((left, right) => left.start - right.start);
-	const frameBuckets = buildFrameBuckets(relevantSpans, resourceManagerSpans, firstTs, lastTs);
+	const frameBuckets = buildFrameBuckets(timingSpans, resourceManagerSpans, firstTs, lastTs);
 	const hitches = frameBuckets.filter(isHeavyFrame);
 	const entries = aggregateEntries(relevantSpans, frameBuckets);
 	const totalScriptMs = entries.reduce((sum, entry) => sum + entry.totalMs, 0);
@@ -139,7 +149,7 @@ export function analyzeProfilerJson(value: unknown): ProfilerAnalysis {
 		resourceCount: resourceNames.size,
 		entryCount: profiles.length,
 		frameCount,
-		averageScriptMsPerFrame: frameCount ? totalScriptMs / frameCount : 0,
+		averageScriptMsPerFrame: frameCount ? frameBuckets.reduce((sum, frame) => sum + frame.durationMs, 0) / frameCount : 0,
 		hitchCount: hitches.length,
 		hitchPercent: frameCount ? (hitches.length / frameCount) * 100 : 0,
 		heavyTickCount: hitches.length,
@@ -188,17 +198,32 @@ function pairTraceSpans(events: TraceEvent[]) {
 	let firstTs: number | undefined;
 	let lastTs: number | undefined;
 
+	function addSpan(span: CompletedSpan) {
+		spans.push(span);
+		firstTs = firstTs === undefined ? span.start : Math.min(firstTs, span.start);
+		lastTs = lastTs === undefined ? span.end : Math.max(lastTs, span.end);
+	}
+
 	for (const event of events) {
 		const name = typeof event.name === "string" ? event.name : "";
 		const phase = typeof event.ph === "string" ? event.ph : "";
 		const ts = typeof event.ts === "number" ? event.ts : undefined;
 		if (!name || ts === undefined) continue;
 
-		firstTs = firstTs === undefined ? ts : Math.min(firstTs, ts);
-		lastTs = lastTs === undefined ? ts : Math.max(lastTs, ts);
-
 		const threadKey = `${String(event.pid ?? "0")}:${String(event.tid ?? "0")}`;
 		const stack = stacks.get(threadKey) ?? [];
+
+		if (phase === "X" && typeof event.dur === "number" && event.dur >= 0) {
+			addSpan({
+				name,
+				...getSpanInfo(name),
+				start: ts,
+				threadKey,
+				durationMs: event.dur / 1000,
+				end: ts + event.dur,
+			});
+			continue;
+		}
 
 		if (phase === "B") {
 			stack.push({
@@ -218,7 +243,7 @@ function pairTraceSpans(events: TraceEvent[]) {
 
 		const [open] = stack.splice(index, 1);
 		const durationMs = Math.max(0, (ts - open.start) / 1000);
-		spans.push({ ...open, end: ts, durationMs });
+		addSpan({ ...open, end: ts, durationMs });
 	}
 
 	return { spans, firstTs, lastTs };
@@ -308,21 +333,41 @@ function aggregateEntries(spans: CompletedSpan[], frameBuckets: FrameBucket[]) {
 function buildFrameBuckets(spans: CompletedSpan[], resourceManagerSpans: CompletedSpan[], firstTs?: number, lastTs?: number) {
 	if (!spans.length) return [];
 
-	if (!resourceManagerSpans.length) {
+	const mainThreadSpans = getMainThreadSpans(spans);
+	if (!mainThreadSpans.length) {
 		const start = firstTs ?? Math.min(...spans.map((span) => span.start));
 		const end = lastTs ?? Math.max(...spans.map((span) => span.end));
 		return [buildFrameBucket(1, start, end, spans)];
 	}
 
 	const buckets: FrameBucket[] = [];
-	const bucketCount = Math.max(1, Math.ceil(resourceManagerSpans.length / spansPerProfilerFrame));
+	let current = {
+		start: mainThreadSpans[0].start,
+		end: mainThreadSpans[0].end,
+		spans: [mainThreadSpans[0]],
+	};
 
-	for (let index = 0; index < bucketCount; index += 1) {
-		const bucketStartFrame = resourceManagerSpans[index * spansPerProfilerFrame];
-		const nextBucketStartFrame = resourceManagerSpans[(index + 1) * spansPerProfilerFrame];
-		const start = bucketStartFrame?.start ?? resourceManagerSpans[0].start;
-		const end = nextBucketStartFrame?.start ?? resourceManagerSpans.at(-1)?.end ?? start;
-		buckets.push(buildFrameBucket(index + 1, start, end, spans));
+	for (let index = 1; index < mainThreadSpans.length; index += 1) {
+		const span = mainThreadSpans[index];
+
+		if (span.start - current.end > tickGapUs) {
+			buckets.push(buildFrameBucket(buckets.length + 1, current.start, current.end, current.spans));
+			current = {
+				start: span.start,
+				end: span.end,
+				spans: [span],
+			};
+			continue;
+		}
+
+		current.end = Math.max(current.end, span.end);
+		current.spans.push(span);
+	}
+
+	buckets.push(buildFrameBucket(buckets.length + 1, current.start, current.end, current.spans));
+
+	if (!buckets.some((bucket) => bucket.resourceManagerMs > 0) && resourceManagerSpans.length) {
+		return [buildFrameBucket(1, resourceManagerSpans[0].start, resourceManagerSpans.at(-1)?.end ?? resourceManagerSpans[0].end, resourceManagerSpans)];
 	}
 
 	return buckets;
@@ -331,17 +376,23 @@ function buildFrameBuckets(spans: CompletedSpan[], resourceManagerSpans: Complet
 function buildFrameBucket(index: number, start: number, end: number, spans: CompletedSpan[]): FrameBucket {
 	const entryTotals = new Map<string, number>();
 	let resourceManagerMs = 0;
+	let durationMs = 0;
 
 	for (const span of spans) {
-		if (!span.kind || span.start < start || span.start >= end) continue;
+		if (span.start < start || span.start >= end) continue;
+		durationMs += span.durationMs;
+		if (!span.kind) continue;
 		entryTotals.set(span.name, (entryTotals.get(span.name) ?? 0) + span.durationMs);
 		if (span.kind === "frame") {
 			resourceManagerMs += span.durationMs;
 		}
 	}
 
-	const durationMs = [...entryTotals.values()].reduce((sum, total) => sum + total, 0);
-	const topEntry = [...entryTotals.entries()].filter(([name]) => name !== "Resource Manager Tick").sort((left, right) => right[1] - left[1])[0]?.[0];
+	const topEntries = [...entryTotals.entries()]
+		.sort((left, right) => right[1] - left[1])
+		.slice(0, 3)
+		.map(([name, totalMs]) => ({ name, totalMs }));
+	const topEntry = topEntries.find((entry) => entry.name !== "Resource Manager Tick")?.name;
 
 	return {
 		index,
@@ -351,7 +402,28 @@ function buildFrameBucket(index: number, start: number, end: number, spans: Comp
 		resourceManagerMs,
 		entryTotals,
 		topEntry,
+		topEntries,
 	};
+}
+
+function getMainThreadSpans(spans: CompletedSpan[]) {
+	const threadTotals = new Map<string, number>();
+
+	for (const span of spans) {
+		if (span.durationMs <= 0) continue;
+		threadTotals.set(span.threadKey, (threadTotals.get(span.threadKey) ?? 0) + span.durationMs);
+	}
+
+	let mainThreadKey = "";
+	let mainThreadTotal = 0;
+	for (const [threadKey, total] of threadTotals) {
+		if (total > mainThreadTotal) {
+			mainThreadKey = threadKey;
+			mainThreadTotal = total;
+		}
+	}
+
+	return spans.filter((span) => span.threadKey === mainThreadKey && span.durationMs > 0).sort((left, right) => left.start - right.start);
 }
 
 function toProfile(entry: EntryAccumulator, totalScriptMs: number): ResourceProfile {
@@ -381,9 +453,10 @@ function buildFrameTimeline(frames: FrameBucket[], firstTs: number) {
 		startMs: (frame.start - firstTs) / 1000,
 		durationMs: frame.durationMs,
 		resourceManagerMs: frame.resourceManagerMs,
-		state: getState({ averageMs: frame.durationMs, worstMs: frame.durationMs, percentage: 0, hitchHits: isHeavyFrame(frame) ? 1 : 0 }),
+		state: isHeavyFrame(frame) ? getState({ averageMs: frame.durationMs, worstMs: frame.durationMs, percentage: 0, hitchHits: 1 }) : "excellent",
 		entryCount: frame.entryTotals.size,
 		topEntry: frame.topEntry,
+		topEntries: frame.topEntries,
 	}));
 }
 

@@ -8,12 +8,14 @@
 	import UploadCloudIcon from "@lucide/svelte/icons/upload-cloud";
 	import * as Card from "$lib/components/ui/card/index.js";
 	import { Progress } from "$lib/components/ui/progress/index.js";
-	import { analyzeProfilerJson, type ProfilerAnalysis, type ResourceState } from "./profilerAnalyzer";
+	import { analyzeProfilerJson, type FrameProfile, type ProfilerAnalysis, type ResourceState } from "./profilerAnalyzer";
 
 	let analysis = $state<ProfilerAnalysis | null>(null);
+	let hoveredFrame = $state<FrameProfile | null>(null);
 	let fileName = $state("");
 	let error = $state("");
 	let dragging = $state(false);
+	let activeFrame = $derived(hoveredFrame ?? analysis?.frameTimeline[0] ?? null);
 
 	const stateLabels: Record<ResourceState, string> = {
 		excellent: "Excellent",
@@ -31,9 +33,12 @@
 		try {
 			const text = await file.text();
 			const parsed: unknown = JSON.parse(text);
-			analysis = analyzeProfilerJson(parsed);
+			const nextAnalysis = analyzeProfilerJson(parsed);
+			analysis = nextAnalysis;
+			hoveredFrame = nextAnalysis.frameTimeline[0] ?? null;
 		} catch (caught) {
 			analysis = null;
+			hoveredFrame = null;
 			error = caught instanceof Error ? caught.message : String(caught);
 		}
 	}
@@ -199,7 +204,14 @@
 
 	{#if analysis}
 		<div class="grid gap-4 md:grid-cols-2 xl:grid-cols-6">
-			{#each [{ label: "Recording", value: formatMs(analysis.stats.recordingMs) }, { label: "Avg script / frame", value: formatMs(analysis.stats.averageScriptMsPerFrame) }, { label: "Hitches", value: `${formatNumber(analysis.stats.hitchCount)} / ${formatNumber(analysis.stats.frameCount)} frames >25ms` }, { label: "Heavy ticks", value: `${formatNumber(analysis.stats.heavyTickCount)} / ${formatNumber(analysis.stats.frameCount)} ticks >25ms scripts` }, { label: "Profiler entries", value: formatNumber(analysis.stats.entryCount) }, { label: "Resource manager", value: `${formatMs(analysis.stats.resourceManagerTotalMs)} / ${formatNumber(analysis.stats.resourceManagerCalls)}` }] as stat}
+			{#each [
+				{ label: "Recording", value: formatMs(analysis.stats.recordingMs), description: "Capture length" },
+				{ label: "Avg script / frame", value: formatMs(analysis.stats.averageScriptMsPerFrame), description: "Measured script time" },
+				{ label: "Hitches", value: `${formatNumber(analysis.stats.hitchCount)} / ${formatNumber(analysis.stats.frameCount)}`, description: "frames >25ms" },
+				{ label: "Heavy ticks", value: `${formatNumber(analysis.stats.heavyTickCount)} / ${formatNumber(analysis.stats.frameCount)}`, description: "ticks >25ms scripts" },
+				{ label: "Profiler entries", value: formatNumber(analysis.stats.entryCount), description: "Trace rows" },
+				{ label: "Resource manager", value: `${formatMs(analysis.stats.resourceManagerTotalMs)} / ${formatNumber(analysis.stats.resourceManagerCalls)}`, description: "total / frames" },
+			] as stat}
 				<Card.Root class="group relative overflow-hidden rounded-sm border-border bg-card shadow-sm transition-transform duration-300 hover:-translate-y-0.5">
 					<div
 						class="pointer-events-none absolute inset-x-4 top-0 h-px bg-linear-to-r from-transparent via-primary/70 to-transparent opacity-0 transition-opacity duration-300 group-hover:opacity-100"
@@ -207,6 +219,7 @@
 					<Card.Content class="p-4">
 						<p class="text-xs text-muted-foreground">{stat.label}</p>
 						<p class="mt-2 truncate text-xl font-semibold text-foreground">{stat.value}</p>
+						<p class="mt-1 truncate text-xs text-muted-foreground">{stat.description}</p>
 					</Card.Content>
 				</Card.Root>
 			{/each}
@@ -288,25 +301,47 @@
 			</Card.Header>
 			<Card.Content>
 				{#if analysis.frameTimeline.length}
-					<div class="space-y-3 rounded-sm border border-border bg-background/70 p-3">
-						<div class="flex items-center justify-between gap-3 text-xs text-muted-foreground">
-							<span>25ms script budget</span>
-							<span>worst {formatMs(analysis.stats.worstFrameMs)}</span>
+					<div class="space-y-4 rounded-sm border border-border bg-background/70 p-4">
+						<div class="relative h-52 overflow-hidden rounded-sm bg-background/70">
+							<div
+								class="absolute inset-x-0 border-t border-dashed border-muted-foreground/35"
+								style={`bottom: ${barWidth(25, Math.max(25, analysis.stats.worstFrameMs))}%`}
+							>
+								<span class="absolute -top-5 left-1 text-xs text-muted-foreground">25ms script budget</span>
+							</div>
+							<div class="absolute inset-x-0 bottom-0 h-px bg-emerald-500/70"></div>
+							<div class="absolute inset-0 flex items-end gap-px pt-8">
+								{#each analysis.frameTimeline as frame}
+									<button
+										type="button"
+										class="group/frame flex h-full min-w-0 flex-1 cursor-pointer items-end rounded-t-[1px] outline-none transition-opacity hover:opacity-90 focus-visible:ring-2 focus-visible:ring-ring"
+										aria-label={`Frame ${frame.index}, ${formatMs(frame.durationMs)}`}
+										onmouseenter={() => (hoveredFrame = frame)}
+										onfocus={() => (hoveredFrame = frame)}
+									>
+										<span
+											class={["block w-full rounded-t-[1px] transition-all", stateBarClass(frame.state)]}
+											style={`height: ${barWidth(frame.durationMs, Math.max(25, analysis.stats.worstFrameMs))}%`}
+										></span>
+									</button>
+								{/each}
+							</div>
 						</div>
-						<div class="max-h-72 space-y-3 overflow-y-auto pr-1">
-							{#each analysis.frameTimeline as frame}
-								<div class="grid gap-2 sm:grid-cols-[5rem_minmax(0,1fr)_7rem] sm:items-center">
-									<div class="text-xs text-muted-foreground">Frame {frame.index}</div>
-									<div class="min-w-0 space-y-1.5">
-										<Progress value={barWidth(frame.durationMs, Math.max(25, analysis.stats.worstFrameMs))} class="h-2 rounded-xs" indicatorClass={stateBarClass(frame.state)} />
-										<p class="truncate text-[11px] text-muted-foreground">
-											{frame.topEntry ? `top ${frame.topEntry}` : "No dominant entry"} / Resource Manager {formatMs(frame.resourceManagerMs)}
-										</p>
-									</div>
-									<p class={["text-right text-xs", stateTextClass(frame.state)]}>{formatMs(frame.durationMs)}</p>
+
+						{#if activeFrame}
+							<div class="rounded-sm bg-muted px-3 py-2 text-xs text-muted-foreground">
+								<div class="flex flex-wrap items-center gap-x-3 gap-y-1">
+									<span class="font-semibold text-foreground">Frame {activeFrame.index}</span>
+									<span class={stateTextClass(activeFrame.state)}>{formatMs(activeFrame.durationMs)}</span>
+									<span>
+										Top:
+										{#each activeFrame.topEntries as entry, index}
+											{#if index > 0}, {/if}{entry.name} [{formatMs(entry.totalMs)}]
+										{/each}
+									</span>
 								</div>
-							{/each}
-						</div>
+							</div>
+						{/if}
 					</div>
 				{:else}
 					<div class="rounded-sm border border-dashed border-border bg-background/60 p-4 text-sm text-muted-foreground">No Resource Manager Tick frames were found in this profiler export.</div>
