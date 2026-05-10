@@ -8,6 +8,7 @@
 	import QueryConsole from "./QueryConsole.svelte";
 	import StatusOverview from "./StatusOverview.svelte";
 	import UserManagementCard from "./UserManagementCard.svelte";
+	import { log } from "$lib/core/logger";
 	import {
 		deleteMariaDBUser,
 		executeMariaDBQuery,
@@ -96,6 +97,7 @@
 			return value;
 		} catch (caught) {
 			error = caught instanceof Error ? caught.message : String(caught);
+			log("MariaDB panel task failed.", { level: "error", scope: "mariadb.ui", detail: error });
 		} finally {
 			busy = false;
 		}
@@ -137,6 +139,7 @@
 	async function saveUser() {
 		if (!credentialsReady) {
 			error = "Apply valid admin credentials before adding MariaDB users.";
+			log("MariaDB add-user action blocked until credentials are applied.", { level: "warn", scope: "mariadb.ui" });
 			return;
 		}
 
@@ -156,6 +159,7 @@
 	async function refreshUsers() {
 		if (!credentialsReady) {
 			error = "Apply valid admin credentials before refreshing MariaDB users.";
+			log("MariaDB user refresh blocked until credentials are applied.", { level: "warn", scope: "mariadb.ui" });
 			return;
 		}
 
@@ -176,9 +180,11 @@
 	async function editUser(user: MariaDBUser) {
 		if (!credentialsReady) {
 			error = "Apply valid admin credentials before editing MariaDB users.";
+			log(`MariaDB edit action blocked for ${user.username}@${user.host}.`, { level: "warn", scope: "mariadb.ui" });
 			return;
 		}
 
+		log(`MariaDB user selected for editing: ${user.username}@${user.host}.`, { scope: "mariadb.ui" });
 		selectedUser = user;
 		selectedAccess = null;
 		editingUser = {
@@ -204,6 +210,7 @@
 	async function applyCredentials() {
 		credentialsReady = false;
 		selectedAccess = null;
+		log("MariaDB admin credentials changed; refreshing status and users.", { scope: "mariadb.ui", detail: `${credentials.username}@${credentials.host}:${credentials.port}` });
 		await refreshStatus();
 		const loadedUsers = await runTask(
 			() => listMariaDBUsers(credentials),
@@ -220,6 +227,7 @@
 	async function saveExistingUser() {
 		if (!credentialsReady) {
 			error = "Apply valid admin credentials before updating MariaDB users.";
+			log("MariaDB user update blocked until credentials are applied.", { level: "warn", scope: "mariadb.ui" });
 			return;
 		}
 
@@ -245,6 +253,7 @@
 	async function removeExistingUser(user: MariaDBUser) {
 		if (!credentialsReady) {
 			error = "Apply valid admin credentials before deleting MariaDB users.";
+			log(`MariaDB delete action blocked for ${user.username}@${user.host}.`, { level: "warn", scope: "mariadb.ui" });
 			return;
 		}
 
@@ -255,6 +264,7 @@
 	async function executeQuery() {
 		if (!credentialsReady) {
 			error = "Apply valid admin credentials before running MariaDB queries.";
+			log("MariaDB query execution blocked until credentials are applied.", { level: "warn", scope: "mariadb.ui" });
 			return;
 		}
 

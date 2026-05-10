@@ -6,6 +6,7 @@ import HashIcon from "@lucide/svelte/icons/hash";
 import HomeIcon from "@lucide/svelte/icons/home";
 import InfoIcon from "@lucide/svelte/icons/info";
 import PackagePlusIcon from "@lucide/svelte/icons/package-plus";
+import ScrollTextIcon from "@lucide/svelte/icons/scroll-text";
 import ServerCogIcon from "@lucide/svelte/icons/server-cog";
 import WrenchIcon from "@lucide/svelte/icons/wrench";
 import type { Component } from "svelte";
@@ -19,7 +20,8 @@ export type PageId =
 	| "configurator"
 	| "profiler"
 	| "jooat"
-	| "json-formatter";
+	| "json-formatter"
+	| "logs";
 
 export interface NavigationChild {
 	id: PageId;
@@ -91,6 +93,11 @@ export const navigation: NavigationItem[] = [
 				id: "json-formatter",
 				label: "JSON Formatter",
 				icon: FileJsonIcon,
+			},
+			{
+				id: "logs",
+				label: "Application Logs",
+				icon: ScrollTextIcon,
 			},
 		],
 	},

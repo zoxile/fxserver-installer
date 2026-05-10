@@ -5,6 +5,7 @@
 	import HomePage from "$lib/features/home/HomePage.svelte";
 	import JooatResolverPage from "$lib/features/jooat/JooatResolverPage.svelte";
 	import JsonFormatterPage from "$lib/features/json/JsonFormatterPage.svelte";
+	import LogViewerPage from "$lib/features/app-logs/LogViewerPage.svelte";
 	import MariaDBPanel from "$lib/features/mariadb/MariaDBPanel.svelte";
 	import PlaceholderPage from "$lib/features/placeholder/PlaceholderPage.svelte";
 	import ProfilerPage from "$lib/features/profiler/ProfilerPage.svelte";
@@ -12,6 +13,8 @@
 	import ArrowUpIcon from "@lucide/svelte/icons/arrow-up";
 	import type { PageId } from "$lib/navigation";
 	import { getPageLabel } from "$lib/navigation";
+	import { initializeLogger, log } from "$lib/core/logger";
+	import { onMount } from "svelte";
 
 	let scrollContainer: HTMLElement;
 	let isNearBottom = $state(false);
@@ -19,15 +22,23 @@
 	let activePage = $state<PageId>("home");
 	let navigationFrame = 0;
 
-	const placeholders: Record<Exclude<PageId, "home" | "mariadb" | "json-formatter" | "profiler" | "jooat">, string> = {
+	const placeholders: Record<Exclude<PageId, "home" | "mariadb" | "json-formatter" | "profiler" | "jooat" | "logs">, string> = {
 		"artifact-install": "Download and prepare the selected FXServer artifact.",
 		"artifact-info": "Inspect artifact metadata, recommended builds, and known broken versions.",
 		server: "Configure and launch the FXServer setup flow.",
 		configurator: "Build and edit server configuration files.",
 	};
 
+	onMount(() => {
+		void (async () => {
+			await initializeLogger();
+			log("Application shell mounted.", { level: "debug", scope: "app" });
+		})();
+	});
+
 	function navigate(page: PageId) {
 		if (page === activePage) return;
+		log(`Navigating to ${getPageLabel(page)}.`, { scope: "navigation", detail: `${activePage} -> ${page}` });
 
 		if (navigationFrame) {
 			cancelAnimationFrame(navigationFrame);
@@ -82,6 +93,8 @@
 					<ProfilerPage />
 				{:else if activePage === "jooat"}
 					<JooatResolverPage />
+				{:else if activePage === "logs"}
+					<LogViewerPage />
 				{:else}
 					<PlaceholderPage title={getPageLabel(activePage)} description={placeholders[activePage]} />
 				{/if}

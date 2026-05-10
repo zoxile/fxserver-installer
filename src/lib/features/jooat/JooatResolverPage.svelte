@@ -16,6 +16,7 @@
 	import { Button } from "$lib/components/ui/button/index.js";
 	import * as Card from "$lib/components/ui/card/index.js";
 	import { Input } from "$lib/components/ui/input/index.js";
+	import { log } from "$lib/core/logger";
 	import {
 		getJooatResolverStatus,
 		installJooatResolverDatabase,
@@ -81,18 +82,21 @@
 
 	function copyHashTable() {
 		const output = hashRows.map((row) => `${row.input}\t${row.hex}\t${row.unsigned}\t${row.signed}`).join("\n");
+		log(`Copied ${hashRows.length} JOOAT hash rows.`, { level: "debug", scope: "jooat.ui" });
 		void copyText(output, "hash table");
 	}
 
 	function useHashNamesAsDictionary() {
 		const merged = [...new Set([...dictionaryInput.split(/\r?\n/), ...namesInput.split(/\r?\n/)].map((line) => line.trim()).filter(Boolean))];
 		dictionaryInput = merged.join("\n");
+		log(`Merged ${merged.length} names into the JOOAT dictionary.`, { scope: "jooat.ui" });
 	}
 
 	function resetSamples() {
 		namesInput = sampleNames;
 		hashesInput = sampleHashes;
 		dictionaryInput = defaultDictionary;
+		log("JOOAT sample inputs reset.", { level: "debug", scope: "jooat.ui" });
 	}
 
 	async function refreshResolverStatus() {
@@ -104,6 +108,7 @@
 		} catch (error) {
 			resolverNotice = error instanceof Error ? error.message : String(error);
 			resolverMode = "dictionary";
+			log("JOOAT resolver status fallback to dictionary mode.", { level: "warn", scope: "jooat.ui", detail: resolverNotice });
 		}
 	}
 
@@ -113,6 +118,7 @@
 
 		try {
 			const queries = hashesInput.split(/[\s,;]+/).map((entry) => entry.trim()).filter(Boolean);
+			log(`Resolving ${queries.length} JOOAT hashes with the offline database.`, { scope: "jooat.ui" });
 			const results = await resolveJooatHashes(queries);
 			databaseResults = results.map(toDisplayResult);
 		} catch (error) {
@@ -129,6 +135,7 @@
 		installProgress = null;
 
 		try {
+			log("Installing optional JOOAT resolver database from the UI.", { scope: "jooat.ui", detail: manifestUrl });
 			resolverStatus = await installJooatResolverDatabase({
 				manifestUrl,
 				onProgress: (progress) => (installProgress = progress),
@@ -148,6 +155,7 @@
 		resolverNotice = "";
 
 		try {
+			log("Removing optional JOOAT resolver database from the UI.", { level: "warn", scope: "jooat.ui" });
 			resolverStatus = await removeJooatResolverDatabase();
 			resolverMode = "dictionary";
 			databaseResults = [];

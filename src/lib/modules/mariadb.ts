@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { log } from "$lib/core/logger";
 
 export interface MariaDBStatus {
 	installed: boolean;
@@ -86,11 +87,30 @@ function hasTauriRuntime() {
 }
 
 function unavailableOutsideTauri<T>(): Promise<T> {
+	log("MariaDB action blocked outside the desktop runtime.", { level: "warn", scope: "mariadb.runtime" });
 	return Promise.reject(new Error("MariaDB actions are available in the Tauri desktop app."));
+}
+
+function errorMessage(error: unknown) {
+	return error instanceof Error ? error.message : String(error);
+}
+
+async function invokeMariaDB<T>(command: string, args: Record<string, unknown>, action: string, success: (value: T) => string) {
+	log(`${action} started.`, { scope: "mariadb" });
+
+	try {
+		const value = await invoke<T>(command, args);
+		log(success(value), { level: "success", scope: "mariadb" });
+		return value;
+	} catch (error) {
+		log(`${action} failed.`, { level: "error", scope: "mariadb", detail: errorMessage(error) });
+		throw error;
+	}
 }
 
 export function getMariaDBStatus() {
 	if (!hasTauriRuntime()) {
+		log("MariaDB status requested in browser preview.", { level: "debug", scope: "mariadb.status" });
 		return Promise.resolve({
 			installed: false,
 			running: false,
@@ -101,55 +121,67 @@ export function getMariaDBStatus() {
 		});
 	}
 
-	return invoke<MariaDBStatus>("get_mariadb_status");
+	return invokeMariaDB<MariaDBStatus>("get_mariadb_status", {}, "MariaDB status refresh", (status) =>
+		status.installed ? `MariaDB detected${status.version ? `: ${status.version}` : "."}` : "MariaDB is not installed.",
+	);
 }
 
 export function installMariaDB(options: MariaDBInstallOptions) {
 	if (!hasTauriRuntime()) return unavailableOutsideTauri<string>();
-	return invoke<string>("install_mariadb", { options });
+	return invokeMariaDB<string>(
+		"install_mariadb",
+		{ options },
+		"MariaDB install",
+		() => "MariaDB installer finished.",
+	);
 }
 
 export function startMariaDBService(serviceName?: string | null) {
 	if (!hasTauriRuntime()) return unavailableOutsideTauri<MariaDBStatus>();
-	return invoke<MariaDBStatus>("start_mariadb_service", { serviceName });
+	return invokeMariaDB<MariaDBStatus>("start_mariadb_service", { serviceName }, "MariaDB service start", (status) => `MariaDB service is ${status.running ? "running" : "not running"}.`);
 }
 
 export function stopMariaDBService(serviceName?: string | null) {
 	if (!hasTauriRuntime()) return unavailableOutsideTauri<MariaDBStatus>();
-	return invoke<MariaDBStatus>("stop_mariadb_service", { serviceName });
+	return invokeMariaDB<MariaDBStatus>("stop_mariadb_service", { serviceName }, "MariaDB service stop", (status) => `MariaDB service is ${status.running ? "running" : "stopped"}.`);
 }
 
 export function restartMariaDBService(serviceName?: string | null) {
 	if (!hasTauriRuntime()) return unavailableOutsideTauri<MariaDBStatus>();
-	return invoke<MariaDBStatus>("restart_mariadb_service", { serviceName });
+	return invokeMariaDB<MariaDBStatus>("restart_mariadb_service", { serviceName }, "MariaDB service restart", (status) => `MariaDB service restart completed; running=${status.running}.`);
 }
 
 export function executeMariaDBQuery(credentials: MariaDBCredentials, query: string) {
 	if (!hasTauriRuntime()) return unavailableOutsideTauri<MariaDBQueryResult>();
-	return invoke<MariaDBQueryResult>("execute_mariadb_query", { credentials, query });
+	return invokeMariaDB<MariaDBQueryResult>(
+		"execute_mariadb_query",
+		{ credentials, query },
+		"MariaDB query execution",
+		(result) => `MariaDB query ${result.success ? "succeeded" : "returned an error"} with ${result.rows.length} rows.`,
+	);
 }
 
 export function saveMariaDBUser(credentials: MariaDBCredentials, config: MariaDBUserConfig) {
 	if (!hasTauriRuntime()) return unavailableOutsideTauri<void>();
-	return invoke<void>("save_mariadb_user", { credentials, config });
+	return invokeMariaDB<void>("save_mariadb_user", { credentials, config }, `MariaDB user save for ${config.username}@${config.host}`, () => "MariaDB user saved.");
 }
 
 export function listMariaDBUsers(credentials: MariaDBCredentials) {
 	if (!hasTauriRuntime()) return unavailableOutsideTauri<MariaDBUser[]>();
-	return invoke<MariaDBUser[]>("list_mariadb_users", { credentials });
+	return invokeMariaDB<MariaDBUser[]>("list_mariadb_users", { credentials }, "MariaDB user list refresh", (users) => `MariaDB returned ${users.length} users.`);
 }
 
 export function updateMariaDBUser(credentials: MariaDBCredentials, config: MariaDBUserUpdateConfig) {
 	if (!hasTauriRuntime()) return unavailableOutsideTauri<void>();
-	return invoke<void>("update_mariadb_user", { credentials, config });
+	return invokeMariaDB<void>("update_mariadb_user", { credentials, config }, `MariaDB user update for ${config.username}@${config.host}`, () => "MariaDB user updated.");
 }
 
 export function getMariaDBUserAccess(credentials: MariaDBCredentials, username: string, host: string) {
 	if (!hasTauriRuntime()) return unavailableOutsideTauri<MariaDBUserAccess>();
-	return invoke<MariaDBUserAccess>("get_mariadb_user_access", { credentials, username, host });
+	return invokeMariaDB<MariaDBUserAccess>("get_mariadb_user_access", { credentials, username, host }, `MariaDB access refresh for ${username}@${host}`, (access) => `Loaded ${access.grants.length} grants for ${username}@${host}.`);
 }
 
 export function deleteMariaDBUser(credentials: MariaDBCredentials, username: string, host: string) {
 	if (!hasTauriRuntime()) return unavailableOutsideTauri<void>();
-	return invoke<void>("delete_mariadb_user", { credentials, username, host });
+	return invokeMariaDB<void>("delete_mariadb_user", { credentials, username, host }, `MariaDB user delete for ${username}@${host}`, () => "MariaDB user deleted.");
 }

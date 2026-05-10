@@ -7,6 +7,7 @@
 	import TerminalIcon from "@lucide/svelte/icons/terminal";
 	import UploadCloudIcon from "@lucide/svelte/icons/upload-cloud";
 	import * as Card from "$lib/components/ui/card/index.js";
+	import { log } from "$lib/core/logger";
 	import { Progress } from "$lib/components/ui/progress/index.js";
 	import { analyzeProfilerJson, type FrameProfile, type ProfilerAnalysis, type ResourceState } from "./profilerAnalyzer";
 
@@ -29,6 +30,7 @@
 		if (!file) return;
 		fileName = file.name || "profiler.json";
 		error = "";
+		log("Profiler file load started.", { scope: "profiler", detail: `${fileName} (${file.size} bytes)` });
 
 		try {
 			const text = await file.text();
@@ -36,10 +38,16 @@
 			const nextAnalysis = analyzeProfilerJson(parsed);
 			analysis = nextAnalysis;
 			hoveredFrame = nextAnalysis.frameTimeline[0] ?? null;
+			log("Profiler file analyzed successfully.", {
+				level: "success",
+				scope: "profiler",
+				detail: `${nextAnalysis.stats.frameCount} frames, ${nextAnalysis.resources.length} resources`,
+			});
 		} catch (caught) {
 			analysis = null;
 			hoveredFrame = null;
 			error = caught instanceof Error ? caught.message : String(caught);
+			log("Profiler file analysis failed.", { level: "error", scope: "profiler", detail: error });
 		}
 	}
 

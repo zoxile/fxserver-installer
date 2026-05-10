@@ -8,6 +8,7 @@
 	import UploadIcon from "@lucide/svelte/icons/upload";
 	import * as Card from "$lib/components/ui/card/index.js";
 	import { Button } from "$lib/components/ui/button/index.js";
+	import { log } from "$lib/core/logger";
 	import JsonNotice from "./JsonNotice.svelte";
 	import { formatJson, getJsonErrorMessage, minifyJson, repairJson, tryParseJson } from "./jsonRepair";
 
@@ -26,6 +27,7 @@
 		if (!file) return;
 
 		if (!file.name.endsWith(".json")) {
+			log("JSON upload rejected because the file extension was invalid.", { level: "warn", scope: "json.formatter", detail: file.name });
 			notice = {
 				type: "error",
 				title: "Invalid file type",
@@ -38,6 +40,7 @@
 			input = await file.text();
 			output = "";
 			fixedOutput = "";
+			log("JSON file uploaded into the formatter.", { level: "success", scope: "json.formatter", detail: `${file.name} (${input.length} characters)` });
 
 			notice = {
 				type: "success",
@@ -45,6 +48,7 @@
 				description: `${file.name} has been loaded into the editor.`,
 			};
 		} catch {
+			log("JSON file upload failed.", { level: "error", scope: "json.formatter", detail: file.name });
 			notice = {
 				type: "error",
 				title: "Could not read file",
@@ -61,6 +65,7 @@
 		try {
 			const value = tryParseJson(input);
 			output = formatJson(value);
+			log("JSON formatted successfully.", { level: "success", scope: "json.formatter", detail: `${output.length} characters` });
 			notice = {
 				type: "success",
 				title: "JSON is valid",
@@ -72,12 +77,14 @@
 
 			if (repair) {
 				fixedOutput = repair.json;
+				log("JSON formatter found a fixable syntax issue.", { level: "warn", scope: "json.formatter", detail: repair.changes.join(", ") });
 				notice = {
 					type: "repair",
 					title: "Fixable JSON issue found",
 					description: `${getJsonErrorMessage(input, error)} Suggested repair: ${repair.changes.join(", ")}.`,
 				};
 			} else {
+				log("JSON formatting failed with an unrecoverable syntax issue.", { level: "error", scope: "json.formatter", detail: getJsonErrorMessage(input, error) });
 				notice = {
 					type: "error",
 					title: "Invalid JSON",
@@ -92,6 +99,7 @@
 
 		try {
 			output = minifyJson(tryParseJson(input));
+			log("JSON minified successfully.", { level: "success", scope: "json.formatter", detail: `${output.length} characters` });
 			notice = {
 				type: "success",
 				title: "JSON minified",
@@ -99,6 +107,7 @@
 			};
 		} catch (error) {
 			output = "";
+			log("JSON minify failed.", { level: "error", scope: "json.formatter", detail: getJsonErrorMessage(input, error) });
 			notice = {
 				type: "error",
 				title: "Cannot minify invalid JSON",
@@ -111,6 +120,7 @@
 		input = fixedOutput;
 		output = fixedOutput;
 		fixedOutput = "";
+		log("Suggested JSON repair was applied.", { level: "success", scope: "json.formatter" });
 		notice = {
 			type: "success",
 			title: "Applied fixed JSON",
@@ -121,6 +131,7 @@
 	async function copyText(value: string, label: string) {
 		if (!value) return;
 		await navigator.clipboard.writeText(value);
+		log(`${label} copied to clipboard.`, { level: "debug", scope: "json.formatter" });
 		notice = {
 			type: "success",
 			title: `${label} copied`,
