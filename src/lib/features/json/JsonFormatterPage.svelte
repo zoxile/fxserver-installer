@@ -121,13 +121,6 @@
 				</div>
 			</Card.Header>
 			<Card.Content class="space-y-4">
-				<textarea
-					bind:value={input}
-					spellcheck="false"
-					placeholder={inputPlaceholder}
-					title="JSON input to validate, format, minify, or repair."
-					class="min-h-48 w-full resize-y rounded-sm border border-input bg-background px-3 py-3 font-mono text-sm leading-6 text-foreground outline-none transition-colors placeholder:text-muted-foreground focus:border-ring focus:ring-2 focus:ring-ring/30"
-				></textarea>
 				<div class="flex flex-wrap gap-2">
 					<Button onclick={formatInput} title="Format and validate JSON">
 						<SparklesIcon />
@@ -142,6 +135,13 @@
 						Copy Input
 					</Button>
 				</div>
+				<textarea
+					bind:value={input}
+					spellcheck="false"
+					placeholder={inputPlaceholder}
+					title="JSON input to validate, format, minify, or repair."
+					class="min-h-48 w-full resize-y rounded-sm border border-input bg-background px-3 py-3 font-mono text-sm leading-6 text-foreground outline-none transition-colors placeholder:text-muted-foreground focus:border-ring focus:ring-2 focus:ring-ring/30"
+				></textarea>
 			</Card.Content>
 		</Card.Root>
 
@@ -152,11 +152,11 @@
 					<Card.Description>Valid JSON appears here after formatting or minifying.</Card.Description>
 				</Card.Header>
 				<Card.Content class="space-y-4">
-					<pre class="min-h-48 overflow-auto rounded-sm border border-border bg-background p-3 font-mono text-xs leading-5 text-foreground">{output || "No formatted output yet."}</pre>
 					<Button variant="outline" onclick={() => copyText(output, "Output")} disabled={!output} title="Copy formatted JSON">
 						<ClipboardIcon />
 						Copy Output
 					</Button>
+					<pre class="min-h-48 overflow-auto rounded-sm border border-border bg-background p-3 font-mono text-xs leading-5 text-foreground">{output || "No formatted output yet."}</pre>
 				</Card.Content>
 			</Card.Root>
 
@@ -167,7 +167,6 @@
 						<Card.Description>Generated only when the syntax issue can be repaired safely.</Card.Description>
 					</Card.Header>
 					<Card.Content class="space-y-4">
-						<pre class="max-h-80 overflow-auto rounded-sm border border-border bg-background p-3 font-mono text-xs leading-5 text-foreground">{fixedOutput}</pre>
 						<div class="flex flex-wrap gap-2">
 							<Button onclick={useFixedJson} title="Move fixed JSON into the editor">
 								<WandSparklesIcon />
@@ -178,6 +177,7 @@
 								Copy Fix
 							</Button>
 						</div>
+						<pre class="max-h-80 overflow-auto rounded-sm border border-border bg-background p-3 font-mono text-xs leading-5 text-foreground">{fixedOutput}</pre>
 					</Card.Content>
 				</Card.Root>
 			{/if}
