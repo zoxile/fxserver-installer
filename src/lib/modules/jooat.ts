@@ -48,6 +48,8 @@ export interface JooatInstallProgress {
 	label: string;
 }
 
+const completeShardCount = 256;
+
 function hasTauriRuntime() {
 	return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 }
@@ -124,9 +126,24 @@ function validateManifest(manifest: JooatResolverManifest) {
 		throw new Error("Resolver manifest must include a version and at least one shard.");
 	}
 
+	if (!isCompleteManifest(manifest)) {
+		throw new Error("Resolver manifest must include the complete 256-shard database from 00 through ff.");
+	}
+
 	for (const shard of manifest.shards) {
 		if (!/^[0-9a-f]{2}$/i.test(shard.prefix) || !shard.path) {
 			throw new Error("Resolver manifest contains an invalid shard entry.");
 		}
 	}
+}
+
+function isCompleteManifest(manifest: JooatResolverManifest) {
+	if (manifest.shards.length !== completeShardCount) return false;
+
+	const prefixes = new Set(manifest.shards.map((shard) => shard.prefix.toLowerCase()));
+	for (let index = 0; index < completeShardCount; index += 1) {
+		if (!prefixes.has(index.toString(16).padStart(2, "0"))) return false;
+	}
+
+	return true;
 }

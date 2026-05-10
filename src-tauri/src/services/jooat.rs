@@ -11,6 +11,7 @@ use crate::models::jooat::{JooatResolvedHash, JooatResolverManifest, JooatResolv
 const DATABASE_FOLDER: &str = "jooat-resolver";
 const MANIFEST_FILE: &str = "manifest.json";
 const SHARDS_FOLDER: &str = "shards";
+const COMPLETE_SHARD_COUNT: usize = 256;
 
 pub fn get_status(app: &AppHandle) -> JooatResolverStatus {
     match database_dir(app) {
@@ -120,9 +121,12 @@ fn build_status(database_dir: PathBuf) -> JooatResolverStatus {
         .map(|manifest| installed_manifest_shards(&database_dir, manifest))
         .unwrap_or_else(|| installed_shards(&database_dir));
     let size_bytes = directory_size(&database_dir);
-    let available = manifest.is_some() && expected_shards > 0 && installed_shards >= expected_shards;
+    let complete_manifest = manifest.as_ref().is_some_and(manifest_is_complete);
+    let available = complete_manifest && installed_shards >= expected_shards;
     let message = if available {
-        "Offline resolver database is installed.".to_string()
+        "Complete offline resolver database is installed.".to_string()
+    } else if manifest.as_ref().is_some_and(|manifest| !manifest_is_complete(manifest)) {
+        format!("Resolver manifest is incomplete. Expected {COMPLETE_SHARD_COUNT} prefix shards from 00 through ff.")
     } else if manifest.is_some() {
         format!("Resolver manifest is installed, but only {installed_shards} of {expected_shards} shards are present.")
     } else {
@@ -167,8 +171,10 @@ fn validate_manifest(manifest: &JooatResolverManifest) -> Result<(), String> {
         return Err("JOOAT manifest version is required.".to_string());
     }
 
-    if manifest.shards.is_empty() {
-        return Err("JOOAT manifest must include at least one shard.".to_string());
+    if !manifest_is_complete(manifest) {
+        return Err(format!(
+            "JOOAT manifest must include the complete {COMPLETE_SHARD_COUNT}-shard database from 00 through ff."
+        ));
     }
 
     for shard in &manifest.shards {
@@ -180,6 +186,20 @@ fn validate_manifest(manifest: &JooatResolverManifest) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+fn manifest_is_complete(manifest: &JooatResolverManifest) -> bool {
+    if manifest.shards.len() != COMPLETE_SHARD_COUNT {
+        return false;
+    }
+
+    let prefixes = manifest
+        .shards
+        .iter()
+        .filter_map(|shard| normalize_prefix(&shard.prefix).ok())
+        .collect::<HashSet<_>>();
+
+    (0..=u8::MAX).all(|value| prefixes.contains(&format!("{value:02x}")))
 }
 
 fn installed_shards(database_dir: &Path) -> usize {

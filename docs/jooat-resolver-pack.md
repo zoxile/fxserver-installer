@@ -4,7 +4,7 @@ The hasher works without extra files. The resolver database is optional so users
 
 ## Pack Layout
 
-Publish a release asset folder with a manifest and sharded TSV files:
+Publish a release asset folder with a manifest and 256 sharded TSV files:
 
 ```text
 manifest.json
@@ -24,6 +24,14 @@ Each shard contains only hashes whose 8-digit hex value starts with that shard p
 ```
 
 The app reads only the shard needed for the entered hash. It does not load the full resolver database into Svelte.
+
+Build the pack from a complete newline-delimited wordlist:
+
+```bash
+node scripts/build-jooat-resolver-pack.mjs complete-wordlist.txt dist/jooat-db 2026.05.10
+```
+
+Upload `manifest.json` and the whole `shards/` directory as GitHub release assets. The app validates that every shard prefix from `00` through `ff` is present before it marks the database as installed.
 
 ## Manifest
 
