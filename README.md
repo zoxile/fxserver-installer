@@ -2,7 +2,7 @@
 
 Optional offline resolver pack for fxserver-installer.
 
-- Source data: DurtyFree/gta-v-data-dumps public GTA V data dump
+- Source data: DurtyFree/gta-v-data-dumps public GTA V data dump (https://github.com/DurtyFree/gta-v-data-dumps)
 - Version: 2026.05.10-durtyfree-v3717
 - Entries: 279,338
 - Shards: 256
