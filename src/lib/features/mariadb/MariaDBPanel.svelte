@@ -159,14 +159,18 @@
 			return;
 		}
 
-		await runTask(() => listMariaDBUsers(credentials), "MariaDB users refreshed.", (value) => {
-			users = value;
-			if (selectedUser && !value.some((user) => user.username === selectedUser?.username && user.host === selectedUser?.host)) {
-				selectedUser = null;
-				selectedAccess = null;
-				editingUser = null;
-			}
-		});
+		await runTask(
+			() => listMariaDBUsers(credentials),
+			"MariaDB users refreshed.",
+			(value) => {
+				users = value;
+				if (selectedUser && !value.some((user) => user.username === selectedUser?.username && user.host === selectedUser?.host)) {
+					selectedUser = null;
+					selectedAccess = null;
+					editingUser = null;
+				}
+			},
+		);
 	}
 
 	async function editUser(user: MariaDBUser) {
@@ -201,7 +205,11 @@
 		credentialsReady = false;
 		selectedAccess = null;
 		await refreshStatus();
-		const loadedUsers = await runTask(() => listMariaDBUsers(credentials), "Admin credentials applied.", (value) => (users = value));
+		const loadedUsers = await runTask(
+			() => listMariaDBUsers(credentials),
+			"Admin credentials applied.",
+			(value) => (users = value),
+		);
 
 		if (loadedUsers) {
 			credentialsReady = true;
