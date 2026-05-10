@@ -191,41 +191,39 @@
 		</Card.Root>
 
 		<div class="space-y-4 xl:col-span-5">
-			<Card.Root class="rounded-md border-border bg-card shadow-sm">
+			<Card.Root class={`rounded-md bg-card shadow-sm ${fixedOutput ? "border-amber-500/35" : "border-border"}`}>
 				<Card.Header class="border-b border-border pb-4">
-					<Card.Title>Formatted Output</Card.Title>
-					<Card.Description>Valid JSON appears here after formatting or minifying.</Card.Description>
+					<Card.Title>{fixedOutput ? "Suggested Fixed JSON" : "Formatted Output"}</Card.Title>
+					<Card.Description>
+						{fixedOutput ? "Generated only when the syntax issue can be repaired safely." : "Valid JSON appears here after formatting or minifying."}
+					</Card.Description>
 				</Card.Header>
-				<Card.Content class="space-y-4">
-					<Button variant="outline" onclick={() => copyText(output, "Output")} disabled={!output} title="Copy formatted JSON">
-						<ClipboardIcon />
-						Copy Output
-					</Button>
-					<pre class="min-h-48 overflow-auto rounded-sm border border-border bg-background p-3 font-mono text-xs leading-5 text-foreground">{output || "No formatted output yet."}</pre>
-				</Card.Content>
-			</Card.Root>
 
-			{#if fixedOutput}
-				<Card.Root class="rounded-md border-amber-500/35 bg-card shadow-sm">
-					<Card.Header class="border-b border-border pb-4">
-						<Card.Title>Suggested Fixed JSON</Card.Title>
-						<Card.Description>Generated only when the syntax issue can be repaired safely.</Card.Description>
-					</Card.Header>
-					<Card.Content class="space-y-4">
+				<Card.Content class="space-y-4">
+					{#if fixedOutput}
 						<div class="flex flex-wrap gap-2">
 							<Button onclick={useFixedJson} title="Move fixed JSON into the editor">
 								<WandSparklesIcon />
 								Use Fixed JSON
 							</Button>
+
 							<Button variant="outline" onclick={() => copyText(fixedOutput, "Fixed JSON")} title="Copy fixed JSON">
 								<ClipboardIcon />
 								Copy Fix
 							</Button>
 						</div>
-						<pre class="max-h-80 overflow-auto rounded-sm border border-border bg-background p-3 font-mono text-xs leading-5 text-foreground">{fixedOutput}</pre>
-					</Card.Content>
-				</Card.Root>
-			{/if}
+
+						<pre class="min-h-48 max-h-80 overflow-auto rounded-sm border border-border bg-background p-3 font-mono text-xs leading-5 text-foreground">{fixedOutput}</pre>
+					{:else}
+						<Button variant="outline" onclick={() => copyText(output, "Output")} disabled={!output} title="Copy formatted JSON">
+							<ClipboardIcon />
+							Copy Output
+						</Button>
+
+						<pre class="min-h-48 overflow-auto rounded-sm border border-border bg-background p-3 font-mono text-xs leading-5 text-foreground">{output || "No formatted output yet."}</pre>
+					{/if}
+				</Card.Content>
+			</Card.Root>
 		</div>
 	</div>
 </section>
