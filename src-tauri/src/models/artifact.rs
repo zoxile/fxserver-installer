@@ -41,6 +41,9 @@ pub struct InstalledArtifactInfo {
     pub version: Option<String>,
     pub destination: String,
     pub marker_path: String,
+    pub citizen_server_impl_path: Option<String>,
+    pub file_version: Option<String>,
+    pub product_version: Option<String>,
     pub has_fxserver_executable: bool,
     pub detection_source: String,
 }

@@ -71,8 +71,8 @@
 		message = "";
 
 		try {
-			await chooseInstallFolder();
-			installPath = getInstallPath();
+			const selectedPath = await chooseInstallFolder();
+			installPath = selectedPath ?? getInstallPath();
 			if (installPath) {
 				message = "Install folder selected.";
 				log("Artifact install folder selected.", { scope: "artifacts.install-page", detail: installPath });

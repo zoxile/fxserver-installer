@@ -118,11 +118,23 @@
 					<p class="mt-1 text-lg font-semibold">{health.label}</p>
 				</div>
 				<div class="rounded-sm border border-border bg-background/70 px-3 py-2">
+					<p class="text-xs text-muted-foreground">Version Source</p>
+					<p class="mt-1 truncate text-sm font-medium text-foreground">{installed?.detectionSource ?? "none"}</p>
+				</div>
+				<div class="rounded-sm border border-border bg-background/70 px-3 py-2">
+					<p class="text-xs text-muted-foreground">Product Version</p>
+					<p class="mt-1 truncate font-mono text-sm font-medium text-foreground">{installed?.productVersion ?? installed?.fileVersion ?? "Unknown"}</p>
+				</div>
+				<div class="rounded-sm border border-border bg-background/70 px-3 py-2">
 					<p class="text-xs text-muted-foreground">Install Folder</p>
 					<p class="mt-1 truncate font-mono text-xs text-foreground">{installFolderLabel}</p>
 				</div>
 				<div class="rounded-sm border border-border bg-background/70 px-3 py-2">
-					<p class="text-xs text-muted-foreground">Fetched</p>
+					<p class="text-xs text-muted-foreground">Version File</p>
+					<p class="mt-1 truncate font-mono text-xs text-foreground">{installed?.citizenServerImplPath ?? "Not found"}</p>
+				</div>
+				<div class="rounded-sm border border-border bg-background/70 px-3 py-2">
+					<p class="text-xs text-muted-foreground">Metadata Fetched</p>
 					<p class="mt-1 text-sm font-medium text-foreground">{formatFetchedAt(metadata.fetchedAt)}</p>
 				</div>
 				<p class={`text-sm leading-5 md:col-span-3 ${artifactUrgencyTextClass(health.urgency)}`}>{health.description}</p>

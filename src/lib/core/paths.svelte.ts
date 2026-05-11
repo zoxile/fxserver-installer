@@ -1,15 +1,21 @@
+const installPathKey = "installPath";
+
 let installPath = $state<string>("");
+let loaded = false;
 
 export function setInstallPath(path: string) {
-	installPath = path;
-	localStorage.setItem("installPath", path);
+	loaded = true;
+	installPath = path.trim();
+	localStorage.setItem(installPathKey, installPath);
 }
 
 export function getInstallPath() {
+	if (!loaded) loadInstallPath();
 	return installPath;
 }
 
 export function loadInstallPath() {
-	const saved = localStorage.getItem("installPath");
+	loaded = true;
+	const saved = localStorage.getItem(installPathKey);
 	if (saved) installPath = saved;
 }

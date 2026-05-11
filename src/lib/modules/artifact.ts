@@ -37,6 +37,9 @@ export interface InstalledArtifactInfo {
 	version?: string | null;
 	destination: string;
 	markerPath: string;
+	citizenServerImplPath?: string | null;
+	fileVersion?: string | null;
+	productVersion?: string | null;
 	hasFxserverExecutable: boolean;
 	detectionSource: "marker" | "executable" | "none" | string;
 }

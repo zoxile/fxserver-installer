@@ -8,6 +8,10 @@ export async function chooseInstallFolder() {
 	});
 
 	if (selected) {
-		setInstallPath(selected as string);
+		const path = selected as string;
+		setInstallPath(path);
+		return path;
 	}
+
+	return null;
 }

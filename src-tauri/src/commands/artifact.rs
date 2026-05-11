@@ -28,21 +28,23 @@ pub fn get_installed_windows_artifact_info(
     let marker_path = destination.join(".fxserver-artifact-version");
     let executable_path = destination.join("FXServer.exe");
     let has_fxserver_executable = executable_path.exists();
-    let version = if marker_path.exists() {
-        Some(
-            fs::read_to_string(&marker_path)
-                .map_err(|error| format!("Failed to read installed artifact marker: {error}"))?
-                .trim()
-                .to_string(),
-        )
-        .filter(|value| !value.is_empty())
-    } else {
-        None
-    };
+    let citizen_server_impl_path = find_citizen_server_impl(&destination);
+    let version_info = citizen_server_impl_path
+        .as_deref()
+        .and_then(read_file_version_info);
+    let marker_version = read_marker_version(&marker_path)?;
+    let version = version_info
+        .as_ref()
+        .and_then(|info| artifact_version_from_file_info(info))
+        .or(marker_version);
 
-    let installed = version.is_some() || has_fxserver_executable;
-    let detection_source = if version.is_some() {
+    let installed = version.is_some() || citizen_server_impl_path.is_some() || has_fxserver_executable;
+    let detection_source = if version_info.is_some() {
+        "citizen-server-impl"
+    } else if version.is_some() {
         "marker"
+    } else if citizen_server_impl_path.is_some() {
+        "citizen-server-impl"
     } else if has_fxserver_executable {
         "executable"
     } else {
@@ -54,8 +56,123 @@ pub fn get_installed_windows_artifact_info(
         version,
         destination: destination.to_string_lossy().to_string(),
         marker_path: marker_path.to_string_lossy().to_string(),
+        citizen_server_impl_path: citizen_server_impl_path
+            .map(|path| path.to_string_lossy().to_string()),
+        file_version: version_info.as_ref().and_then(|info| info.file_version.clone()),
+        product_version: version_info.and_then(|info| info.product_version),
         has_fxserver_executable,
         detection_source: detection_source.to_string(),
+    })
+}
+
+#[derive(Debug)]
+struct FileVersionInfo {
+    file_version: Option<String>,
+    product_version: Option<String>,
+}
+
+fn read_marker_version(marker_path: &Path) -> Result<Option<String>, String> {
+    if !marker_path.exists() {
+        return Ok(None);
+    }
+
+    Ok(Some(
+        fs::read_to_string(marker_path)
+            .map_err(|error| format!("Failed to read installed artifact marker: {error}"))?
+            .trim()
+            .to_string(),
+    )
+    .filter(|value| !value.is_empty()))
+}
+
+fn artifact_version_from_file_info(info: &FileVersionInfo) -> Option<String> {
+    info.product_version
+        .as_deref()
+        .or(info.file_version.as_deref())
+        .and_then(|version| version.split('.').next_back())
+        .map(str::trim)
+        .filter(|version| !version.is_empty() && version.chars().all(|character| character.is_ascii_digit()))
+        .map(str::to_string)
+}
+
+fn find_citizen_server_impl(destination: &Path) -> Option<PathBuf> {
+    find_file_by_stem(destination, "citizen-server-impl", 6)
+}
+
+fn find_file_by_stem(directory: &Path, expected_stem: &str, depth: usize) -> Option<PathBuf> {
+    if depth == 0 || !directory.is_dir() {
+        return None;
+    }
+
+    let entries = fs::read_dir(directory).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_file() {
+            let stem_matches = path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .map(|stem| stem.eq_ignore_ascii_case(expected_stem))
+                .unwrap_or(false);
+            let name_matches = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(|name| name.eq_ignore_ascii_case(expected_stem))
+                .unwrap_or(false);
+
+            if stem_matches || name_matches {
+                return Some(path);
+            }
+        } else if path.is_dir() {
+            if let Some(found) = find_file_by_stem(&path, expected_stem, depth - 1) {
+                return Some(found);
+            }
+        }
+    }
+
+    None
+}
+
+fn read_file_version_info(path: &Path) -> Option<FileVersionInfo> {
+    let script = r#"
+param([string] $Path)
+$ErrorActionPreference = "Stop"
+$info = (Get-Item -LiteralPath $Path).VersionInfo
+[pscustomobject]@{
+    FileVersion = $info.FileVersion
+    ProductVersion = $info.ProductVersion
+} | ConvertTo-Json -Compress
+"#;
+
+    let output = Command::new("powershell")
+        .arg("-NoProfile")
+        .arg("-ExecutionPolicy")
+        .arg("Bypass")
+        .arg("-Command")
+        .arg(script)
+        .arg(path.to_string_lossy().to_string())
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let content = String::from_utf8_lossy(&output.stdout);
+    let value: serde_json::Value = serde_json::from_str(content.trim()).ok()?;
+
+    Some(FileVersionInfo {
+        file_version: value
+            .get("FileVersion")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string),
+        product_version: value
+            .get("ProductVersion")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string),
     })
 }
 
