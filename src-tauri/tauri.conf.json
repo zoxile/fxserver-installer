@@ -2,7 +2,7 @@
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "fxserver-installer",
   "version": "0.1.0",
-  "identifier": "com.tauri.dev",
+  "identifier": "com.fxserver.installer",
   "build": {
     "frontendDist": "../public",
     "devUrl": "http://localhost:5173",
