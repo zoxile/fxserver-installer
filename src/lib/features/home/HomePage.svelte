@@ -10,6 +10,9 @@
 	import ServerCogIcon from "@lucide/svelte/icons/server-cog";
 	import WrenchIcon from "@lucide/svelte/icons/wrench";
 	import * as Card from "$lib/components/ui/card/index.js";
+	import { Button } from "$lib/components/ui/button/index.js";
+	import { openExternalUrl } from "$lib/core/openExternal";
+	import HomeArtifactStatusCard from "./HomeArtifactStatusCard.svelte";
 	import HomeBentoCard from "./HomeBentoCard.svelte";
 	import type { PageId } from "$lib/navigation";
 
@@ -30,7 +33,7 @@
 </script>
 
 <section class="relative space-y-6 overflow-hidden">
-	<div class="grid gap-4 lg:grid-cols-[1.2fr_0.8fr]">
+	<div class="grid gap-4 xl:grid-cols-[1.15fr_0.85fr_0.85fr]">
 		<div>
 			<p class="text-xs font-semibold tracking-wide text-muted-foreground uppercase">Home</p>
 			<h1 class="mt-2 max-w-3xl text-3xl font-semibold tracking-normal text-foreground">FXServer setup, arranged into one quiet workspace.</h1>
@@ -64,18 +67,20 @@
 						{isUpToDate ? "Up to date" : `Update ${latestVersion} available`}
 					</p>
 				</div>
-				<a
-					class="inline-flex h-8 items-center gap-2 rounded-sm border border-border px-3 text-xs font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
-					href="https://github.com/zoxile/fxserver-installer"
-					target="_blank"
-					rel="noreferrer"
+				<Button
+					variant="outline"
+					size="sm"
+					class="w-fit rounded-sm"
+					onclick={() => openExternalUrl("https://github.com/zoxile/fxserver-installer")}
 					title="Open GitHub repository"
 				>
 					GitHub
 					<ExternalLinkIcon class="size-3.5" />
-				</a>
+				</Button>
 			</Card.Content>
 		</Card.Root>
+
+		<HomeArtifactStatusCard {onNavigate} />
 	</div>
 
 	<div class="bento-grid grid gap-4">

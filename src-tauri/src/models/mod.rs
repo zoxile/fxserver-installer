@@ -1,2 +1,3 @@
+pub mod artifact;
 pub mod jooat;
 pub mod mariadb;

@@ -2,6 +2,8 @@
 	import DatabaseIcon from "@lucide/svelte/icons/database";
 	import Titlebar from "./Titlebar.svelte";
 	import Sidebar from "$lib/components/layout/Sidebar.svelte";
+	import ArtifactInfoPage from "$lib/features/artifacts/ArtifactInfoPage.svelte";
+	import ArtifactInstallPage from "$lib/features/artifacts/ArtifactInstallPage.svelte";
 	import ConfiguratorPage from "$lib/features/configurator/ConfiguratorPage.svelte";
 	import HomePage from "$lib/features/home/HomePage.svelte";
 	import JooatResolverPage from "$lib/features/jooat/JooatResolverPage.svelte";
@@ -23,9 +25,7 @@
 	let activePage = $state<PageId>("home");
 	let navigationFrame = 0;
 
-	const placeholders: Record<Exclude<PageId, "home" | "mariadb" | "json-formatter" | "profiler" | "jooat" | "logs" | "configurator">, string> = {
-		"artifact-install": "Download and prepare the selected FXServer artifact.",
-		"artifact-info": "Inspect artifact metadata, recommended builds, and known broken versions.",
+	const placeholders: Record<Exclude<PageId, "home" | "mariadb" | "artifact-install" | "artifact-info" | "json-formatter" | "profiler" | "jooat" | "logs" | "configurator">, string> = {
 		server: "Configure and launch the FXServer setup flow.",
 	};
 
@@ -87,6 +87,10 @@
 					<HomePage onNavigate={navigate} />
 				{:else if activePage === "mariadb"}
 					<MariaDBPanel />
+				{:else if activePage === "artifact-install"}
+					<ArtifactInstallPage />
+				{:else if activePage === "artifact-info"}
+					<ArtifactInfoPage />
 				{:else if activePage === "json-formatter"}
 					<JsonFormatterPage />
 				{:else if activePage === "profiler"}

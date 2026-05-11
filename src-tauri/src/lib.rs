@@ -7,6 +7,9 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
+            commands::artifact::get_windows_artifact_metadata,
+            commands::artifact::get_installed_windows_artifact_info,
+            commands::artifact::install_windows_artifact,
             commands::jooat::get_jooat_resolver_status,
             commands::jooat::prepare_jooat_resolver_database,
             commands::jooat::save_jooat_resolver_shard,
@@ -15,6 +18,7 @@ pub fn run() {
             commands::logs::read_app_logs,
             commands::logs::append_app_log,
             commands::logs::clear_app_logs,
+            commands::system::open_external_url,
             commands::mariadb::get_mariadb_status,
             commands::mariadb::install_mariadb,
             commands::mariadb::start_mariadb_service,
