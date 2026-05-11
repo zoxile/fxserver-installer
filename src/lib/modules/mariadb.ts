@@ -82,6 +82,8 @@ export interface MariaDBQueryResult {
 	rows: string[][];
 }
 
+let cachedStatus: MariaDBStatus | null = null;
+
 function hasTauriRuntime() {
 	return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 }
@@ -108,22 +110,39 @@ async function invokeMariaDB<T>(command: string, args: Record<string, unknown>, 
 	}
 }
 
-export function getMariaDBStatus() {
-	if (!hasTauriRuntime()) {
-		log("MariaDB status requested in browser preview.", { level: "debug", scope: "mariadb.status" });
-		return Promise.resolve({
-			installed: false,
-			running: false,
-			version: null,
-			serviceName: null,
-			serviceDisplayName: null,
-			installPath: null,
-		});
+function cacheStatus(status: MariaDBStatus) {
+	cachedStatus = status;
+	return status;
+}
+
+function browserPreviewStatus(): MariaDBStatus {
+	return {
+		installed: false,
+		running: false,
+		version: null,
+		serviceName: null,
+		serviceDisplayName: null,
+		installPath: null,
+	};
+}
+
+export function getMariaDBStatus(force = false) {
+	if (!force && cachedStatus) {
+		log("MariaDB status restored from the current app session cache.", { level: "debug", scope: "mariadb.status" });
+		return Promise.resolve(cachedStatus);
 	}
 
-	return invokeMariaDB<MariaDBStatus>("get_mariadb_status", {}, "MariaDB status refresh", (status) =>
-		status.installed ? `MariaDB detected${status.version ? `: ${status.version}` : "."}` : "MariaDB is not installed.",
-	);
+	if (!hasTauriRuntime()) {
+		log("MariaDB status requested in browser preview.", { level: "debug", scope: "mariadb.status" });
+		return Promise.resolve(cacheStatus(browserPreviewStatus()));
+	}
+
+	return invokeMariaDB<MariaDBStatus>(
+		"get_mariadb_status",
+		{},
+		force ? "MariaDB status refresh" : "MariaDB initial status load",
+		(status) => (status.installed ? `MariaDB detected${status.version ? `: ${status.version}` : "."}` : "MariaDB is not installed."),
+	).then(cacheStatus);
 }
 
 export function installMariaDB(options: MariaDBInstallOptions) {
@@ -138,17 +157,17 @@ export function installMariaDB(options: MariaDBInstallOptions) {
 
 export function startMariaDBService(serviceName?: string | null) {
 	if (!hasTauriRuntime()) return unavailableOutsideTauri<MariaDBStatus>();
-	return invokeMariaDB<MariaDBStatus>("start_mariadb_service", { serviceName }, "MariaDB service start", (status) => `MariaDB service is ${status.running ? "running" : "not running"}.`);
+	return invokeMariaDB<MariaDBStatus>("start_mariadb_service", { serviceName }, "MariaDB service start", (status) => `MariaDB service is ${status.running ? "running" : "not running"}.`).then(cacheStatus);
 }
 
 export function stopMariaDBService(serviceName?: string | null) {
 	if (!hasTauriRuntime()) return unavailableOutsideTauri<MariaDBStatus>();
-	return invokeMariaDB<MariaDBStatus>("stop_mariadb_service", { serviceName }, "MariaDB service stop", (status) => `MariaDB service is ${status.running ? "running" : "stopped"}.`);
+	return invokeMariaDB<MariaDBStatus>("stop_mariadb_service", { serviceName }, "MariaDB service stop", (status) => `MariaDB service is ${status.running ? "running" : "stopped"}.`).then(cacheStatus);
 }
 
 export function restartMariaDBService(serviceName?: string | null) {
 	if (!hasTauriRuntime()) return unavailableOutsideTauri<MariaDBStatus>();
-	return invokeMariaDB<MariaDBStatus>("restart_mariadb_service", { serviceName }, "MariaDB service restart", (status) => `MariaDB service restart completed; running=${status.running}.`);
+	return invokeMariaDB<MariaDBStatus>("restart_mariadb_service", { serviceName }, "MariaDB service restart", (status) => `MariaDB service restart completed; running=${status.running}.`).then(cacheStatus);
 }
 
 export function executeMariaDBQuery(credentials: MariaDBCredentials, query: string) {

@@ -79,7 +79,7 @@
 
 	onMount(() => {
 		const timer = window.setTimeout(() => {
-			void refreshStatus();
+			void refreshStatus(false);
 		}, 80);
 
 		return () => window.clearTimeout(timer);
@@ -103,13 +103,13 @@
 		}
 	}
 
-	async function refreshStatus() {
-		await runTask(getMariaDBStatus, "MariaDB status refreshed.", (value) => (status = value));
+	async function refreshStatus(force = true) {
+		await runTask(() => getMariaDBStatus(force), force ? "MariaDB status refreshed." : "MariaDB status loaded.", (value) => (status = value));
 	}
 
 	async function install() {
 		await runTask(() => installMariaDB(installOptions), "MariaDB installer completed.");
-		await refreshStatus();
+		await refreshStatus(true);
 	}
 
 	async function startService() {
@@ -211,7 +211,7 @@
 		credentialsReady = false;
 		selectedAccess = null;
 		log("MariaDB admin credentials changed; refreshing status and users.", { scope: "mariadb.ui", detail: `${credentials.username}@${credentials.host}:${credentials.port}` });
-		await refreshStatus();
+		await refreshStatus(true);
 		const loadedUsers = await runTask(
 			() => listMariaDBUsers(credentials),
 			"Admin credentials applied.",
