@@ -135,7 +135,7 @@
 				<p class="rounded-sm border border-border bg-background/70 px-3 py-2 text-xs text-muted-foreground">{notice}</p>
 			{/if}
 
-			<div class="max-h-[36rem] overflow-auto rounded-sm border border-border bg-background/60">
+			<div class="max-h-144 overflow-auto rounded-sm border border-border bg-background/60">
 				{#if filteredLogs.length}
 					<div class="divide-y divide-border/70">
 						{#each filteredLogs as entry (entry.id)}

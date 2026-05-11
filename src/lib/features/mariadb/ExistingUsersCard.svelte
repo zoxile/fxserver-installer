@@ -45,7 +45,7 @@
 	}: Props = $props();
 </script>
 
-<Card.Root class="h-full min-h-[34rem] rounded-md border-border bg-card shadow-sm">
+<Card.Root class="h-full min-h-136 rounded-md border-border bg-card shadow-sm">
 	<Card.Header class="border-b border-border pb-4">
 		<div class="flex items-start justify-between gap-3">
 			<div class="flex items-center gap-3">

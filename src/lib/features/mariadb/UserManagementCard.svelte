@@ -59,7 +59,7 @@
 	}
 </script>
 
-<Card.Root class="h-full min-h-[34rem] rounded-md border-border bg-card shadow-sm">
+<Card.Root class="h-full min-h-136 rounded-md border-border bg-card shadow-sm">
 	<Card.Header class="border-b border-border pb-4">
 		<div class="flex items-center gap-3">
 			<div class="flex size-9 shrink-0 items-center justify-center rounded-sm bg-muted text-muted-foreground ring-1 ring-border">
