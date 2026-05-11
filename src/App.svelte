@@ -2,6 +2,7 @@
 	import DatabaseIcon from "@lucide/svelte/icons/database";
 	import Titlebar from "./Titlebar.svelte";
 	import Sidebar from "$lib/components/layout/Sidebar.svelte";
+	import ConfiguratorPage from "$lib/features/configurator/ConfiguratorPage.svelte";
 	import HomePage from "$lib/features/home/HomePage.svelte";
 	import JooatResolverPage from "$lib/features/jooat/JooatResolverPage.svelte";
 	import JsonFormatterPage from "$lib/features/json/JsonFormatterPage.svelte";
@@ -22,11 +23,10 @@
 	let activePage = $state<PageId>("home");
 	let navigationFrame = 0;
 
-	const placeholders: Record<Exclude<PageId, "home" | "mariadb" | "json-formatter" | "profiler" | "jooat" | "logs">, string> = {
+	const placeholders: Record<Exclude<PageId, "home" | "mariadb" | "json-formatter" | "profiler" | "jooat" | "logs" | "configurator">, string> = {
 		"artifact-install": "Download and prepare the selected FXServer artifact.",
 		"artifact-info": "Inspect artifact metadata, recommended builds, and known broken versions.",
 		server: "Configure and launch the FXServer setup flow.",
-		configurator: "Build and edit server configuration files.",
 	};
 
 	onMount(() => {
@@ -95,6 +95,8 @@
 					<JooatResolverPage />
 				{:else if activePage === "logs"}
 					<LogViewerPage />
+				{:else if activePage === "configurator"}
+					<ConfiguratorPage />
 				{:else}
 					<PlaceholderPage title={getPageLabel(activePage)} description={placeholders[activePage]} />
 				{/if}
