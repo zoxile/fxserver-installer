@@ -109,7 +109,7 @@
 			<ToggleGroup.Root
 				type="multiple"
 				value={toggleGroupPrivileges()}
-				onValueChange={updatePrivileges}
+				onValueChange={(value) => updatePrivileges(Array.isArray(value) ? value : [value])}
 				disabled={!credentialsReady}
 				class="grid grid-cols-2 gap-2 sm:grid-cols-4"
 				aria-label="Database user permissions"
