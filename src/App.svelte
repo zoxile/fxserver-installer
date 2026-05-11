@@ -6,6 +6,7 @@
 	import ArtifactInstallPage from "$lib/features/artifacts/ArtifactInstallPage.svelte";
 	import ConfiguratorPage from "$lib/features/configurator/ConfiguratorPage.svelte";
 	import HomePage from "$lib/features/home/HomePage.svelte";
+	import ManageServerPage from "$lib/features/fxserver/ManageServerPage.svelte";
 	import JooatResolverPage from "$lib/features/jooat/JooatResolverPage.svelte";
 	import JsonFormatterPage from "$lib/features/json/JsonFormatterPage.svelte";
 	import LogViewerPage from "$lib/features/app-logs/LogViewerPage.svelte";
@@ -25,9 +26,7 @@
 	let activePage = $state<PageId>("home");
 	let navigationFrame = 0;
 
-	const placeholders: Record<Exclude<PageId, "home" | "mariadb" | "artifact-install" | "artifact-info" | "json-formatter" | "profiler" | "jooat" | "logs" | "configurator">, string> = {
-		server: "Configure and launch the FXServer setup flow.",
-	};
+	const placeholders: Record<Exclude<PageId, "home" | "mariadb" | "artifact-install" | "artifact-info" | "server-manage" | "json-formatter" | "profiler" | "jooat" | "logs" | "configurator">, string> = {};
 
 	onMount(() => {
 		void (async () => {
@@ -91,6 +90,8 @@
 					<ArtifactInstallPage />
 				{:else if activePage === "artifact-info"}
 					<ArtifactInfoPage />
+				{:else if activePage === "server-manage"}
+					<ManageServerPage />
 				{:else if activePage === "json-formatter"}
 					<JsonFormatterPage />
 				{:else if activePage === "profiler"}

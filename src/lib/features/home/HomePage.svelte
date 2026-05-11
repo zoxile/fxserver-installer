@@ -108,13 +108,13 @@
 		/>
 		<HomeBentoCard
 			title="FXServer"
-			description="Prepare server setup and launch workflows."
+			description="Start FXServer with TXHOST variables and watch its process usage."
 			icon={ServerCogIcon}
 			size="wide"
 			className="md:[grid-area:server]"
 			kicker="Server core"
 			actionLabel="Open Server"
-			onclick={() => onNavigate("server")}
+			onclick={() => onNavigate("server-manage")}
 		/>
 		<HomeBentoCard
 			title="Configurator"

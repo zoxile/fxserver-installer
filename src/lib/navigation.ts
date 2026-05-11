@@ -8,6 +8,7 @@ import InfoIcon from "@lucide/svelte/icons/info";
 import PackagePlusIcon from "@lucide/svelte/icons/package-plus";
 import ScrollTextIcon from "@lucide/svelte/icons/scroll-text";
 import ServerCogIcon from "@lucide/svelte/icons/server-cog";
+import TerminalIcon from "@lucide/svelte/icons/terminal";
 import WrenchIcon from "@lucide/svelte/icons/wrench";
 import type { Component } from "svelte";
 
@@ -16,7 +17,7 @@ export type PageId =
 	| "mariadb"
 	| "artifact-install"
 	| "artifact-info"
-	| "server"
+	| "server-manage"
 	| "configurator"
 	| "profiler"
 	| "jooat"
@@ -65,9 +66,16 @@ export const navigation: NavigationItem[] = [
 		],
 	},
 	{
-		id: "server",
+		id: "fxserver",
 		label: "FXServer",
 		icon: ServerCogIcon,
+		children: [
+			{
+				id: "server-manage",
+				label: "Manage Server",
+				icon: TerminalIcon,
+			},
+		],
 	},
 	{
 		id: "tools",
