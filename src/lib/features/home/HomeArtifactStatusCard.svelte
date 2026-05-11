@@ -29,12 +29,14 @@
 	let installed = $state<InstalledArtifactInfo | null>(null);
 	let busy = $state(false);
 	let error = $state("");
+	let selectedInstallPath = $state("");
 
 	const health = $derived<ArtifactHealthStatus>(getArtifactHealthStatus(metadata, installed));
-	const installPath = $derived(installed?.destination || getInstallPath() || "No server folder selected");
+	const installPathLabel = $derived(installed?.destination || selectedInstallPath || "No server folder selected");
 
 	onMount(() => {
 		loadInstallPath();
+		selectedInstallPath = getInstallPath();
 		void refresh();
 	});
 
@@ -43,7 +45,8 @@
 		error = "";
 
 		try {
-			const path = getInstallPath();
+			const path = selectedInstallPath || getInstallPath();
+			selectedInstallPath = path;
 			const [nextMetadata, nextInstalled] = await Promise.all([
 				fetchArtifactMetadata(),
 				path ? getInstalledWindowsArtifactInfo(path) : Promise.resolve(null),
@@ -104,7 +107,7 @@
 		</div>
 
 		<p class="text-xs leading-5 text-muted-foreground">{error || health.description}</p>
-		<p class="truncate font-mono text-[11px] text-muted-foreground">{installPath}</p>
+		<p class="truncate font-mono text-[11px] text-muted-foreground">{installPathLabel}</p>
 
 		<div class="flex flex-wrap gap-2">
 			<Button variant="outline" size="sm" class="rounded-sm" onclick={() => onNavigate("artifact-install")} title="Open the artifact installer">

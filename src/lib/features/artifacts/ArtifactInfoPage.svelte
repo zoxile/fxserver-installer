@@ -30,13 +30,15 @@
 	let installed = $state<InstalledArtifactInfo | null>(null);
 	let busy = $state(false);
 	let error = $state("");
+	let selectedInstallPath = $state("");
 
 	const recommendedIsFlagged = $derived(metadata ? artifactIsFlagged(metadata.recommendedArtifact, metadata.brokenArtifacts) : false);
 	const health = $derived<ArtifactHealthStatus>(getArtifactHealthStatus(metadata, installed));
-	const installFolderLabel = $derived(installed?.destination ?? (getInstallPath() || "No folder selected"));
+	const installFolderLabel = $derived(installed?.destination ?? (selectedInstallPath || "No folder selected"));
 
 	onMount(() => {
 		loadInstallPath();
+		selectedInstallPath = getInstallPath();
 		void refresh();
 	});
 
@@ -45,7 +47,8 @@
 		error = "";
 
 		try {
-			const path = getInstallPath();
+			const path = selectedInstallPath || getInstallPath();
+			selectedInstallPath = path;
 			const [nextMetadata, nextInstalled] = await Promise.all([
 				fetchArtifactMetadata(),
 				path ? getInstalledWindowsArtifactInfo(path) : Promise.resolve(null),

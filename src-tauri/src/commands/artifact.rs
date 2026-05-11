@@ -1,4 +1,3 @@
-
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -38,7 +37,8 @@ pub fn get_installed_windows_artifact_info(
         .and_then(|info| artifact_version_from_file_info(info))
         .or(marker_version);
 
-    let installed = version.is_some() || citizen_server_impl_path.is_some() || has_fxserver_executable;
+    let installed =
+        version.is_some() || citizen_server_impl_path.is_some() || has_fxserver_executable;
     let detection_source = if version_info.is_some() {
         "citizen-server-impl"
     } else if version.is_some() {
@@ -58,7 +58,9 @@ pub fn get_installed_windows_artifact_info(
         marker_path: marker_path.to_string_lossy().to_string(),
         citizen_server_impl_path: citizen_server_impl_path
             .map(|path| path.to_string_lossy().to_string()),
-        file_version: version_info.as_ref().and_then(|info| info.file_version.clone()),
+        file_version: version_info
+            .as_ref()
+            .and_then(|info| info.file_version.clone()),
         product_version: version_info.and_then(|info| info.product_version),
         has_fxserver_executable,
         detection_source: detection_source.to_string(),
@@ -69,6 +71,8 @@ pub fn get_installed_windows_artifact_info(
 struct FileVersionInfo {
     file_version: Option<String>,
     product_version: Option<String>,
+    file_private_part: Option<u64>,
+    product_private_part: Option<u64>,
 }
 
 fn read_marker_version(marker_path: &Path) -> Result<Option<String>, String> {
@@ -86,16 +90,40 @@ fn read_marker_version(marker_path: &Path) -> Result<Option<String>, String> {
 }
 
 fn artifact_version_from_file_info(info: &FileVersionInfo) -> Option<String> {
-    info.product_version
-        .as_deref()
-        .or(info.file_version.as_deref())
-        .and_then(|version| version.split('.').next_back())
-        .map(str::trim)
-        .filter(|version| !version.is_empty() && version.chars().all(|character| character.is_ascii_digit()))
-        .map(str::to_string)
+    info.product_private_part
+        .or(info.file_private_part)
+        .filter(|version| *version > 0)
+        .map(|version| version.to_string())
+        .or_else(|| {
+            info.product_version
+                .as_deref()
+                .or(info.file_version.as_deref())
+                .and_then(|version| {
+                    version
+                        .split(|character: char| !character.is_ascii_digit())
+                        .filter(|part| !part.is_empty())
+                        .next_back()
+                })
+                .map(str::to_string)
+        })
 }
 
 fn find_citizen_server_impl(destination: &Path) -> Option<PathBuf> {
+    let direct_candidates = [
+        destination.join("citizen-server-impl.dll"),
+        destination.join("citizen-server-impl"),
+        destination
+            .join("citizen")
+            .join("system")
+            .join("citizen-server-impl.dll"),
+    ];
+
+    for candidate in direct_candidates {
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+
     find_file_by_stem(destination, "citizen-server-impl", 6)
 }
 
@@ -105,22 +133,40 @@ fn find_file_by_stem(directory: &Path, expected_stem: &str, depth: usize) -> Opt
     }
 
     let entries = fs::read_dir(directory).ok()?;
+    let mut first_match = None;
+
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_file() {
             let stem_matches = path
                 .file_stem()
                 .and_then(|stem| stem.to_str())
-                .map(|stem| stem.eq_ignore_ascii_case(expected_stem))
+                .map(|stem| {
+                    stem.eq_ignore_ascii_case(expected_stem)
+                        || stem.to_ascii_lowercase().starts_with(expected_stem)
+                })
                 .unwrap_or(false);
             let name_matches = path
                 .file_name()
                 .and_then(|name| name.to_str())
-                .map(|name| name.eq_ignore_ascii_case(expected_stem))
+                .map(|name| {
+                    let name = name.to_ascii_lowercase();
+                    name == expected_stem || name.starts_with(&format!("{expected_stem}."))
+                })
                 .unwrap_or(false);
 
             if stem_matches || name_matches {
-                return Some(path);
+                let is_dll = path
+                    .extension()
+                    .and_then(|extension| extension.to_str())
+                    .map(|extension| extension.eq_ignore_ascii_case("dll"))
+                    .unwrap_or(false);
+
+                if is_dll {
+                    return Some(path);
+                }
+
+                first_match.get_or_insert(path);
             }
         } else if path.is_dir() {
             if let Some(found) = find_file_by_stem(&path, expected_stem, depth - 1) {
@@ -129,19 +175,23 @@ fn find_file_by_stem(directory: &Path, expected_stem: &str, depth: usize) -> Opt
         }
     }
 
-    None
+    first_match
 }
 
 fn read_file_version_info(path: &Path) -> Option<FileVersionInfo> {
-    let script = r#"
-param([string] $Path)
+    let path_literal = powershell_string_literal(&path.to_string_lossy());
+    let script = format!(
+        r#"
 $ErrorActionPreference = "Stop"
-$info = (Get-Item -LiteralPath $Path).VersionInfo
-[pscustomobject]@{
+$info = [System.Diagnostics.FileVersionInfo]::GetVersionInfo({path_literal})
+[pscustomobject]@{{
     FileVersion = $info.FileVersion
     ProductVersion = $info.ProductVersion
-} | ConvertTo-Json -Compress
-"#;
+    FilePrivatePart = $info.FilePrivatePart
+    ProductPrivatePart = $info.ProductPrivatePart
+}} | ConvertTo-Json -Compress
+"#
+    );
 
     let output = Command::new("powershell")
         .arg("-NoProfile")
@@ -149,7 +199,6 @@ $info = (Get-Item -LiteralPath $Path).VersionInfo
         .arg("Bypass")
         .arg("-Command")
         .arg(script)
-        .arg(path.to_string_lossy().to_string())
         .output()
         .ok()?;
 
@@ -173,7 +222,21 @@ $info = (Get-Item -LiteralPath $Path).VersionInfo
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(str::to_string),
+        file_private_part: number_from_json(value.get("FilePrivatePart")),
+        product_private_part: number_from_json(value.get("ProductPrivatePart")),
     })
+}
+
+fn number_from_json(value: Option<&serde_json::Value>) -> Option<u64> {
+    value.and_then(|value| {
+        value
+            .as_u64()
+            .or_else(|| value.as_str()?.trim().parse::<u64>().ok())
+    })
+}
+
+fn powershell_string_literal(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
 }
 
 fn fetch_artifact_metadata_blocking() -> Result<ArtifactMetadata, String> {
@@ -205,7 +268,9 @@ $ProgressPreference = "SilentlyContinue"
     let metadata: ArtifactMetadata = serde_json::from_str(content.trim())
         .map_err(|error| format!("Failed to parse JG Scripts artifact metadata: {error}"))?;
 
-    if metadata.recommended_artifact.trim().is_empty() || metadata.windows_download_link.trim().is_empty() {
+    if metadata.recommended_artifact.trim().is_empty()
+        || metadata.windows_download_link.trim().is_empty()
+    {
         return Err("JG Scripts artifact metadata did not include a Windows artifact.".to_string());
     }
 
@@ -229,7 +294,9 @@ fn install_windows_artifact_blocking(
     }
 
     if !request.url.starts_with("https://") || !request.url.contains("runtime.fivem.net") {
-        return Err("Artifact download URL must be an official HTTPS FiveM runtime URL.".to_string());
+        return Err(
+            "Artifact download URL must be an official HTTPS FiveM runtime URL.".to_string(),
+        );
     }
 
     let destination = PathBuf::from(request.destination.trim());
@@ -265,23 +332,28 @@ fn run_install_script(
     version: &str,
     marker_path: &Path,
 ) -> Result<(), String> {
-    let script = r#"
-param(
-    [string] $Url,
-    [string] $ZipPath,
-    [string] $Destination,
-    [string] $Version,
-    [string] $MarkerPath
-)
-
+    let url_literal = powershell_string_literal(url);
+    let zip_path_literal = powershell_string_literal(&zip_path.to_string_lossy());
+    let destination_literal = powershell_string_literal(&destination.to_string_lossy());
+    let version_literal = powershell_string_literal(version);
+    let marker_path_literal = powershell_string_literal(&marker_path.to_string_lossy());
+    let script = format!(
+        r#"
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 
-Invoke-WebRequest -Uri $Url -OutFile $ZipPath -UseBasicParsing
+$Url = {url_literal}
+$ZipPath = {zip_path_literal}
+$Destination = {destination_literal}
+$Version = {version_literal}
+$MarkerPath = {marker_path_literal}
+
+Invoke-WebRequest -Uri ([uri] $Url) -OutFile $ZipPath -UseBasicParsing
 Expand-Archive -LiteralPath $ZipPath -DestinationPath $Destination -Force
 Set-Content -LiteralPath $MarkerPath -Value $Version -Encoding UTF8
 Remove-Item -LiteralPath $ZipPath -Force
-"#;
+"#
+    );
 
     let output = Command::new("powershell")
         .arg("-NoProfile")
@@ -289,11 +361,6 @@ Remove-Item -LiteralPath $ZipPath -Force
         .arg("Bypass")
         .arg("-Command")
         .arg(script)
-        .arg(url)
-        .arg(zip_path.to_string_lossy().to_string())
-        .arg(destination.to_string_lossy().to_string())
-        .arg(version)
-        .arg(marker_path.to_string_lossy().to_string())
         .output()
         .map_err(|error| format!("Failed to start PowerShell artifact installer: {error}"))?;
 
