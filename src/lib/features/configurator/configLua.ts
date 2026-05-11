@@ -1,5 +1,5 @@
 export type LuaPrimitiveType = "string" | "number" | "boolean" | "nil" | "raw";
-export type LuaValueType = LuaPrimitiveType | "vector2" | "vector3" | "vector4" | "table";
+export type LuaValueType = LuaPrimitiveType | "vector2" | "vector3" | "vector4" | "table" | "array";
 
 export type LuaValue =
 	| { type: "string"; value: string }
@@ -8,7 +8,7 @@ export type LuaValue =
 	| { type: "nil" }
 	| { type: "raw"; value: string }
 	| { type: "vector2" | "vector3" | "vector4"; values: number[] }
-	| { type: "table"; entries: LuaTableEntry[] };
+	| { type: "table" | "array"; entries: LuaTableEntry[] };
 
 export type LuaKey =
 	| { type: "identifier"; value: string }
@@ -111,7 +111,7 @@ export function parseConfigLua(source: string): ParsedConfig {
 }
 
 export function stringifyConfig(root: LuaValue, commentsByPath: Record<string, string> = {}) {
-	if (root.type !== "table") {
+	if (!isContainer(root)) {
 		return `Config = ${stringifyLuaValue(root, 0, [], commentsByPath)}\n`;
 	}
 
@@ -130,19 +130,19 @@ export function getConfigObjects(root: LuaValue, commentsByPath: Record<string, 
 	const groups: ConfigObjectGroup[] = [];
 
 	function visit(value: LuaValue, path: Array<string | number>) {
-		if (value.type !== "table") return;
+		if (!isContainer(value)) return;
 
 		groups.push({
 			id: pathKey(path),
 			path,
 			label: path.length ? pathToLabel(path).replace(/^Config\./, "") : "Configuration",
-			fieldCount: value.entries.filter((entry) => entry.value.type !== "table").length,
-			objectCount: value.entries.filter((entry) => entry.value.type === "table").length,
+			fieldCount: value.entries.filter((entry) => !isContainer(entry.value)).length,
+			objectCount: value.entries.filter((entry) => isContainer(entry.value)).length,
 			comment: commentsByPath[pathKey(path)],
 		});
 
 		for (const entry of value.entries) {
-			if (entry.key && entry.value.type === "table") visit(entry.value, [...path, entry.key.value]);
+			if (entry.key && isContainer(entry.value)) visit(entry.value, [...path, entry.key.value]);
 		}
 	}
 
@@ -172,6 +172,8 @@ export function createLuaValue(type: LuaValueType): LuaValue {
 			return { type: "vector4", values: [0, 0, 0, 0] };
 		case "table":
 			return { type: "table", entries: [] };
+		case "array":
+			return { type: "array", entries: [] };
 		case "raw":
 			return { type: "raw", value: "nil" };
 	}
@@ -226,6 +228,7 @@ export function stringifyLuaValue(value: LuaValue, indent = 0, path: Array<strin
 		case "vector4":
 			return `${value.type}(${value.values.map(formatNumber).join(", ")})`;
 		case "table":
+		case "array":
 			return stringifyTable(value, indent, path, commentsByPath);
 	}
 }
@@ -257,11 +260,12 @@ export function valueSummary(value: LuaValue) {
 		case "vector4":
 			return `${value.type}(${value.values.map(formatNumber).join(", ")})`;
 		case "table":
+		case "array":
 			return `${value.entries.length} entries`;
 	}
 }
 
-function stringifyTable(value: Extract<LuaValue, { type: "table" }>, indent: number, path: Array<string | number>, commentsByPath: Record<string, string>) {
+function stringifyTable(value: Extract<LuaValue, { type: "table" | "array" }>, indent: number, path: Array<string | number>, commentsByPath: Record<string, string>) {
 	if (value.entries.length === 0) return "{}";
 
 	const currentIndent = "\t".repeat(indent);
@@ -296,11 +300,15 @@ function isIdentifier(value: string) {
 	return /^[A-Za-z_][A-Za-z0-9_]*$/.test(value);
 }
 
+function isContainer(value: LuaValue): value is Extract<LuaValue, { type: "table" | "array" }> {
+	return value.type === "table" || value.type === "array";
+}
+
 function flattenSettings(root: LuaValue, commentsByPath: Record<string, string>) {
 	const settings: ConfigSetting[] = [];
 
 	function visit(value: LuaValue, path: Array<string | number>) {
-		if (value.type === "table") {
+		if (isContainer(value)) {
 			if (value.entries.length === 0 && path.length > 0) {
 				settings.push(createSetting(path, value, commentsByPath));
 			}
@@ -328,7 +336,7 @@ function createSetting(path: Array<string | number>, value: LuaValue, commentsBy
 		label,
 		type: value.type,
 		value,
-		editable: value.type !== "raw" && value.type !== "table",
+		editable: value.type !== "raw" && !isContainer(value),
 		comment: commentsByPath[pathKey(path)],
 	};
 }
@@ -371,7 +379,7 @@ function validateLuaValue(value: LuaValue, path: Array<string | number> = []) {
 		warnings.push(`${label} is a raw Lua expression and cannot be safely edited through typed controls.`);
 	}
 
-	if (value.type === "table") {
+	if (isContainer(value)) {
 		for (const entry of value.entries) {
 			if (entry.key) warnings.push(...validateLuaValue(entry.value, [...path, entry.key.value]));
 		}
@@ -382,7 +390,7 @@ function validateLuaValue(value: LuaValue, path: Array<string | number> = []) {
 
 function setValueAtPath(root: LuaValue, path: Array<string | number>, nextValue: LuaValue) {
 	if (path.length === 0) return;
-	if (root.type !== "table") return;
+	if (!isContainer(root)) return;
 
 	let current = root;
 	for (let index = 0; index < path.length; index += 1) {
@@ -395,22 +403,22 @@ function setValueAtPath(root: LuaValue, path: Array<string | number>, nextValue:
 			return;
 		}
 
-		if (entry.value.type !== "table") return;
+		if (!isContainer(entry.value)) return;
 		current = entry.value;
 	}
 }
 
-function findEntry(table: Extract<LuaValue, { type: "table" }>, key: string | number) {
+function findEntry(table: Extract<LuaValue, { type: "table" | "array" }>, key: string | number) {
 	return table.entries.find((entry) => entry.key?.value === key);
 }
 
 function findTableAtPath(root: LuaValue, path: Array<string | number>) {
-	if (root.type !== "table") return null;
+	if (!isContainer(root)) return null;
 	let current = root;
 
 	for (const segment of path) {
 		const entry = findEntry(current, segment);
-		if (!entry || entry.value.type !== "table") return null;
+		if (!entry || !isContainer(entry.value)) return null;
 		current = entry.value;
 	}
 
@@ -565,9 +573,9 @@ class LuaConfigParser {
 					const value = this.parseValue(path);
 					this.valueLines.set(pathKey(path), valueLine);
 					if (path.length === 0) {
-						root = value.type === "table" ? value : { type: "table", entries: [{ key: { type: "identifier", value: "value" }, value }] };
+						root = isContainer(value) ? value : { type: "table", entries: [{ key: { type: "identifier", value: "value" }, value }] };
 					} else {
-						if (root.type !== "table") root = { type: "table", entries: [] };
+						if (!isContainer(root)) root = { type: "table", entries: [] };
 						setConfigPath(root, path, value);
 					}
 				}
@@ -667,7 +675,7 @@ class LuaConfigParser {
 			this.matchSymbol(";");
 		}
 
-		return { type: "table", entries };
+		return { type: isArrayEntries(entries) ? "array" : "table", entries };
 	}
 
 	private parseBracketKey(): LuaKey {
@@ -776,7 +784,7 @@ class LuaConfigParser {
 }
 
 function setConfigPath(root: LuaValue, path: Array<string | number>, value: LuaValue) {
-	if (root.type !== "table") return;
+	if (!isContainer(root)) return;
 
 	let current = root;
 	for (let index = 0; index < path.length; index += 1) {
@@ -795,10 +803,14 @@ function setConfigPath(root: LuaValue, path: Array<string | number>, value: LuaV
 		if (final) {
 			entry.value = value;
 		} else {
-			if (entry.value.type !== "table") entry.value = { type: "table", entries: [] };
+			if (!isContainer(entry.value)) entry.value = { type: "table", entries: [] };
 			current = entry.value;
 		}
 	}
+}
+
+function isArrayEntries(entries: LuaTableEntry[]) {
+	return entries.length > 0 && entries.every((entry) => entry.key?.type === "number");
 }
 
 function isVectorType(value: string) {

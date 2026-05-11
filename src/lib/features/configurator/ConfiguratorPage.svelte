@@ -47,7 +47,7 @@
 	let baselineValues = $state<Record<string, string>>({});
 	let selectedGroupId = $state("[]");
 	let newFieldName = $state("");
-	let newFieldType = $state<Exclude<LuaValueType, "table" | "nil" | "raw">>("string");
+	let newFieldType = $state<Exclude<LuaValueType, "nil" | "raw">>("string");
 	let dragging = $state(false);
 	let fileInput: HTMLInputElement;
 	let sourceHighlight: HTMLPreElement;
@@ -61,6 +61,8 @@
 		{ value: "vector2", label: "Vector2", hint: "x, y" },
 		{ value: "vector3", label: "Vector3", hint: "x, y, z" },
 		{ value: "vector4", label: "Vector4", hint: "x, y, z, w" },
+		{ value: "table", label: "Object", hint: "keyed fields" },
+		{ value: "array", label: "Array", hint: "ordered entries" },
 	];
 	const settings = $derived(config ? getConfigSettings(config, commentsByPath) : []);
 	const groups = $derived(config ? getConfigObjects(config, commentsByPath) : []);
@@ -320,6 +322,7 @@
 			vector3: "border-amber-400/30 bg-amber-400/10 text-amber-200",
 			vector4: "border-amber-400/30 bg-amber-400/10 text-amber-200",
 			table: "border-muted bg-muted/50 text-muted-foreground",
+			array: "border-cyan-400/30 bg-cyan-400/10 text-cyan-200",
 			nil: "border-muted bg-muted/50 text-muted-foreground",
 			raw: "border-red-400/30 bg-red-400/10 text-red-200",
 		}[type] ?? "border-border bg-muted text-muted-foreground";
@@ -611,7 +614,7 @@
 								Add Object
 							</Button>
 						</div>
-						<p class="text-[11px] leading-4 text-muted-foreground">Fields become editable values. Objects create nested categories that can contain more fields and objects.</p>
+						<p class="text-[11px] leading-4 text-muted-foreground">Fields become editable values. Object and array types create nested categories that can contain more entries.</p>
 					</div>
 
 					<div class="max-h-[26rem] overflow-auto rounded-sm border border-border bg-background/60">
@@ -744,7 +747,7 @@
 							{:else if selected.value.type === "raw"}
 								<pre class="max-h-72 overflow-auto rounded-sm border border-red-400/20 bg-red-400/10 p-3 font-mono text-xs text-red-100">{selected.value.value}</pre>
 							{:else}
-								<p class="rounded-sm border border-border bg-background/70 px-3 py-2 text-sm text-muted-foreground">Empty table values are preserved in the generated output. Add fields through the selected object panel.</p>
+								<p class="rounded-sm border border-border bg-background/70 px-3 py-2 text-sm text-muted-foreground">Empty {selected.value.type === "array" ? "array" : "object"} values are preserved in the generated output. Add entries through the selected object panel.</p>
 							{/if}
 						</div>
 
