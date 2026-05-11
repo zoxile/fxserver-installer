@@ -330,8 +330,8 @@
 
 	function booleanButtonClass(active: boolean, tone: "true" | "false") {
 		const activeBase = "h-8 rounded-xs px-3 text-xs font-medium uppercase shadow-none focus-visible:ring-0";
-		if (active && tone === "true") return `${activeBase} border-emerald-400/30 bg-emerald-400/10 text-emerald-200 hover:bg-emerald-400/10 hover:text-emerald-200 focus-visible:border-emerald-400/30`;
-		if (active && tone === "false") return `${activeBase} border-red-400/30 bg-red-400/10 text-red-200 hover:bg-red-400/10 hover:text-red-200 focus-visible:border-red-400/30`;
+		if (active && tone === "true") return `${activeBase} border-emerald-400/30 bg-emerald-400/10 text-emerald-200 hover:bg-emerald-400/10 hover:text-emerald-200 focus-visible:border-emerald-400/30 dark:border-emerald-400/30 dark:bg-emerald-400/10 dark:text-emerald-200 dark:hover:bg-emerald-400/10 dark:hover:text-emerald-200`;
+		if (active && tone === "false") return `${activeBase} border-red-400/30 bg-red-400/10 text-red-200 hover:bg-red-400/10 hover:text-red-200 focus-visible:border-red-400/30 dark:border-red-400/30 dark:bg-red-400/10 dark:text-red-200 dark:hover:bg-red-400/10 dark:hover:text-red-200`;
 		return "h-8 rounded-xs border-border bg-background/70 px-3 text-xs font-medium uppercase text-muted-foreground shadow-none hover:border-muted-foreground/40 hover:bg-muted/40 hover:text-foreground";
 	}
 
@@ -416,7 +416,7 @@
 	{/if}
 
 	<div class="grid items-stretch gap-4 xl:grid-cols-12">
-		<Card.Root class="group relative flex max-h-[46rem] flex-col overflow-hidden rounded-sm border-border bg-card shadow-sm transition-transform duration-300 hover:-translate-y-0.5 xl:col-span-9">
+		<Card.Root class="group relative flex max-h-184 flex-col overflow-hidden rounded-sm border-border bg-card shadow-sm transition-transform duration-300 hover:-translate-y-0.5 xl:col-span-9">
 			<div class="pointer-events-none absolute inset-x-4 top-0 h-px bg-linear-to-r from-transparent via-primary/70 to-transparent opacity-0 transition-opacity duration-300 group-hover:opacity-100"></div>
 			<Card.Header class="border-b border-border pb-4">
 				<div class="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
@@ -462,7 +462,7 @@
 					<pre
 						bind:this={sourceHighlight}
 						aria-hidden="true"
-						class="pointer-events-none absolute inset-0 h-[32rem] overflow-hidden px-3 py-3 font-mono text-xs leading-5 whitespace-pre text-[#D4D4D4]"
+						class="pointer-events-none absolute inset-0 h-128 overflow-hidden px-3 py-3 font-mono text-xs leading-5 whitespace-pre text-[#D4D4D4]"
 					>{#each highlightedSource as token}<span class={tokenClass(token.type)}>{token.text}</span>{/each}</pre>
 					<textarea
 						bind:value={source}
@@ -471,7 +471,7 @@
 						placeholder={sourcePlaceholder}
 						title="Lua config source to parse into editable fields."
 						onscroll={syncSourceScroll}
-						class="relative h-[32rem] w-full resize-none overflow-auto border-0 bg-transparent px-3 py-3 font-mono text-xs leading-5 whitespace-pre text-transparent caret-foreground outline-none selection:bg-primary/30 placeholder:text-muted-foreground"
+						class="relative h-128 w-full resize-none overflow-auto border-0 bg-transparent px-3 py-3 font-mono text-xs leading-5 whitespace-pre text-transparent caret-foreground outline-none selection:bg-primary/30 placeholder:text-muted-foreground"
 					></textarea>
 				</label>
 			</Card.Content>
@@ -535,7 +535,7 @@
 
 	{#if config}
 		<div class="grid gap-4 xl:grid-cols-12">
-			<Card.Root class="group relative flex max-h-[50rem] flex-col overflow-hidden rounded-sm border-border bg-card shadow-sm transition-transform duration-300 hover:-translate-y-0.5 xl:col-span-5">
+			<Card.Root class="group relative flex max-h-200 flex-col overflow-hidden rounded-sm border-border bg-card shadow-sm transition-transform duration-300 hover:-translate-y-0.5 xl:col-span-5">
 				<div class="pointer-events-none absolute inset-x-4 top-0 h-px bg-linear-to-r from-transparent via-primary/70 to-transparent opacity-0 transition-opacity duration-300 group-hover:opacity-100"></div>
 				<Card.Header class="border-b border-border pb-4">
 					<div class="flex items-center gap-3">
@@ -617,7 +617,7 @@
 						<p class="text-[11px] leading-4 text-muted-foreground">Fields become editable values. Object and array types create nested categories that can contain more entries.</p>
 					</div>
 
-					<div class="max-h-[26rem] overflow-auto rounded-sm border border-border bg-background/60">
+					<div class="max-h-104 overflow-auto rounded-sm border border-border bg-background/60">
 						<div class="border-b border-border/70 bg-muted/30 px-3 py-2">
 							<p class="font-mono text-xs text-foreground">{selectedGroup?.label ?? "Configuration"}</p>
 							<p class="text-[10px] uppercase tracking-wide text-muted-foreground">{filteredSettings.length} matching fields</p>
@@ -651,7 +651,7 @@
 				</Card.Content>
 			</Card.Root>
 
-			<Card.Root class="group relative flex max-h-[50rem] flex-col overflow-hidden rounded-sm border-border bg-card shadow-sm transition-transform duration-300 hover:-translate-y-0.5 xl:col-span-7">
+			<Card.Root class="group relative flex max-h-200 flex-col overflow-hidden rounded-sm border-border bg-card shadow-sm transition-transform duration-300 hover:-translate-y-0.5 xl:col-span-7">
 				<div class="pointer-events-none absolute inset-x-4 top-0 h-px bg-linear-to-r from-transparent via-primary/70 to-transparent opacity-0 transition-opacity duration-300 group-hover:opacity-100"></div>
 				<Card.Header class="border-b border-border pb-4">
 					<div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
@@ -781,7 +781,7 @@
 			</Card.Root>
 		</div>
 
-		<Card.Root class="group relative flex max-h-[44rem] flex-col overflow-hidden rounded-sm border-border bg-card shadow-sm transition-transform duration-300 hover:-translate-y-0.5">
+		<Card.Root class="group relative flex max-h-176 flex-col overflow-hidden rounded-sm border-border bg-card shadow-sm transition-transform duration-300 hover:-translate-y-0.5">
 			<div class="pointer-events-none absolute inset-x-4 top-0 h-px bg-linear-to-r from-transparent via-primary/70 to-transparent opacity-0 transition-opacity duration-300 group-hover:opacity-100"></div>
 			<Card.Header class="border-b border-border pb-4">
 				<div class="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
@@ -806,7 +806,7 @@
 				</div>
 			</Card.Header>
 			<Card.Content class="min-h-0 overflow-auto">
-				<pre class="max-h-[34rem] overflow-auto rounded-sm border border-border bg-background/70 p-4 font-mono text-xs leading-5 whitespace-pre text-[#D4D4D4]">{#each highlightedOutput as token}<span class={tokenClass(token.type)}>{token.text}</span>{/each}</pre>
+				<pre class="max-h-136 overflow-auto rounded-sm border border-border bg-background/70 p-4 font-mono text-xs leading-5 whitespace-pre text-[#D4D4D4]">{#each highlightedOutput as token}<span class={tokenClass(token.type)}>{token.text}</span>{/each}</pre>
 			</Card.Content>
 		</Card.Root>
 	{/if}
