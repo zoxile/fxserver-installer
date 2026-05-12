@@ -41,6 +41,7 @@
 	let notice = $state("");
 	let noticeLevel = $state<"success" | "error">("success");
 	let storageReady = false;
+	let previousProfile: string | undefined;
 
 	const entries = $derived(parseLines(result?.content ?? "", logName));
 	const filteredEntries = $derived(
@@ -65,8 +66,15 @@
 
 	$effect(() => {
 		if (!storageReady) return;
+		const profileChanged = previousProfile !== undefined && previousProfile !== profile;
+		previousProfile = profile;
+
 		setTxDataPath(dataPath);
 		setServerProfile(profile);
+
+		if (profileChanged && result && dataPath.trim() && !busy) {
+			void refresh();
+		}
 	});
 
 	async function refresh() {
