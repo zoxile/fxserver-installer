@@ -8,7 +8,7 @@ use std::{
 
 use crate::models::fxserver::{
     FxserverEnvironmentVariable, FxserverLaunchRequest, FxserverLaunchResult, FxserverResources,
-    FxserverStatus, TxDataLogRequest, TxDataLogResult,
+    FxserverStatus, TxDataLogRequest, TxDataLogResult, TxDataProfilesResult,
 };
 
 #[derive(Default)]
@@ -196,6 +196,44 @@ pub fn read_txdata_log(request: TxDataLogRequest) -> Result<TxDataLogResult, Str
         log_name: log_name.to_string(),
         content: tailed,
         line_count: lines.len(),
+    })
+}
+
+#[tauri::command]
+pub fn list_txdata_profiles(data_path: String) -> Result<TxDataProfilesResult, String> {
+    let data_path = PathBuf::from(data_path.trim());
+    if data_path.as_os_str().is_empty() {
+        return Err("Choose a txData folder before scanning profiles.".to_string());
+    }
+
+    let entries = fs::read_dir(&data_path)
+        .map_err(|error| format!("Failed to inspect {}: {error}", data_path.to_string_lossy()))?;
+    let mut profiles = Vec::new();
+
+    for entry in entries {
+        let entry = entry.map_err(|error| format!("Failed to inspect txData profile: {error}"))?;
+        let file_type = entry
+            .file_type()
+            .map_err(|error| format!("Failed to inspect txData profile type: {error}"))?;
+
+        if !file_type.is_dir() {
+            continue;
+        }
+
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.eq_ignore_ascii_case("logs") || name.starts_with('.') {
+            continue;
+        }
+
+        profiles.push(name);
+    }
+
+    profiles.sort_by_key(|profile| profile.to_ascii_lowercase());
+
+    Ok(TxDataProfilesResult {
+        data_path: data_path.to_string_lossy().to_string(),
+        profiles,
+        has_root_logs: data_path.join("logs").is_dir(),
     })
 }
 

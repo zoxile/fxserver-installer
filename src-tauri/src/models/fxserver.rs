@@ -66,3 +66,11 @@ pub struct TxDataLogResult {
     pub content: String,
     pub line_count: usize,
 }
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TxDataProfilesResult {
+    pub data_path: String,
+    pub profiles: Vec<String>,
+    pub has_root_logs: bool,
+}

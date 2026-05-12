@@ -50,6 +50,12 @@ export interface TxDataLogResult {
 	lineCount: number;
 }
 
+export interface TxDataProfilesResult {
+	dataPath: string;
+	profiles: string[];
+	hasRootLogs: boolean;
+}
+
 function hasTauriRuntime() {
 	return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 }
@@ -138,6 +144,33 @@ export async function readTxDataLog(request: TxDataLogRequest) {
 		log("txData log read failed.", {
 			level: "error",
 			scope: "fxserver.logs",
+			detail: errorMessage(error),
+		});
+		throw error;
+	}
+}
+
+export async function listTxDataProfiles(dataPath: string) {
+	if (!hasTauriRuntime()) {
+		return {
+			dataPath,
+			profiles: [],
+			hasRootLogs: false,
+		};
+	}
+
+	try {
+		const result = await invoke<TxDataProfilesResult>("list_txdata_profiles", { dataPath });
+		log(`Detected ${result.profiles.length} txData profile${result.profiles.length === 1 ? "" : "s"}.`, {
+			level: "debug",
+			scope: "fxserver.profiles",
+			detail: result.dataPath,
+		});
+		return result;
+	} catch (error) {
+		log("txData profile scan failed.", {
+			level: "error",
+			scope: "fxserver.profiles",
 			detail: errorMessage(error),
 		});
 		throw error;
