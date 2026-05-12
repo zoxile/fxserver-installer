@@ -138,7 +138,7 @@
 			<div class="max-h-144 overflow-auto rounded-sm border border-border bg-background/60">
 				{#if filteredLogs.length}
 					<div class="divide-y divide-border/70">
-						{#each filteredLogs as entry (entry.id)}
+						{#each filteredLogs as entry, index (`${entry.id}-${index}`)}
 							<article class="grid gap-3 px-4 py-3 text-sm lg:grid-cols-[9rem_7rem_minmax(0,10rem)_minmax(0,1fr)] lg:items-start">
 								<time class="font-mono text-xs text-muted-foreground">{formatTime(entry)}</time>
 								<span class={`w-fit rounded-xs border px-2 py-0.5 text-xs font-medium uppercase ${levelClass(entry.level)}`}>{entry.level}</span>

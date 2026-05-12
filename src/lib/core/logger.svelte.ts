@@ -77,13 +77,13 @@ function readBrowserLogs() {
 	}
 }
 
-function parseLogLine(line: string): AppLogEntry | null {
+function parseLogLine(line: string, index = 0): AppLogEntry | null {
 	try {
 		const parsed = JSON.parse(line) as Partial<AppLogEntry>;
 		if (!parsed.timestamp || !parsed.level || !parsed.scope || !parsed.message) return null;
 
 		return {
-			id: parsed.id ?? `${parsed.timestamp}-${parsed.scope}`,
+			id: parsed.id ?? `${parsed.timestamp}-${parsed.scope}-${index}`,
 			timestamp: parsed.timestamp,
 			level: parsed.level,
 			scope: parsed.scope,
@@ -93,6 +93,24 @@ function parseLogLine(line: string): AppLogEntry | null {
 	} catch {
 		return null;
 	}
+}
+
+function normalizeLogEntries(entries: AppLogEntry[]) {
+	const usedIds = new Set<string>();
+
+	return entries.map((entry, index) => {
+		const baseId = entry.id || `${entry.timestamp}-${entry.scope}-${index}`;
+		let nextId = baseId;
+		let suffix = 1;
+
+		while (usedIds.has(nextId)) {
+			nextId = `${baseId}-${suffix}`;
+			suffix += 1;
+		}
+
+		usedIds.add(nextId);
+		return nextId === entry.id ? entry : { ...entry, id: nextId };
+	});
 }
 
 export function log(message: string, options: LogOptions = {}) {
@@ -119,7 +137,7 @@ export async function initializeLogger() {
 
 		logFilePath.value = stored.path;
 		const parsedLogs = stored.entries.map(parseLogLine).filter((entry): entry is AppLogEntry => Boolean(entry));
-		logs.splice(0, logs.length, ...parsedLogs.slice(-maxVisibleLogs));
+		logs.splice(0, logs.length, ...normalizeLogEntries(parsedLogs.slice(-maxVisibleLogs)));
 		log("Logger initialized.", { level: "debug", scope: "core.logger", detail: logFilePath.value });
 	} catch (error) {
 		log("Logger started without persisted history.", {
@@ -140,7 +158,7 @@ export async function refreshLogs() {
 
 	logFilePath.value = stored.path;
 	const parsedLogs = stored.entries.map(parseLogLine).filter((entry): entry is AppLogEntry => Boolean(entry));
-	logs.splice(0, logs.length, ...parsedLogs.slice(-maxVisibleLogs));
+	logs.splice(0, logs.length, ...normalizeLogEntries(parsedLogs.slice(-maxVisibleLogs)));
 }
 
 export async function clearLogs() {
