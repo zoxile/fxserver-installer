@@ -1,16 +1,21 @@
 import { open } from "@tauri-apps/plugin-dialog";
 import { setInstallPath } from "./paths.svelte";
 
-export async function chooseInstallFolder() {
+export async function chooseFolder() {
 	const selected = await open({
 		directory: true,
 		multiple: false,
 	});
 
+	return selected ? (selected as string) : null;
+}
+
+export async function chooseInstallFolder() {
+	const selected = await chooseFolder();
+
 	if (selected) {
-		const path = selected as string;
-		setInstallPath(path);
-		return path;
+		setInstallPath(selected);
+		return selected;
 	}
 
 	return null;
