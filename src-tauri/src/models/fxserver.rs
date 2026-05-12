@@ -46,3 +46,23 @@ pub struct FxserverResources {
     pub thread_count: u32,
     pub handle_count: u32,
 }
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TxDataLogRequest {
+    pub data_path: String,
+    #[serde(default)]
+    pub profile: Option<String>,
+    pub log_name: String,
+    #[serde(default)]
+    pub max_lines: Option<usize>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TxDataLogResult {
+    pub path: String,
+    pub log_name: String,
+    pub content: String,
+    pub line_count: usize,
+}

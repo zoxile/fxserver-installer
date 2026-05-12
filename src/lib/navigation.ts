@@ -18,6 +18,7 @@ export type PageId =
 	| "artifact-install"
 	| "artifact-info"
 	| "server-manage"
+	| "server-logs"
 	| "configurator"
 	| "profiler"
 	| "jooat"
@@ -74,6 +75,11 @@ export const navigation: NavigationItem[] = [
 				id: "server-manage",
 				label: "Manage Server",
 				icon: TerminalIcon,
+			},
+			{
+				id: "server-logs",
+				label: "Server Logs",
+				icon: ScrollTextIcon,
 			},
 		],
 	},

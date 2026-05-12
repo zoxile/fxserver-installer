@@ -1,4 +1,5 @@
 use std::{
+    fs,
     path::PathBuf,
     process::{Child, Command, Stdio},
     sync::Mutex,
@@ -7,7 +8,7 @@ use std::{
 
 use crate::models::fxserver::{
     FxserverEnvironmentVariable, FxserverLaunchRequest, FxserverLaunchResult, FxserverResources,
-    FxserverStatus,
+    FxserverStatus, TxDataLogRequest, TxDataLogResult,
 };
 
 #[derive(Default)]
@@ -167,12 +168,52 @@ pub fn get_fxserver_status(
     })
 }
 
+#[tauri::command]
+pub fn read_txdata_log(request: TxDataLogRequest) -> Result<TxDataLogResult, String> {
+    let log_name = request.log_name.trim();
+    if !matches!(log_name, "fxserver.log" | "admin.log" | "server.log") {
+        return Err("Only fxserver.log, admin.log, and server.log can be opened.".to_string());
+    }
+
+    let data_path = PathBuf::from(request.data_path.trim());
+    if data_path.as_os_str().is_empty() {
+        return Err("Set TXHOST_DATA_PATH before opening txData logs.".to_string());
+    }
+
+    let profile = request.profile.unwrap_or_default();
+    let profile = profile.trim();
+    let max_lines = request.max_lines.unwrap_or(500).clamp(50, 5000);
+    let log_path = resolve_log_path(data_path, profile, log_name);
+
+    let content = fs::read_to_string(&log_path)
+        .map_err(|error| format!("Failed to read {}: {error}", log_path.to_string_lossy()))?;
+    let lines: Vec<&str> = content.lines().collect();
+    let start = lines.len().saturating_sub(max_lines);
+    let tailed = lines[start..].join("\n");
+
+    Ok(TxDataLogResult {
+        path: log_path.to_string_lossy().to_string(),
+        log_name: log_name.to_string(),
+        content: tailed,
+        line_count: lines.len(),
+    })
+}
+
 fn process_is_running(process: &mut ManagedFxserverProcess) -> Result<bool, String> {
     Ok(process
         .child
         .try_wait()
         .map_err(|error| format!("Failed to inspect FXServer: {error}"))?
         .is_none())
+}
+
+fn resolve_log_path(data_path: PathBuf, profile: &str, log_name: &str) -> PathBuf {
+    let direct_logs = data_path.join("logs").join(log_name);
+    if direct_logs.is_file() || profile.is_empty() {
+        return direct_logs;
+    }
+
+    data_path.join(profile).join("logs").join(log_name)
 }
 
 fn sanitize_environment(

@@ -36,6 +36,20 @@ export interface FxserverStatus {
 	resources?: FxserverResources | null;
 }
 
+export interface TxDataLogRequest {
+	dataPath: string;
+	profile?: string | null;
+	logName: "fxserver.log" | "admin.log" | "server.log";
+	maxLines?: number;
+}
+
+export interface TxDataLogResult {
+	path: string;
+	logName: string;
+	content: string;
+	lineCount: number;
+}
+
 function hasTauriRuntime() {
 	return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 }
@@ -103,6 +117,27 @@ export async function stopFxserver() {
 		log("FXServer stop failed.", {
 			level: "error",
 			scope: "fxserver.manage",
+			detail: errorMessage(error),
+		});
+		throw error;
+	}
+}
+
+export async function readTxDataLog(request: TxDataLogRequest) {
+	if (!hasTauriRuntime()) return unavailableOutsideTauri<TxDataLogResult>();
+
+	try {
+		const result = await invoke<TxDataLogResult>("read_txdata_log", { request });
+		log(`Loaded ${result.logName}.`, {
+			level: "success",
+			scope: "fxserver.logs",
+			detail: result.path,
+		});
+		return result;
+	} catch (error) {
+		log("txData log read failed.", {
+			level: "error",
+			scope: "fxserver.logs",
 			detail: errorMessage(error),
 		});
 		throw error;

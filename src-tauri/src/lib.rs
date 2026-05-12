@@ -12,6 +12,7 @@ pub fn run() {
             commands::artifact::get_installed_windows_artifact_info,
             commands::artifact::install_windows_artifact,
             commands::fxserver::get_fxserver_status,
+            commands::fxserver::read_txdata_log,
             commands::fxserver::start_fxserver,
             commands::fxserver::stop_fxserver,
             commands::jooat::get_jooat_resolver_status,
