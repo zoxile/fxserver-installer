@@ -13,15 +13,14 @@
 	import { Button } from "$lib/components/ui/button/index.js";
 	import { Input } from "$lib/components/ui/input/index.js";
 	import { Progress } from "$lib/components/ui/progress/index.js";
-	import { chooseInstallFolder } from "$lib/core/selectFolder";
+	import * as Select from "$lib/components/ui/select/index.js";
+	import { chooseFolder as chooseAnyFolder, chooseInstallFolder } from "$lib/core/selectFolder";
 	import { getInstallPath, loadInstallPath, setInstallPath } from "$lib/core/paths.svelte";
 	import { getInstalledWindowsArtifactInfo, type InstalledArtifactInfo } from "$lib/modules/artifact";
 	import { getFxserverStatus, startFxserver, stopFxserver, type FxserverStatus } from "$lib/modules/fxserver";
 	import TxHostFieldInput from "./TxHostFieldInput.svelte";
 	import { sensitiveTxHostKeys, txHostFields, txHostGroups } from "./fxserverEnv";
-
-	const envStorageKey = "fxserver.manage.env";
-	const profileStorageKey = "fxserver.manage.serverProfile";
+	import { fxserverSettings, loadFxserverSettings, readSavedEnvironment, refreshTxDataProfiles, setServerProfile, setTxDataPath, writeSavedEnvironment } from "./fxserverSettings.svelte";
 
 	let artifactPath = $state("");
 	let artifact = $state<InstalledArtifactInfo | null>(null);
@@ -38,13 +37,20 @@
 
 	const activeEnvCount = $derived(Object.values(envValues).filter((value) => value.trim()).length + (serverProfile.trim() ? 1 : 0));
 	const canStart = $derived(Boolean(artifactPath.trim()) && !status.running && !starting && !busy);
+	const txHostEditableFields = $derived(txHostFields.filter((field) => field.key !== "TXHOST_DATA_PATH"));
+	const profileOptions = $derived([
+		...(fxserverSettings.hasRootLogs ? [{ value: "", label: "Root logs folder" }] : []),
+		...fxserverSettings.profiles.map((profile) => ({ value: profile, label: profile })),
+	]);
 
 	onMount(() => {
 		loadInstallPath();
+		loadFxserverSettings();
 		artifactPath = getInstallPath();
 		loadSavedEnvironment();
 		storageReady = true;
 		void refreshAll();
+		void refreshTxDataProfiles();
 		refreshTimer = window.setInterval(() => {
 			if (status.running) void refreshStatus(false);
 		}, 2500);
@@ -61,11 +67,26 @@
 		if (storageReady) saveEnvironment();
 	});
 
+	$effect(() => {
+		const sharedTxDataPath = fxserverSettings.txDataPath;
+		const sharedProfile = fxserverSettings.profile;
+
+		if (!storageReady) return;
+
+		if ((envValues.TXHOST_DATA_PATH ?? "") !== sharedTxDataPath) {
+			envValues = { ...envValues, TXHOST_DATA_PATH: sharedTxDataPath };
+		}
+
+		if (serverProfile !== sharedProfile) {
+			serverProfile = sharedProfile;
+		}
+	});
+
 	function loadSavedEnvironment() {
 		try {
-			const saved = localStorage.getItem(envStorageKey);
-			envValues = { ...emptyEnvironment(), ...(saved ? JSON.parse(saved) : {}) };
-			serverProfile = localStorage.getItem(profileStorageKey) ?? "";
+			const saved = readSavedEnvironment();
+			envValues = { ...emptyEnvironment(), ...saved, TXHOST_DATA_PATH: fxserverSettings.txDataPath };
+			serverProfile = fxserverSettings.profile;
 		} catch {
 			envValues = emptyEnvironment();
 			serverProfile = "";
@@ -80,8 +101,9 @@
 		const trimmedEntries = Object.entries(envValues)
 			.map(([key, value]) => [key, value.trim()])
 			.filter(([key, value]) => value && !sensitiveTxHostKeys.has(key));
-		localStorage.setItem(envStorageKey, JSON.stringify(Object.fromEntries(trimmedEntries)));
-		localStorage.setItem(profileStorageKey, serverProfile.trim());
+		writeSavedEnvironment(Object.fromEntries(trimmedEntries));
+		setTxDataPath((envValues.TXHOST_DATA_PATH ?? "").trim());
+		setServerProfile(serverProfile.trim());
 	}
 
 	function updateArtifactPath(event: Event) {
@@ -96,6 +118,30 @@
 		const selectedPath = await chooseInstallFolder();
 		artifactPath = selectedPath ?? getInstallPath();
 		await refreshArtifact();
+	}
+
+	async function chooseTxDataFolder() {
+		error = "";
+		message = "";
+
+		const selectedPath = await chooseAnyFolder();
+		if (!selectedPath) return;
+
+		envValues = { ...envValues, TXHOST_DATA_PATH: selectedPath };
+		setTxDataPath(selectedPath);
+		await refreshTxDataProfiles();
+	}
+
+	async function handleTxDataInput(event: Event) {
+		const nextPath = (event.currentTarget as HTMLInputElement).value;
+		envValues = { ...envValues, TXHOST_DATA_PATH: nextPath };
+		setTxDataPath(nextPath);
+		await refreshTxDataProfiles();
+	}
+
+	function handleProfileChange(profile: string) {
+		serverProfile = profile;
+		setServerProfile(profile);
 	}
 
 	async function refreshAll() {
@@ -253,20 +299,14 @@
 						<p class="mt-1 font-mono text-xl font-semibold text-foreground">{artifact?.version ?? (artifact?.installed ? "Unknown" : "None")}</p>
 					</div>
 					<div class="rounded-sm border border-border bg-background/70 p-3">
-						<p class="text-xs text-muted-foreground">Detection</p>
-						<p class="mt-1 text-xl font-semibold text-foreground">{artifact?.detectionSource ?? "None"}</p>
+						<p class="text-xs text-muted-foreground">Launch Ready</p>
+						<p class="mt-1 text-xl font-semibold text-foreground">{artifact?.installed && artifact?.hasFxserverExecutable ? "Ready" : "Needs setup"}</p>
 					</div>
 					<div class="rounded-sm border border-border bg-background/70 p-3">
 						<p class="text-xs text-muted-foreground">Executable</p>
 						<p class="mt-1 text-xl font-semibold text-foreground">{artifact?.hasFxserverExecutable ? "Found" : "Missing"}</p>
 					</div>
 				</div>
-
-				{#if artifact?.citizenServerImplPath}
-					<p class="truncate rounded-sm border border-border bg-background/60 px-3 py-2 font-mono text-xs text-muted-foreground" title={artifact.citizenServerImplPath}>
-						{artifact.citizenServerImplPath}
-					</p>
-				{/if}
 			</Card.Content>
 		</Card.Root>
 
@@ -362,13 +402,74 @@
 			</div>
 		</Card.Header>
 		<Card.Content class="space-y-5">
+			<div class="grid gap-3 rounded-sm border border-sky-400/20 bg-sky-400/5 p-3 lg:grid-cols-[minmax(0,1fr)_minmax(14rem,0.45fr)]">
+				<label class="grid gap-2">
+					<span class="flex items-center justify-between gap-3">
+						<span class="text-xs font-semibold text-sky-100">txData Path</span>
+						<span class="font-mono text-[10px] text-sky-200/70">TXHOST_DATA_PATH</span>
+					</span>
+					<span class="text-xs leading-5 text-muted-foreground">Shared txData folder used for profile detection and server log browsing.</span>
+					<div class="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
+						<Input
+							value={envValues.TXHOST_DATA_PATH ?? ""}
+							oninput={(event) => {
+								const nextPath = (event.currentTarget as HTMLInputElement).value;
+								envValues = { ...envValues, TXHOST_DATA_PATH: nextPath };
+								setTxDataPath(nextPath);
+							}}
+							onchange={handleTxDataInput}
+							placeholder="C:\FiveM\txData"
+							title="Folder containing txAdmin profile folders and logs."
+							class="rounded-sm font-mono text-xs"
+						/>
+						<Button variant="outline" onclick={chooseTxDataFolder} title="Browse for the txData folder">
+							<FolderOpenIcon />
+							Browse
+						</Button>
+					</div>
+				</label>
+
+				<label class="grid gap-2">
+					<span class="flex items-center justify-between gap-3">
+						<span class="text-xs font-semibold text-sky-100">Profile</span>
+						<span class="font-mono text-[10px] text-sky-200/70">{fxserverSettings.loadingProfiles ? "scanning" : `${fxserverSettings.profiles.length} found`}</span>
+					</span>
+					<span class="text-xs leading-5 text-muted-foreground">Shared profile used by Manage Server and Server Logs.</span>
+					<Select.Root bind:value={serverProfile} type="single" items={profileOptions}>
+						<Select.Trigger title="Choose the txData profile folder" class="w-full rounded-sm font-mono text-xs">
+							{serverProfile || (fxserverSettings.hasRootLogs ? "Root logs folder" : "Choose profile")}
+						</Select.Trigger>
+						<Select.Content class="rounded-sm">
+							{#if profileOptions.length}
+								{#each profileOptions as option}
+									<Select.Item value={option.value} label={option.label}>
+										{option.label}
+									</Select.Item>
+								{/each}
+							{:else}
+								<Select.Item value="" label="No profiles detected" disabled>No profiles detected</Select.Item>
+							{/if}
+						</Select.Content>
+					</Select.Root>
+					{#if fxserverSettings.profileError}
+						<span class="text-xs text-red-200">{fxserverSettings.profileError}</span>
+					{/if}
+				</label>
+			</div>
+
 			<label class="grid gap-2 rounded-sm border border-amber-400/20 bg-amber-400/5 p-3">
 				<span class="flex items-center justify-between gap-3">
 					<span class="text-xs font-semibold text-amber-100">Legacy Server Profile</span>
 					<span class="font-mono text-[10px] text-amber-200/70">+set serverProfile</span>
 				</span>
 				<span class="text-xs leading-5 text-muted-foreground">Optional compatibility argument for older txAdmin profile flows. Separate txData folders are preferred for new setups.</span>
-				<Input bind:value={serverProfile} placeholder="default" title="Optional legacy txAdmin serverProfile argument" class="rounded-sm font-mono text-xs" />
+				<Input
+					value={serverProfile}
+					oninput={(event) => handleProfileChange((event.currentTarget as HTMLInputElement).value)}
+					placeholder="default"
+					title="Optional legacy txAdmin serverProfile argument"
+					class="rounded-sm font-mono text-xs"
+				/>
 			</label>
 
 			{#each txHostGroups as group}
@@ -379,7 +480,7 @@
 						<div class="h-px flex-1 bg-border"></div>
 					</div>
 					<div class="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-						{#each txHostFields.filter((field) => field.group === group) as field}
+						{#each txHostEditableFields.filter((field) => field.group === group) as field}
 							<TxHostFieldInput field={field} sensitive={sensitiveTxHostKeys.has(field.key)} bind:value={envValues[field.key]} />
 						{/each}
 					</div>

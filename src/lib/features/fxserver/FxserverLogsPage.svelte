@@ -2,13 +2,18 @@
 	import AlertCircleIcon from "@lucide/svelte/icons/alert-circle";
 	import CheckCircle2Icon from "@lucide/svelte/icons/check-circle-2";
 	import FileTextIcon from "@lucide/svelte/icons/file-text";
+	import FolderOpenIcon from "@lucide/svelte/icons/folder-open";
 	import RefreshCwIcon from "@lucide/svelte/icons/refresh-cw";
 	import ScrollTextIcon from "@lucide/svelte/icons/scroll-text";
+	import { onMount } from "svelte";
 	import * as Card from "$lib/components/ui/card/index.js";
 	import { Button } from "$lib/components/ui/button/index.js";
 	import { Input } from "$lib/components/ui/input/index.js";
+	import * as Select from "$lib/components/ui/select/index.js";
 	import { log } from "$lib/core/logger";
+	import { chooseFolder } from "$lib/core/selectFolder";
 	import { readTxDataLog, type TxDataLogResult } from "$lib/modules/fxserver";
+	import { fxserverSettings, loadFxserverSettings, refreshTxDataProfiles, setServerProfile, setTxDataPath } from "./fxserverSettings.svelte";
 
 	type LogName = "fxserver.log" | "admin.log" | "server.log";
 	type LogLevel = "all" | "info" | "success" | "warn" | "error";
@@ -22,9 +27,6 @@
 		raw: string;
 	}
 
-	const envStorageKey = "fxserver.manage.env";
-	const profileStorageKey = "fxserver.manage.serverProfile";
-	const logProfileStorageKey = "fxserver.manage.logProfile";
 	const logNames: LogName[] = ["fxserver.log", "admin.log", "server.log"];
 	const levels: LogLevel[] = ["all", "info", "success", "warn", "error"];
 
@@ -38,6 +40,7 @@
 	let busy = $state(false);
 	let notice = $state("");
 	let noticeLevel = $state<"success" | "error">("success");
+	let storageReady = false;
 
 	const entries = $derived(parseLines(result?.content ?? "", logName));
 	const filteredEntries = $derived(
@@ -47,39 +50,30 @@
 		}),
 	);
 	const pathPreview = $derived(dataPath.trim() ? `${dataPath.trim()}${profile.trim() ? `\\${profile.trim()}` : ""}\\logs\\${logName}` : "Set TXHOST_DATA_PATH to view FXServer logs.");
+	const profileOptions = $derived([
+		...(fxserverSettings.hasRootLogs ? [{ value: "", label: "Root logs folder" }] : []),
+		...fxserverSettings.profiles.map((profileName) => ({ value: profileName, label: profileName })),
+	]);
 
-	$effect(() => {
-		if (!dataPath && !profile) loadSavedSettings();
+	onMount(() => {
+		loadFxserverSettings();
+		dataPath = fxserverSettings.txDataPath;
+		profile = fxserverSettings.profile;
+		storageReady = true;
+		void refreshTxDataProfiles();
 	});
 
-	function loadSavedSettings() {
-		try {
-			const savedEnv = localStorage.getItem(envStorageKey);
-			const parsed = savedEnv ? JSON.parse(savedEnv) : {};
-			dataPath = typeof parsed.TXHOST_DATA_PATH === "string" ? parsed.TXHOST_DATA_PATH : "";
-			profile = localStorage.getItem(logProfileStorageKey) ?? localStorage.getItem(profileStorageKey) ?? "";
-		} catch {
-			dataPath = "";
-			profile = "";
-		}
-	}
-
-	function saveLogSettings() {
-		try {
-			const savedEnv = localStorage.getItem(envStorageKey);
-			const parsed = savedEnv ? JSON.parse(savedEnv) : {};
-			localStorage.setItem(envStorageKey, JSON.stringify({ ...parsed, TXHOST_DATA_PATH: dataPath.trim() }));
-			localStorage.setItem(logProfileStorageKey, profile.trim());
-		} catch {
-			localStorage.setItem(envStorageKey, JSON.stringify({ TXHOST_DATA_PATH: dataPath.trim() }));
-			localStorage.setItem(logProfileStorageKey, profile.trim());
-		}
-	}
+	$effect(() => {
+		if (!storageReady) return;
+		setTxDataPath(dataPath);
+		setServerProfile(profile);
+	});
 
 	async function refresh() {
 		busy = true;
 		notice = "";
-		saveLogSettings();
+		setTxDataPath(dataPath);
+		setServerProfile(profile);
 
 		try {
 			result = await readTxDataLog({
@@ -98,6 +92,23 @@
 		} finally {
 			busy = false;
 		}
+	}
+
+	async function chooseTxDataFolder() {
+		notice = "";
+
+		const selectedPath = await chooseFolder();
+		if (!selectedPath) return;
+
+		dataPath = selectedPath;
+		setTxDataPath(selectedPath);
+		await refreshTxDataProfiles();
+	}
+
+	async function handleTxDataChange(event: Event) {
+		dataPath = (event.currentTarget as HTMLInputElement).value;
+		setTxDataPath(dataPath);
+		await refreshTxDataProfiles();
 	}
 
 	function parseLines(content: string, currentLog: LogName): ParsedLine[] {
@@ -180,17 +191,50 @@
 			<div class="grid gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(0,0.55fr)_8rem]">
 				<label class="grid gap-2">
 					<span class="text-xs font-medium text-muted-foreground">txData Path</span>
-					<Input bind:value={dataPath} placeholder="C:\FiveM\txData" title="TXHOST_DATA_PATH folder containing profile folders and logs." class="rounded-sm font-mono text-xs" />
+					<div class="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
+						<Input
+							bind:value={dataPath}
+							onchange={handleTxDataChange}
+							placeholder="C:\FiveM\txData"
+							title="TXHOST_DATA_PATH folder containing profile folders and logs."
+							class="rounded-sm font-mono text-xs"
+						/>
+						<Button variant="outline" onclick={chooseTxDataFolder} title="Browse for the txData folder">
+							<FolderOpenIcon />
+							Browse
+						</Button>
+					</div>
 				</label>
 				<label class="grid gap-2">
 					<span class="text-xs font-medium text-muted-foreground">Profile Folder</span>
-					<Input bind:value={profile} placeholder="qbox" title="Profile folder inside txData." class="rounded-sm font-mono text-xs" />
+					<Select.Root bind:value={profile} type="single" items={profileOptions}>
+						<Select.Trigger title="Choose the txData profile folder" class="w-full rounded-sm font-mono text-xs">
+							{profile || (fxserverSettings.hasRootLogs ? "Root logs folder" : "Choose profile")}
+						</Select.Trigger>
+						<Select.Content class="rounded-sm">
+							{#if profileOptions.length}
+								{#each profileOptions as option}
+									<Select.Item value={option.value} label={option.label}>
+										{option.label}
+									</Select.Item>
+								{/each}
+							{:else}
+								<Select.Item value="" label="No profiles detected" disabled>No profiles detected</Select.Item>
+							{/if}
+						</Select.Content>
+					</Select.Root>
 				</label>
 				<label class="grid gap-2">
 					<span class="text-xs font-medium text-muted-foreground">Lines</span>
 					<Input bind:value={maxLines} type="number" min="50" max="5000" placeholder="500" title="Number of latest log lines to load." class="rounded-sm font-mono text-xs" />
 				</label>
 			</div>
+
+			{#if fxserverSettings.profileError}
+				<div class="rounded-sm border border-red-400/30 bg-red-400/10 px-3 py-2 text-xs text-red-100">
+					{fxserverSettings.profileError}
+				</div>
+			{/if}
 
 			<div class="grid gap-3 lg:grid-cols-[minmax(0,1fr)_auto]">
 				<Input bind:value={query} placeholder="Filter by message, source, level, or raw line..." title="Filter FXServer log entries." class="rounded-sm" />
