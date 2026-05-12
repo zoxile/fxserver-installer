@@ -6,6 +6,7 @@
 	import LoaderCircleIcon from "@lucide/svelte/icons/loader-circle";
 	import PlayIcon from "@lucide/svelte/icons/play";
 	import RefreshCwIcon from "@lucide/svelte/icons/refresh-cw";
+	import SendIcon from "@lucide/svelte/icons/send";
 	import ServerIcon from "@lucide/svelte/icons/server";
 	import SquareIcon from "@lucide/svelte/icons/square";
 	import { onDestroy, onMount } from "svelte";
@@ -17,7 +18,7 @@
 	import { chooseFolder as chooseAnyFolder, chooseInstallFolder } from "$lib/core/selectFolder";
 	import { getInstallPath, loadInstallPath, setInstallPath } from "$lib/core/paths.svelte";
 	import { getInstalledWindowsArtifactInfo, type InstalledArtifactInfo } from "$lib/modules/artifact";
-	import { getFxserverStatus, startFxserver, stopFxserver, type FxserverStatus } from "$lib/modules/fxserver";
+	import { getFxserverStatus, getFxserverTerminal, sendFxserverCommand, startFxserver, stopFxserver, type FxserverStatus, type FxserverTerminalEntry } from "$lib/modules/fxserver";
 	import TxHostFieldInput from "./TxHostFieldInput.svelte";
 	import { sensitiveTxHostKeys, txHostFields, txHostGroups } from "./fxserverEnv";
 	import { fxserverSettings, loadFxserverSettings, readSavedEnvironment, refreshTxDataProfiles, setServerProfile, setTxDataPath, writeSavedEnvironment } from "./fxserverSettings.svelte";
@@ -25,6 +26,8 @@
 	let artifactPath = $state("");
 	let artifact = $state<InstalledArtifactInfo | null>(null);
 	let status = $state<FxserverStatus>({ running: false });
+	let terminalEntries = $state<FxserverTerminalEntry[]>([]);
+	let terminalCommand = $state("");
 	let envValues = $state<Record<string, string>>(emptyEnvironment());
 	let serverProfile = $state("");
 	let storageReady = false;
@@ -34,6 +37,8 @@
 	let error = $state("");
 	let message = $state("");
 	let refreshTimer: number | undefined;
+	let terminalTimer: number | undefined;
+	let terminalViewport: HTMLDivElement;
 
 	const activeEnvCount = $derived(Object.values(envValues).filter((value) => value.trim()).length + (serverProfile.trim() ? 1 : 0));
 	const canStart = $derived(Boolean(artifactPath.trim()) && !status.running && !starting && !busy);
@@ -54,10 +59,15 @@
 		refreshTimer = window.setInterval(() => {
 			if (status.running) void refreshStatus(false);
 		}, 2500);
+		void refreshTerminal(false);
+		terminalTimer = window.setInterval(() => {
+			void refreshTerminal(false);
+		}, 1000);
 	});
 
 	onDestroy(() => {
 		if (refreshTimer) window.clearInterval(refreshTimer);
+		if (terminalTimer) window.clearInterval(terminalTimer);
 	});
 
 	$effect(() => {
@@ -165,6 +175,21 @@
 		if (showMessage) message = status.running ? "FXServer status refreshed." : "FXServer is not running from this app.";
 	}
 
+	async function refreshTerminal(scrollToBottom = true) {
+		try {
+			const result = await getFxserverTerminal(700);
+			terminalEntries = result.entries;
+			if (scrollToBottom) requestAnimationFrame(scrollTerminalToBottom);
+		} catch (caught) {
+			error = caught instanceof Error ? caught.message : String(caught);
+		}
+	}
+
+	function scrollTerminalToBottom() {
+		if (!terminalViewport) return;
+		terminalViewport.scrollTop = terminalViewport.scrollHeight;
+	}
+
 	function launchEnvironment() {
 		return txHostFields
 			.map((field) => ({ key: field.key, value: (envValues[field.key] ?? "").trim() }))
@@ -183,7 +208,7 @@
 				environment: launchEnvironment(),
 				serverProfile: serverProfile.trim() || null,
 			});
-			await refreshStatus(false);
+			await Promise.all([refreshStatus(false), refreshTerminal()]);
 			message = "FXServer started with the selected TXHOST environment.";
 		} catch (caught) {
 			error = caught instanceof Error ? caught.message : String(caught);
@@ -199,7 +224,7 @@
 
 		try {
 			await stopFxserver();
-			await refreshStatus(false);
+			await Promise.all([refreshStatus(false), refreshTerminal()]);
 			message = "FXServer stopped.";
 		} catch (caught) {
 			error = caught instanceof Error ? caught.message : String(caught);
@@ -233,6 +258,38 @@
 		const seconds = Number(value);
 		if (!Number.isFinite(seconds)) return value;
 		return new Date(seconds * 1000).toLocaleString();
+	}
+
+	function terminalTime(value: string) {
+		const seconds = Number(value);
+		if (!Number.isFinite(seconds)) return value;
+		return new Date(seconds * 1000).toLocaleTimeString(undefined, {
+			hour: "2-digit",
+			minute: "2-digit",
+			second: "2-digit",
+		});
+	}
+
+	function terminalStreamClass(stream: string) {
+		return {
+			stdout: "border-sky-400/30 bg-sky-400/10 text-sky-200",
+			stderr: "border-red-400/30 bg-red-400/10 text-red-200",
+			system: "border-emerald-400/30 bg-emerald-400/10 text-emerald-200",
+			command: "border-amber-400/30 bg-amber-400/10 text-amber-200",
+		}[stream] ?? "border-border bg-background text-muted-foreground";
+	}
+
+	async function submitTerminalCommand() {
+		const command = terminalCommand.trim();
+		if (!command) return;
+
+		try {
+			await sendFxserverCommand(command);
+			terminalCommand = "";
+			await refreshTerminal();
+		} catch (caught) {
+			error = caught instanceof Error ? caught.message : String(caught);
+		}
 	}
 </script>
 
@@ -389,6 +446,52 @@
 			</div>
 		</Card.Root>
 	</div>
+
+	<Card.Root class="group relative overflow-hidden rounded-sm border-border bg-card shadow-sm transition-transform duration-300 hover:-translate-y-0.5">
+		<div class="pointer-events-none absolute inset-x-4 top-0 h-px bg-linear-to-r from-transparent via-primary/70 to-transparent opacity-0 transition-opacity duration-300 group-hover:opacity-100"></div>
+		<Card.Header class="border-b border-border pb-4">
+			<div class="flex flex-col justify-between gap-3 md:flex-row md:items-start">
+				<div>
+					<Card.Title>Server Console</Card.Title>
+					<Card.Description>Live output from the hidden FXServer process, with stdin command forwarding when it is running.</Card.Description>
+				</div>
+				<div class="rounded-sm border border-border bg-background px-2 py-1 text-xs font-semibold text-muted-foreground">{terminalEntries.length} lines</div>
+			</div>
+		</Card.Header>
+		<Card.Content class="space-y-3">
+			<div bind:this={terminalViewport} class="h-104 overflow-auto rounded-sm border border-border bg-black/40 p-3 font-mono text-xs">
+				{#if terminalEntries.length}
+					<div class="space-y-1.5">
+						{#each terminalEntries as entry (entry.id)}
+							<div class="grid gap-2 text-muted-foreground sm:grid-cols-[5.5rem_5.5rem_minmax(0,1fr)]">
+								<span class="text-[11px] text-muted-foreground/80">{terminalTime(entry.timestamp)}</span>
+								<span class={`w-fit rounded-xs border px-1.5 py-0.5 text-[10px] font-semibold uppercase ${terminalStreamClass(entry.stream)}`}>{entry.stream}</span>
+								<span class="min-w-0 break-words whitespace-pre-wrap text-foreground">{entry.line}</span>
+							</div>
+						{/each}
+					</div>
+				{:else}
+					<div class="flex h-full items-center justify-center text-center text-sm text-muted-foreground">
+						Start FXServer to see console output here.
+					</div>
+				{/if}
+			</div>
+
+			<form
+				class="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]"
+				onsubmit={(event) => {
+					event.preventDefault();
+					void submitTerminalCommand();
+				}}
+			>
+				<Input bind:value={terminalCommand} placeholder="status, refresh, say hello..." title="Command to send to the running FXServer process" disabled={!status.running} class="rounded-sm font-mono text-xs" />
+				<Button type="submit" disabled={!status.running || !terminalCommand.trim()} title="Send command to FXServer stdin">
+					<SendIcon />
+					Send
+				</Button>
+			</form>
+		</Card.Content>
+	</Card.Root>
 
 	<Card.Root class="group relative overflow-hidden rounded-sm border-border bg-card shadow-sm transition-transform duration-300 hover:-translate-y-0.5">
 		<div class="pointer-events-none absolute inset-x-4 top-0 h-px bg-linear-to-r from-transparent via-primary/70 to-transparent opacity-0 transition-opacity duration-300 group-hover:opacity-100"></div>
