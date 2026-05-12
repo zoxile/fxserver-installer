@@ -36,6 +36,17 @@ export interface FxserverStatus {
 	resources?: FxserverResources | null;
 }
 
+export interface FxserverTerminalEntry {
+	id: number;
+	stream: "stdout" | "stderr" | "system" | "command" | string;
+	line: string;
+	timestamp: string;
+}
+
+export interface FxserverTerminalResult {
+	entries: FxserverTerminalEntry[];
+}
+
 export interface TxDataLogRequest {
 	dataPath: string;
 	profile?: string | null;
@@ -123,6 +134,45 @@ export async function stopFxserver() {
 		log("FXServer stop failed.", {
 			level: "error",
 			scope: "fxserver.manage",
+			detail: errorMessage(error),
+		});
+		throw error;
+	}
+}
+
+export async function getFxserverTerminal(maxLines = 500) {
+	if (!hasTauriRuntime()) {
+		return {
+			entries: [],
+		} satisfies FxserverTerminalResult;
+	}
+
+	try {
+		return await invoke<FxserverTerminalResult>("get_fxserver_terminal", { maxLines });
+	} catch (error) {
+		log("FXServer terminal refresh failed.", {
+			level: "error",
+			scope: "fxserver.terminal",
+			detail: errorMessage(error),
+		});
+		throw error;
+	}
+}
+
+export async function sendFxserverCommand(command: string) {
+	if (!hasTauriRuntime()) return unavailableOutsideTauri<void>();
+
+	try {
+		await invoke<void>("send_fxserver_command", { command });
+		log("FXServer command sent.", {
+			level: "debug",
+			scope: "fxserver.terminal",
+			detail: command,
+		});
+	} catch (error) {
+		log("FXServer command failed.", {
+			level: "error",
+			scope: "fxserver.terminal",
 			detail: errorMessage(error),
 		});
 		throw error;

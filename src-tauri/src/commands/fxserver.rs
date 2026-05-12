@@ -1,25 +1,44 @@
 use std::{
     fs,
+    io::{BufRead, BufReader, Write},
     path::PathBuf,
-    process::{Child, Command, Stdio},
-    sync::Mutex,
+    process::{Child, ChildStdin, Command, Stdio},
+    sync::{Arc, Mutex},
+    thread,
     time::{Duration, SystemTime},
 };
 
 use crate::models::fxserver::{
     FxserverEnvironmentVariable, FxserverLaunchRequest, FxserverLaunchResult, FxserverResources,
-    FxserverStatus, TxDataLogRequest, TxDataLogResult, TxDataProfilesResult,
+    FxserverStatus, FxserverTerminalEntry, FxserverTerminalResult, TxDataLogRequest,
+    TxDataLogResult, TxDataProfilesResult,
 };
 
-#[derive(Default)]
 pub struct FxserverManager {
     process: Mutex<Option<ManagedFxserverProcess>>,
+    terminal: Arc<Mutex<TerminalState>>,
 }
 
 struct ManagedFxserverProcess {
     child: Child,
+    stdin: Option<ChildStdin>,
     artifact_path: PathBuf,
     started_at: SystemTime,
+}
+
+#[derive(Default)]
+struct TerminalState {
+    entries: Vec<FxserverTerminalEntry>,
+    next_id: u64,
+}
+
+impl Default for FxserverManager {
+    fn default() -> Self {
+        Self {
+            process: Mutex::new(None),
+            terminal: Arc::new(Mutex::new(TerminalState::default())),
+        }
+    }
 }
 
 #[tauri::command]
@@ -58,9 +77,9 @@ pub fn start_fxserver(
     let mut command = Command::new(&executable_path);
     command
         .current_dir(&artifact_path)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
 
     for variable in sanitize_environment(request.environment)? {
         command.env(variable.key, variable.value);
@@ -72,15 +91,34 @@ pub fn start_fxserver(
         }
     }
 
-    let child = command
+    let mut child = command
         .spawn()
         .map_err(|error| format!("Failed to start FXServer.exe: {error}"))?;
     let pid = child.id();
     let started_at = SystemTime::now();
     let started_at_label = system_time_to_label(started_at);
+    let stdin = child.stdin.take();
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+
+    clear_terminal(&manager.terminal)?;
+    append_terminal_line(
+        &manager.terminal,
+        "system",
+        format!("Started FXServer.exe from {}", artifact_path.to_string_lossy()),
+    )?;
+
+    if let Some(stdout) = stdout {
+        spawn_terminal_reader(manager.terminal.clone(), "stdout", stdout);
+    }
+
+    if let Some(stderr) = stderr {
+        spawn_terminal_reader(manager.terminal.clone(), "stderr", stderr);
+    }
 
     *guard = Some(ManagedFxserverProcess {
         child,
+        stdin,
         artifact_path: artifact_path.clone(),
         started_at,
     });
@@ -115,6 +153,8 @@ pub fn stop_fxserver(manager: tauri::State<'_, FxserverManager>) -> Result<(), S
             .map_err(|error| format!("Failed to stop FXServer: {error}"))?;
         let _ = process.child.wait();
     }
+
+    append_terminal_line(&manager.terminal, "system", "FXServer stopped.")?;
 
     Ok(())
 }
@@ -166,6 +206,63 @@ pub fn get_fxserver_status(
         uptime_seconds: Some(uptime_seconds),
         resources: read_process_resources(pid),
     })
+}
+
+#[tauri::command]
+pub fn get_fxserver_terminal(
+    max_lines: Option<usize>,
+    manager: tauri::State<'_, FxserverManager>,
+) -> Result<FxserverTerminalResult, String> {
+    let max_lines = max_lines.unwrap_or(500).clamp(50, 5000);
+    let terminal = manager
+        .terminal
+        .lock()
+        .map_err(|_| "FXServer terminal output is unavailable.".to_string())?;
+    let start = terminal.entries.len().saturating_sub(max_lines);
+
+    Ok(FxserverTerminalResult {
+        entries: terminal.entries[start..].to_vec(),
+    })
+}
+
+#[tauri::command]
+pub fn send_fxserver_command(
+    command: String,
+    manager: tauri::State<'_, FxserverManager>,
+) -> Result<(), String> {
+    let command = command.trim();
+    if command.is_empty() {
+        return Ok(());
+    }
+
+    let mut guard = manager
+        .process
+        .lock()
+        .map_err(|_| "FXServer process state is unavailable.".to_string())?;
+
+    let Some(process) = guard.as_mut() else {
+        return Err("FXServer is not running from this app.".to_string());
+    };
+
+    if !process_is_running(process)? {
+        *guard = None;
+        return Err("FXServer is not running from this app.".to_string());
+    }
+
+    let Some(stdin) = process.stdin.as_mut() else {
+        return Err("FXServer command input is unavailable.".to_string());
+    };
+
+    stdin
+        .write_all(format!("{command}\n").as_bytes())
+        .map_err(|error| format!("Failed to send command to FXServer: {error}"))?;
+    stdin
+        .flush()
+        .map_err(|error| format!("Failed to flush command to FXServer: {error}"))?;
+
+    append_terminal_line(&manager.terminal, "command", format!("> {command}"))?;
+
+    Ok(())
 }
 
 #[tauri::command]
@@ -243,6 +340,64 @@ fn process_is_running(process: &mut ManagedFxserverProcess) -> Result<bool, Stri
         .try_wait()
         .map_err(|error| format!("Failed to inspect FXServer: {error}"))?
         .is_none())
+}
+
+fn clear_terminal(terminal: &Arc<Mutex<TerminalState>>) -> Result<(), String> {
+    let mut terminal = terminal
+        .lock()
+        .map_err(|_| "FXServer terminal output is unavailable.".to_string())?;
+    terminal.entries.clear();
+    terminal.next_id = 0;
+    Ok(())
+}
+
+fn append_terminal_line(
+    terminal: &Arc<Mutex<TerminalState>>,
+    stream: &str,
+    line: impl Into<String>,
+) -> Result<(), String> {
+    let mut terminal = terminal
+        .lock()
+        .map_err(|_| "FXServer terminal output is unavailable.".to_string())?;
+    let entry = FxserverTerminalEntry {
+        id: terminal.next_id,
+        stream: stream.to_string(),
+        line: line.into(),
+        timestamp: system_time_to_label(SystemTime::now()),
+    };
+    terminal.next_id += 1;
+    terminal.entries.push(entry);
+
+    if terminal.entries.len() > 5000 {
+        let overflow = terminal.entries.len() - 5000;
+        terminal.entries.drain(0..overflow);
+    }
+
+    Ok(())
+}
+
+fn spawn_terminal_reader<R>(terminal: Arc<Mutex<TerminalState>>, stream: &'static str, reader: R)
+where
+    R: std::io::Read + Send + 'static,
+{
+    thread::spawn(move || {
+        let reader = BufReader::new(reader);
+        for line in reader.lines() {
+            match line {
+                Ok(line) => {
+                    let _ = append_terminal_line(&terminal, stream, line);
+                }
+                Err(error) => {
+                    let _ = append_terminal_line(
+                        &terminal,
+                        "system",
+                        format!("Stopped reading {stream}: {error}"),
+                    );
+                    break;
+                }
+            }
+        }
+    });
 }
 
 fn resolve_log_path(data_path: PathBuf, profile: &str, log_name: &str) -> PathBuf {

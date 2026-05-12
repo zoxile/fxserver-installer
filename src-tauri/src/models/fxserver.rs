@@ -47,6 +47,21 @@ pub struct FxserverResources {
     pub handle_count: u32,
 }
 
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct FxserverTerminalEntry {
+    pub id: u64,
+    pub stream: String,
+    pub line: String,
+    pub timestamp: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FxserverTerminalResult {
+    pub entries: Vec<FxserverTerminalEntry>,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TxDataLogRequest {
