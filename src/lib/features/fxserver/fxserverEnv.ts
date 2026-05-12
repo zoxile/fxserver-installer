@@ -152,3 +152,11 @@ export const txHostFields: TxHostField[] = [
 ];
 
 export const txHostGroups = ["General", "Networking", "Provider", "Defaults"] as const;
+
+export const sensitiveTxHostKeys = new Set([
+	"TXHOST_API_TOKEN",
+	"TXHOST_DEFAULT_CFXKEY",
+	"TXHOST_DEFAULT_DBPASS",
+	"TXHOST_DEFAULT_DBUSER",
+	"TXHOST_DEFAULT_ACCOUNT",
+]);

@@ -18,7 +18,7 @@
 	import { getInstalledWindowsArtifactInfo, type InstalledArtifactInfo } from "$lib/modules/artifact";
 	import { getFxserverStatus, startFxserver, stopFxserver, type FxserverStatus } from "$lib/modules/fxserver";
 	import TxHostFieldInput from "./TxHostFieldInput.svelte";
-	import { txHostFields, txHostGroups } from "./fxserverEnv";
+	import { sensitiveTxHostKeys, txHostFields, txHostGroups } from "./fxserverEnv";
 
 	const envStorageKey = "fxserver.manage.env";
 	const profileStorageKey = "fxserver.manage.serverProfile";
@@ -28,6 +28,7 @@
 	let status = $state<FxserverStatus>({ running: false });
 	let envValues = $state<Record<string, string>>(emptyEnvironment());
 	let serverProfile = $state("");
+	let storageReady = false;
 	let busy = $state(false);
 	let starting = $state(false);
 	let stopping = $state(false);
@@ -42,6 +43,7 @@
 		loadInstallPath();
 		artifactPath = getInstallPath();
 		loadSavedEnvironment();
+		storageReady = true;
 		void refreshAll();
 		refreshTimer = window.setInterval(() => {
 			if (status.running) void refreshStatus(false);
@@ -50,6 +52,13 @@
 
 	onDestroy(() => {
 		if (refreshTimer) window.clearInterval(refreshTimer);
+	});
+
+	$effect(() => {
+		JSON.stringify(envValues);
+		serverProfile;
+
+		if (storageReady) saveEnvironment();
 	});
 
 	function loadSavedEnvironment() {
@@ -70,7 +79,7 @@
 	function saveEnvironment() {
 		const trimmedEntries = Object.entries(envValues)
 			.map(([key, value]) => [key, value.trim()])
-			.filter(([, value]) => value);
+			.filter(([key, value]) => value && !sensitiveTxHostKeys.has(key));
 		localStorage.setItem(envStorageKey, JSON.stringify(Object.fromEntries(trimmedEntries)));
 		localStorage.setItem(profileStorageKey, serverProfile.trim());
 	}
@@ -270,12 +279,12 @@
 							<Card.Title>Process Status</Card.Title>
 							<Card.Description>{status.running ? `Running as PID ${status.pid}` : "Not started from this app."}</Card.Description>
 						</div>
-						<div class={`rounded-sm border px-2 py-1 text-xs font-semibold ${status.running ? "border-emerald-400/30 bg-emerald-400/10 text-emerald-200" : "border-border bg-background text-muted-foreground"}`}>
+						<div class={`rounded-sm border px-2 py-1 text-xs font-semibold ${status.running ? "border-emerald-400/30 bg-emerald-400/10 text-emerald-200" : "border-red-400/30 bg-red-400/10 text-red-200"}`}>
 							{status.running ? "RUNNING" : "STOPPED"}
 						</div>
 					</div>
 				</Card.Header>
-				<Card.Content class="flex flex-1 flex-col gap-4">
+				<Card.Content class="flex flex-1 flex-col gap-4 pt-5">
 					<div class="grid gap-3 sm:grid-cols-2">
 						<div class="rounded-sm border border-border bg-background/70 p-3">
 							<p class="text-xs text-muted-foreground">Started</p>
@@ -359,7 +368,7 @@
 					<span class="font-mono text-[10px] text-amber-200/70">+set serverProfile</span>
 				</span>
 				<span class="text-xs leading-5 text-muted-foreground">Optional compatibility argument for older txAdmin profile flows. Separate txData folders are preferred for new setups.</span>
-				<Input bind:value={serverProfile} placeholder="default" title="Optional legacy txAdmin serverProfile argument" class="rounded-sm font-mono text-xs" oninput={saveEnvironment} />
+				<Input bind:value={serverProfile} placeholder="default" title="Optional legacy txAdmin serverProfile argument" class="rounded-sm font-mono text-xs" />
 			</label>
 
 			{#each txHostGroups as group}
@@ -371,15 +380,20 @@
 					</div>
 					<div class="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
 						{#each txHostFields.filter((field) => field.group === group) as field}
-							<TxHostFieldInput field={field} bind:value={envValues[field.key]} />
+							<TxHostFieldInput field={field} sensitive={sensitiveTxHostKeys.has(field.key)} bind:value={envValues[field.key]} />
 						{/each}
 					</div>
 				</div>
 			{/each}
 
-			<div class="flex flex-wrap justify-end gap-2">
-				<Button variant="outline" onclick={saveEnvironment} title="Save TXHOST environment values locally for the next launch">Save Environment</Button>
+			<p class="rounded-sm border border-border bg-background/60 px-3 py-2 text-xs leading-5 text-muted-foreground">
+				Sensitive values are applied when starting FXServer but are not saved locally: API token, CFX key, database user, database password, and default account.
+			</p>
+
+			<div class="grid gap-2 sm:grid-cols-2">
+				<Button class="w-full rounded-sm" variant="outline" onclick={saveEnvironment} title="Save non-sensitive TXHOST values locally for the next launch">Save Environment</Button>
 				<Button
+					class="w-full rounded-sm"
 					variant="outline"
 					onclick={() => {
 						envValues = emptyEnvironment();

@@ -6,16 +6,18 @@
 	let {
 		field,
 		value = $bindable(""),
+		sensitive = false,
 	}: {
 		field: TxHostField;
 		value: string;
+		sensitive?: boolean;
 	} = $props();
 </script>
 
 <label class="grid gap-2 rounded-sm border border-border bg-background/60 p-3">
 	<span class="flex items-center justify-between gap-3">
 		<span class="text-xs font-semibold text-foreground">{field.label}</span>
-		<span class="font-mono text-[10px] text-muted-foreground">{field.key}</span>
+		<span class="font-mono text-[10px] text-muted-foreground">{sensitive ? "not saved" : field.key}</span>
 	</span>
 	<span class="text-xs leading-5 text-muted-foreground">{field.description}</span>
 
