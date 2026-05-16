@@ -5,6 +5,7 @@
 	import ArtifactInfoPage from "$lib/features/artifacts/ArtifactInfoPage.svelte";
 	import ArtifactInstallPage from "$lib/features/artifacts/ArtifactInstallPage.svelte";
 	import ClientLogsPage from "$lib/features/client-logs/ClientLogsPage.svelte";
+	import ConfigureServerPage from "$lib/features/fxserver/ConfigureServerPage.svelte";
 	import ConfiguratorPage from "$lib/features/configurator/ConfiguratorPage.svelte";
 	import FxserverLogsPage from "$lib/features/fxserver/FxserverLogsPage.svelte";
 	import HomePage from "$lib/features/home/HomePage.svelte";
@@ -29,7 +30,7 @@
 	let navigationFrame = 0;
 
 	const placeholders: Record<
-		Exclude<PageId, "home" | "mariadb" | "artifact-install" | "artifact-info" | "server-manage" | "server-logs" | "json-formatter" | "profiler" | "jooat" | "logs" | "client-logs" | "configurator">,
+		Exclude<PageId, "home" | "mariadb" | "artifact-install" | "artifact-info" | "server-manage" | "server-configure" | "server-logs" | "json-formatter" | "profiler" | "jooat" | "logs" | "client-logs" | "configurator">,
 		string
 	> = {};
 
@@ -97,6 +98,8 @@
 					<ArtifactInfoPage />
 				{:else if activePage === "server-manage"}
 					<ManageServerPage />
+				{:else if activePage === "server-configure"}
+					<ConfigureServerPage />
 				{:else if activePage === "server-logs"}
 					<FxserverLogsPage />
 				{:else if activePage === "json-formatter"}
