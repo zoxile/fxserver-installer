@@ -140,7 +140,7 @@
 					<div class="min-w-0">
 						<p class="text-sm font-medium text-foreground">Record a short profiler sample</p>
 						<p class="mt-1 text-xs text-muted-foreground">Run this in the FiveM console while the server is under normal load.</p>
-						<code class="mt-2 block max-w-full rounded-sm border border-border bg-black/50 px-3 py-2 font-mono text-xs whitespace-normal text-sky-100 shadow-inner break-words">
+						<code class="mt-2 block max-w-full rounded-sm border border-border bg-black/50 px-3 py-2 font-mono text-xs whitespace-normal text-sky-100 shadow-inner wrap-break-word">
 							<span class="text-muted-foreground">$</span> profiler record 500
 						</code>
 					</div>
@@ -150,7 +150,7 @@
 					<div class="min-w-0">
 						<p class="text-sm font-medium text-foreground">Save the finished capture</p>
 						<p class="mt-1 text-xs text-muted-foreground">After the recording finishes, export it as JSON.</p>
-						<code class="mt-2 block max-w-full rounded-sm border border-border bg-black/50 px-3 py-2 font-mono text-xs whitespace-normal text-sky-100 shadow-inner break-words">
+						<code class="mt-2 block max-w-full rounded-sm border border-border bg-black/50 px-3 py-2 font-mono text-xs whitespace-normal text-sky-100 shadow-inner wrap-break-word">
 							<span class="text-muted-foreground">$</span> profiler saveJSON profiler.json
 						</code>
 					</div>
@@ -160,7 +160,7 @@
 					<div class="min-w-0">
 						<p class="text-sm font-medium text-foreground">Upload the generated file</p>
 						<p class="mt-1 text-xs text-muted-foreground">FiveM usually writes the capture inside the citizen profiler folder.</p>
-						<code class="mt-2 block max-w-full rounded-sm border border-border bg-black/50 px-3 py-2 font-mono text-xs whitespace-normal text-emerald-100 shadow-inner break-words">
+						<code class="mt-2 block max-w-full rounded-sm border border-border bg-black/50 px-3 py-2 font-mono text-xs whitespace-normal text-emerald-100 shadow-inner wrap-break-word">
 							FiveM/FiveM.app/citizen/profiler.json
 						</code>
 					</div>

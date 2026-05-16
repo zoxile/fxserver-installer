@@ -30,7 +30,7 @@
 	{/if}
 	<div class="min-w-0">
 		<p class="font-medium">{title}</p>
-		<p class={["mt-1 break-words text-xs", type === "error" ? "text-destructive" : "text-muted-foreground"]}>
+		<p class={["mt-1 wrap-break-word text-xs", type === "error" ? "text-destructive" : "text-muted-foreground"]}>
 			{description}
 		</p>
 	</div>

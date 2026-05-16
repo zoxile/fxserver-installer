@@ -291,7 +291,7 @@
 								<time class="font-mono text-xs text-muted-foreground">{entry.time || "-"}</time>
 								<span class={`w-fit rounded-xs border px-2 py-0.5 text-xs font-medium uppercase ${levelClass(entry.level)}`}>{entry.level}</span>
 								<span class="truncate font-mono text-xs text-muted-foreground">{entry.source}</span>
-								<p class="min-w-0 break-words text-foreground">{entry.message}</p>
+								<p class="min-w-0 wrap-break-word text-foreground">{entry.message}</p>
 							</article>
 						{/each}
 					</div>

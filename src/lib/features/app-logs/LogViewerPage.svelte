@@ -168,7 +168,7 @@
 								<div class="min-w-0">
 									<p class="text-foreground">{entry.message}</p>
 									{#if entry.detail}
-										<p class="mt-1 break-words font-mono text-xs text-muted-foreground">{entry.detail}</p>
+										<p class="mt-1 wrap-break-word font-mono text-xs text-muted-foreground">{entry.detail}</p>
 									{/if}
 								</div>
 							</article>

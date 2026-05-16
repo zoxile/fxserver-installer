@@ -16,10 +16,7 @@
 
 {#if message || error}
 	<div
-		class={[
-			"flex items-start gap-3 rounded-md border bg-card px-3 py-3 text-sm shadow-sm",
-			tone === "error" ? "border-destructive/40 text-destructive" : "border-border text-foreground",
-		]}
+		class={["flex items-start gap-3 rounded-md border bg-card px-3 py-3 text-sm shadow-sm", tone === "error" ? "border-destructive/40 text-destructive" : "border-border text-foreground"]}
 		role={tone === "error" ? "alert" : "status"}
 	>
 		{#if tone === "error"}
@@ -29,7 +26,7 @@
 		{/if}
 		<div class="min-w-0 flex-1">
 			<p class="font-medium">{tone === "error" ? "MariaDB error" : "MariaDB notice"}</p>
-			<p class={["mt-1 break-words text-xs", tone === "error" ? "text-destructive" : "text-muted-foreground"]}>
+			<p class={["mt-1 wrap-break-word text-xs", tone === "error" ? "text-destructive" : "text-muted-foreground"]}>
 				{error || message}
 			</p>
 		</div>

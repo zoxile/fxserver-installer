@@ -31,18 +31,7 @@
 		onDelete: (user: MariaDBUser) => void;
 	};
 
-	let {
-		busy,
-		credentialsReady,
-		users,
-		selectedUser,
-		selectedAccess,
-		editingUser = $bindable(),
-		onRefresh,
-		onEdit,
-		onSave,
-		onDelete,
-	}: Props = $props();
+	let { busy, credentialsReady, users, selectedUser, selectedAccess, editingUser = $bindable(), onRefresh, onEdit, onSave, onDelete }: Props = $props();
 </script>
 
 <Card.Root class="h-full min-h-136 rounded-md border-border bg-card shadow-sm">
@@ -57,7 +46,13 @@
 					<Card.Description>Review, edit, inspect access, and remove accounts already present in MariaDB.</Card.Description>
 				</div>
 			</div>
-			<Button variant="outline" size="icon" onclick={onRefresh} disabled={busy || !credentialsReady} title={credentialsReady ? "Refresh existing MariaDB users" : "Apply valid admin credentials before refreshing users"}>
+			<Button
+				variant="outline"
+				size="icon"
+				onclick={onRefresh}
+				disabled={busy || !credentialsReady}
+				title={credentialsReady ? "Refresh existing MariaDB users" : "Apply valid admin credentials before refreshing users"}
+			>
 				<RefreshCwIcon class={busy ? "animate-spin" : undefined} />
 			</Button>
 		</div>
@@ -78,7 +73,12 @@
 							isSelected ? "border-primary/45 bg-accent/50" : "border-border bg-background/70",
 						]}
 					>
-						<button class="min-w-0 flex-1 text-left disabled:cursor-not-allowed disabled:opacity-60" disabled={!credentialsReady} onclick={() => onEdit(user)} title={`Click to edit ${user.username}@${user.host}`}>
+						<button
+							class="min-w-0 flex-1 text-left disabled:cursor-not-allowed disabled:opacity-60"
+							disabled={!credentialsReady}
+							onclick={() => onEdit(user)}
+							title={`Click to edit ${user.username}@${user.host}`}
+						>
 							<p class="truncate text-sm font-medium text-foreground">{user.username || "(anonymous)"}@{user.host}</p>
 							<p class="mt-1 flex items-center gap-2 truncate text-xs text-muted-foreground">
 								<ShieldIcon class="size-3.5" />
@@ -112,7 +112,7 @@
 							<p class="text-xs font-medium text-muted-foreground">Raw Grants</p>
 							<div class="max-h-40 space-y-2 overflow-auto rounded-sm border border-border bg-card p-2">
 								{#each selectedAccess.grants as grant}
-									<code class="block whitespace-pre-wrap break-words text-xs text-foreground">{grant}</code>
+									<code class="block whitespace-pre-wrap wrap-break-word text-xs text-foreground">{grant}</code>
 								{:else}
 									<p class="text-xs text-muted-foreground">No raw grants returned.</p>
 								{/each}
