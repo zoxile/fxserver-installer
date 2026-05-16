@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { log } from "$lib/core/logger";
+import { log } from "$lib/core/logger.svelte";
 
 function hasTauriRuntime() {
 	return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;

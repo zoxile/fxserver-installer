@@ -6,7 +6,7 @@
 	import * as Card from "$lib/components/ui/card/index.js";
 	import { Button } from "$lib/components/ui/button/index.js";
 	import { Input } from "$lib/components/ui/input/index.js";
-	import { clearLogs, log, logFilePath, logs, refreshLogs, type AppLogEntry, type LogLevel } from "$lib/core/logger";
+	import { clearLogs, log, logFilePath, logs, refreshLogs, type AppLogEntry, type LogLevel } from "$lib/core/logger.svelte";
 
 	let query = $state("");
 	let level = $state<LogLevel | "all">("all");
@@ -96,7 +96,9 @@
 	</div>
 
 	<Card.Root class="group relative overflow-hidden rounded-sm border-border bg-card shadow-sm transition-transform duration-300 hover:-translate-y-0.5">
-		<div class="pointer-events-none absolute inset-x-4 top-0 h-px bg-linear-to-r from-transparent via-primary/70 to-transparent opacity-0 transition-opacity duration-300 group-hover:opacity-100"></div>
+		<div
+			class="pointer-events-none absolute inset-x-4 top-0 h-px bg-linear-to-r from-transparent via-primary/70 to-transparent opacity-0 transition-opacity duration-300 group-hover:opacity-100"
+		></div>
 		<Card.Header class="border-b border-border pb-4">
 			<div class="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
 				<div class="min-w-0">
@@ -124,7 +126,13 @@
 				<Input bind:value={query} placeholder="Filter by message, scope, detail, or level..." title="Filter application log entries." class="rounded-sm" />
 				<div class="flex flex-wrap gap-2">
 					{#each levels as item}
-						<Button variant={level === item ? "default" : "outline"} size="sm" class="rounded-sm capitalize" onclick={() => (level = item)} title={`Show ${item === "all" ? "all log levels" : `${item} logs`}`}>
+						<Button
+							variant={level === item ? "default" : "outline"}
+							size="sm"
+							class="rounded-sm capitalize"
+							onclick={() => (level = item)}
+							title={`Show ${item === "all" ? "all log levels" : `${item} logs`}`}
+						>
 							{item}
 						</Button>
 					{/each}
@@ -153,9 +161,7 @@
 						{/each}
 					</div>
 				{:else}
-					<div class="flex min-h-48 items-center justify-center px-4 text-center text-sm text-muted-foreground">
-						No log entries match the current filters.
-					</div>
+					<div class="flex min-h-48 items-center justify-center px-4 text-center text-sm text-muted-foreground">No log entries match the current filters.</div>
 				{/if}
 			</div>
 		</Card.Content>

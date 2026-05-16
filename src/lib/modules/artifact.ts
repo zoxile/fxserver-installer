@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { getInstallPath } from "$lib/core/paths.svelte";
-import { log } from "$lib/core/logger";
+import { log } from "$lib/core/logger.svelte";
 
 const artifactsApiUrl = "https://artifacts.jgscripts.com/jsonv2";
 const devArtifactsApiUrl = "/api/jg-artifacts/jsonv2";
@@ -145,12 +145,14 @@ export function findArtifactIssue(version: string, issues: ArtifactIssue[]) {
 	const numericVersion = Number.parseInt(version, 10);
 	if (!Number.isFinite(numericVersion)) return null;
 
-	return issues.find((issue) => {
-		const [start, end] = issue.artifact.split("-").map((part) => Number.parseInt(part, 10));
-		if (!Number.isFinite(start)) return false;
-		if (!Number.isFinite(end)) return numericVersion === start;
-		return numericVersion >= start && numericVersion <= end;
-	}) ?? null;
+	return (
+		issues.find((issue) => {
+			const [start, end] = issue.artifact.split("-").map((part) => Number.parseInt(part, 10));
+			if (!Number.isFinite(start)) return false;
+			if (!Number.isFinite(end)) return numericVersion === start;
+			return numericVersion >= start && numericVersion <= end;
+		}) ?? null
+	);
 }
 
 function artifactNumber(version?: string | null) {

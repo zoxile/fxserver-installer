@@ -18,7 +18,7 @@
 	import ArrowUpIcon from "@lucide/svelte/icons/arrow-up";
 	import type { PageId } from "$lib/navigation";
 	import { getPageLabel } from "$lib/navigation";
-	import { initializeLogger, log } from "$lib/core/logger";
+	import { initializeLogger, log } from "$lib/core/logger.svelte";
 	import { onMount } from "svelte";
 
 	let scrollContainer: HTMLElement;
@@ -27,7 +27,10 @@
 	let activePage = $state<PageId>("home");
 	let navigationFrame = 0;
 
-	const placeholders: Record<Exclude<PageId, "home" | "mariadb" | "artifact-install" | "artifact-info" | "server-manage" | "server-logs" | "json-formatter" | "profiler" | "jooat" | "logs" | "configurator">, string> = {};
+	const placeholders: Record<
+		Exclude<PageId, "home" | "mariadb" | "artifact-install" | "artifact-info" | "server-manage" | "server-logs" | "json-formatter" | "profiler" | "jooat" | "logs" | "configurator">,
+		string
+	> = {};
 
 	onMount(() => {
 		void (async () => {

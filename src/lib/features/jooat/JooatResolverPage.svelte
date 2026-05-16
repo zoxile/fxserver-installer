@@ -16,7 +16,7 @@
 	import { Button } from "$lib/components/ui/button/index.js";
 	import * as Card from "$lib/components/ui/card/index.js";
 	import { Input } from "$lib/components/ui/input/index.js";
-	import { log } from "$lib/core/logger";
+	import { log } from "$lib/core/logger.svelte";
 	import {
 		getJooatResolverStatus,
 		installJooatResolverDatabase,
@@ -117,7 +117,10 @@
 		resolverNotice = "";
 
 		try {
-			const queries = hashesInput.split(/[\s,;]+/).map((entry) => entry.trim()).filter(Boolean);
+			const queries = hashesInput
+				.split(/[\s,;]+/)
+				.map((entry) => entry.trim())
+				.filter(Boolean);
 			log(`Resolving ${queries.length} JOOAT hashes with the offline database.`, { scope: "jooat.ui" });
 			const results = await resolveJooatHashes(queries);
 			databaseResults = results.map(toDisplayResult);
@@ -209,11 +212,18 @@
 	<div class="grid gap-4 md:grid-cols-3">
 		<JooatStatCard label="Names" value={String(hashRows.length)} description="unique inputs ready to hash" icon={HashIcon} />
 		<JooatStatCard label="Hashes" value={String(uniqueHashCount)} description="unique JOOAT outputs" icon={BinaryIcon} />
-		<JooatStatCard label="Resolved" value={`${resolvedCount} / ${resolverResults.length}`} description={resolverMode === "database" ? "database matches" : "dictionary matches"} icon={ShieldCheckIcon} />
+		<JooatStatCard
+			label="Resolved"
+			value={`${resolvedCount} / ${resolverResults.length}`}
+			description={resolverMode === "database" ? "database matches" : "dictionary matches"}
+			icon={ShieldCheckIcon}
+		/>
 	</div>
 
 	<Card.Root class="group relative overflow-hidden rounded-sm border-border bg-card shadow-sm transition-transform duration-300 hover:-translate-y-0.5">
-		<div class="pointer-events-none absolute inset-x-4 top-0 h-px bg-linear-to-r from-transparent via-primary/70 to-transparent opacity-0 transition-opacity duration-300 group-hover:opacity-100"></div>
+		<div
+			class="pointer-events-none absolute inset-x-4 top-0 h-px bg-linear-to-r from-transparent via-primary/70 to-transparent opacity-0 transition-opacity duration-300 group-hover:opacity-100"
+		></div>
 		<Card.Header class="border-b border-border pb-4">
 			<div class="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
 				<div class="flex items-start gap-3">
@@ -222,9 +232,7 @@
 					</div>
 					<div>
 						<Card.Title>Optional Resolver Database</Card.Title>
-						<Card.Description>
-							Hasher-only mode stays lightweight. Installing a resolver pack stores sharded lookup files locally and only reads the shard needed for each hash.
-						</Card.Description>
+						<Card.Description>Hasher-only mode stays lightweight. Installing a resolver pack stores sharded lookup files locally and only reads the shard needed for each hash.</Card.Description>
 					</div>
 				</div>
 				<div
@@ -280,7 +288,13 @@
 					{/if}
 					Install Pack
 				</Button>
-				<Button variant="destructive" class="rounded-sm" onclick={removeResolverDatabase} disabled={resolverBusy || !resolverStatus?.manifest} title="Remove the local resolver database and keep hasher-only mode">
+				<Button
+					variant="destructive"
+					class="rounded-sm"
+					onclick={removeResolverDatabase}
+					disabled={resolverBusy || !resolverStatus?.manifest}
+					title="Remove the local resolver database and keep hasher-only mode"
+				>
 					<Trash2Icon class="size-4" />
 					Remove
 				</Button>
@@ -290,7 +304,9 @@
 
 	<div class="grid gap-4 xl:grid-cols-[minmax(0,1.15fr)_minmax(360px,0.85fr)]">
 		<Card.Root class="group relative overflow-hidden rounded-sm border-border bg-card shadow-sm transition-transform duration-300 hover:-translate-y-0.5">
-			<div class="pointer-events-none absolute inset-x-4 top-0 h-px bg-linear-to-r from-transparent via-primary/70 to-transparent opacity-0 transition-opacity duration-300 group-hover:opacity-100"></div>
+			<div
+				class="pointer-events-none absolute inset-x-4 top-0 h-px bg-linear-to-r from-transparent via-primary/70 to-transparent opacity-0 transition-opacity duration-300 group-hover:opacity-100"
+			></div>
 			<Card.Header class="border-b border-border pb-4">
 				<div class="flex items-center gap-3">
 					<div class="flex size-9 shrink-0 items-center justify-center rounded-sm bg-muted text-muted-foreground ring-1 ring-border">
@@ -318,7 +334,9 @@
 		</Card.Root>
 
 		<Card.Root class="group relative overflow-hidden rounded-sm border-border bg-card shadow-sm transition-transform duration-300 hover:-translate-y-0.5">
-			<div class="pointer-events-none absolute inset-x-4 top-0 h-px bg-linear-to-r from-transparent via-primary/70 to-transparent opacity-0 transition-opacity duration-300 group-hover:opacity-100"></div>
+			<div
+				class="pointer-events-none absolute inset-x-4 top-0 h-px bg-linear-to-r from-transparent via-primary/70 to-transparent opacity-0 transition-opacity duration-300 group-hover:opacity-100"
+			></div>
 			<Card.Header class="border-b border-border pb-4">
 				<div class="flex items-center gap-3">
 					<div class="flex size-9 shrink-0 items-center justify-center rounded-sm bg-muted text-muted-foreground ring-1 ring-border">
@@ -410,14 +428,12 @@
 	</div>
 
 	<div class="grid gap-4 lg:grid-cols-3">
-		{#each [
-			{ title: "Lowercase Input", description: "FiveM/GTA JOOAT lookups are normally compared against lowercased strings.", icon: ListChecksIcon },
-			{ title: "32-bit Output", description: "Every result is shown as hex, unsigned decimal, and signed decimal for config compatibility.", icon: BinaryIcon },
-			{ title: "Optional Resolver Pack", description: "Users can keep a tiny hasher-only app or download the larger offline resolver database from GitHub later.", icon: DatabaseZapIcon },
-		] as item}
+		{#each [{ title: "Lowercase Input", description: "FiveM/GTA JOOAT lookups are normally compared against lowercased strings.", icon: ListChecksIcon }, { title: "32-bit Output", description: "Every result is shown as hex, unsigned decimal, and signed decimal for config compatibility.", icon: BinaryIcon }, { title: "Optional Resolver Pack", description: "Users can keep a tiny hasher-only app or download the larger offline resolver database from GitHub later.", icon: DatabaseZapIcon }] as item}
 			{@const Icon = item.icon}
 			<Card.Root class="group relative overflow-hidden rounded-sm border-border bg-card shadow-sm transition-transform duration-300 hover:-translate-y-0.5">
-				<div class="pointer-events-none absolute inset-x-4 top-0 h-px bg-linear-to-r from-transparent via-primary/70 to-transparent opacity-0 transition-opacity duration-300 group-hover:opacity-100"></div>
+				<div
+					class="pointer-events-none absolute inset-x-4 top-0 h-px bg-linear-to-r from-transparent via-primary/70 to-transparent opacity-0 transition-opacity duration-300 group-hover:opacity-100"
+				></div>
 				<Card.Content class="flex gap-3 p-4">
 					<div class="flex size-9 shrink-0 items-center justify-center rounded-sm bg-muted text-muted-foreground ring-1 ring-border">
 						<Icon class="size-4" />

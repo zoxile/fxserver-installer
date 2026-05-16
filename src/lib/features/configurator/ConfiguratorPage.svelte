@@ -17,7 +17,7 @@
 	import * as Select from "$lib/components/ui/select/index.js";
 	import { Button } from "$lib/components/ui/button/index.js";
 	import { Input } from "$lib/components/ui/input/index.js";
-	import { log } from "$lib/core/logger";
+	import { log } from "$lib/core/logger.svelte";
 	import {
 		addConfigEntry,
 		configPathKey,
@@ -314,24 +314,28 @@
 	}
 
 	function typeClass(type: string) {
-		return {
-			string: "border-sky-400/30 bg-sky-400/10 text-sky-200",
-			number: "border-emerald-400/30 bg-emerald-400/10 text-emerald-200",
-			boolean: "border-violet-400/30 bg-violet-400/10 text-violet-200",
-			vector2: "border-amber-400/30 bg-amber-400/10 text-amber-200",
-			vector3: "border-amber-400/30 bg-amber-400/10 text-amber-200",
-			vector4: "border-amber-400/30 bg-amber-400/10 text-amber-200",
-			table: "border-muted bg-muted/50 text-muted-foreground",
-			array: "border-cyan-400/30 bg-cyan-400/10 text-cyan-200",
-			nil: "border-muted bg-muted/50 text-muted-foreground",
-			raw: "border-red-400/30 bg-red-400/10 text-red-200",
-		}[type] ?? "border-border bg-muted text-muted-foreground";
+		return (
+			{
+				string: "border-sky-400/30 bg-sky-400/10 text-sky-200",
+				number: "border-emerald-400/30 bg-emerald-400/10 text-emerald-200",
+				boolean: "border-violet-400/30 bg-violet-400/10 text-violet-200",
+				vector2: "border-amber-400/30 bg-amber-400/10 text-amber-200",
+				vector3: "border-amber-400/30 bg-amber-400/10 text-amber-200",
+				vector4: "border-amber-400/30 bg-amber-400/10 text-amber-200",
+				table: "border-muted bg-muted/50 text-muted-foreground",
+				array: "border-cyan-400/30 bg-cyan-400/10 text-cyan-200",
+				nil: "border-muted bg-muted/50 text-muted-foreground",
+				raw: "border-red-400/30 bg-red-400/10 text-red-200",
+			}[type] ?? "border-border bg-muted text-muted-foreground"
+		);
 	}
 
 	function booleanButtonClass(active: boolean, tone: "true" | "false") {
 		const activeBase = "h-8 rounded-xs px-3 text-xs font-medium uppercase shadow-none focus-visible:ring-0";
-		if (active && tone === "true") return `${activeBase} border-emerald-400/30 bg-emerald-400/10 text-emerald-200 hover:bg-emerald-400/10 hover:text-emerald-200 focus-visible:border-emerald-400/30 dark:border-emerald-400/30 dark:bg-emerald-400/10 dark:text-emerald-200 dark:hover:bg-emerald-400/10 dark:hover:text-emerald-200`;
-		if (active && tone === "false") return `${activeBase} border-red-400/30 bg-red-400/10 text-red-200 hover:bg-red-400/10 hover:text-red-200 focus-visible:border-red-400/30 dark:border-red-400/30 dark:bg-red-400/10 dark:text-red-200 dark:hover:bg-red-400/10 dark:hover:text-red-200`;
+		if (active && tone === "true")
+			return `${activeBase} border-emerald-400/30 bg-emerald-400/10 text-emerald-200 hover:bg-emerald-400/10 hover:text-emerald-200 focus-visible:border-emerald-400/30 dark:border-emerald-400/30 dark:bg-emerald-400/10 dark:text-emerald-200 dark:hover:bg-emerald-400/10 dark:hover:text-emerald-200`;
+		if (active && tone === "false")
+			return `${activeBase} border-red-400/30 bg-red-400/10 text-red-200 hover:bg-red-400/10 hover:text-red-200 focus-visible:border-red-400/30 dark:border-red-400/30 dark:bg-red-400/10 dark:text-red-200 dark:hover:bg-red-400/10 dark:hover:text-red-200`;
 		return "h-8 rounded-xs border-border bg-background/70 px-3 text-xs font-medium uppercase text-muted-foreground shadow-none hover:border-muted-foreground/40 hover:bg-muted/40 hover:text-foreground";
 	}
 
@@ -352,7 +356,8 @@
 
 	function highlightLuaCode(code: string) {
 		const tokens: Array<{ text: string; type: LuaTokenType }> = [];
-		const pattern = /(--\[\[[\s\S]*?\]\]|--[^\n]*|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|-?\b\d+\.?\d*(?:e[+-]?\d+)?\b|\b(?:true|false|nil|Config|return|local|function|end|if|then|else|elseif|for|while|do|in)\b|\bvector[234]\b|[{}\[\]().,;=])/gi;
+		const pattern =
+			/(--\[\[[\s\S]*?\]\]|--[^\n]*|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|-?\b\d+\.?\d*(?:e[+-]?\d+)?\b|\b(?:true|false|nil|Config|return|local|function|end|if|then|else|elseif|for|while|do|in)\b|\bvector[234]\b|[{}\[\]().,;=])/gi;
 		let cursor = 0;
 		let match: RegExpExecArray | null;
 
@@ -394,9 +399,7 @@
 		<div>
 			<p class="text-xs font-semibold tracking-wide text-muted-foreground uppercase">Tools</p>
 			<h1 class="mt-2 text-3xl font-semibold tracking-normal text-foreground">Configurator</h1>
-			<p class="mt-2 max-w-2xl text-sm text-muted-foreground">
-				Drop in a FiveM Lua configuration file, edit supported values through typed controls, and export clean Lua back out.
-			</p>
+			<p class="mt-2 max-w-2xl text-sm text-muted-foreground">Drop in a FiveM Lua configuration file, edit supported values through typed controls, and export clean Lua back out.</p>
 		</div>
 		<div class="inline-flex items-center gap-2 rounded-sm border border-border bg-card px-3 py-2 text-xs text-muted-foreground">
 			<SlidersHorizontalIcon class="size-3.5" />
@@ -417,7 +420,9 @@
 
 	<div class="grid items-stretch gap-4 xl:grid-cols-12">
 		<Card.Root class="group relative flex max-h-184 flex-col overflow-hidden rounded-sm border-border bg-card shadow-sm transition-transform duration-300 hover:-translate-y-0.5 xl:col-span-9">
-			<div class="pointer-events-none absolute inset-x-4 top-0 h-px bg-linear-to-r from-transparent via-primary/70 to-transparent opacity-0 transition-opacity duration-300 group-hover:opacity-100"></div>
+			<div
+				class="pointer-events-none absolute inset-x-4 top-0 h-px bg-linear-to-r from-transparent via-primary/70 to-transparent opacity-0 transition-opacity duration-300 group-hover:opacity-100"
+			></div>
 			<Card.Header class="border-b border-border pb-4">
 				<div class="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
 					<div class="flex items-start gap-3">
@@ -448,10 +453,7 @@
 			</Card.Header>
 			<Card.Content class="min-h-0 space-y-4 overflow-auto">
 				<label
-					class={[
-						"relative block overflow-hidden rounded-sm border bg-background/60 transition-colors",
-						dragging ? "border-primary/60 bg-primary/10" : "border-border",
-					]}
+					class={["relative block overflow-hidden rounded-sm border bg-background/60 transition-colors", dragging ? "border-primary/60 bg-primary/10" : "border-border"]}
 					ondragover={(event) => {
 						event.preventDefault();
 						dragging = true;
@@ -462,8 +464,9 @@
 					<pre
 						bind:this={sourceHighlight}
 						aria-hidden="true"
-						class="pointer-events-none absolute inset-0 h-128 overflow-hidden px-3 py-3 font-mono text-xs leading-5 whitespace-pre text-[#D4D4D4]"
-					>{#each highlightedSource as token}<span class={tokenClass(token.type)}>{token.text}</span>{/each}</pre>
+						class="pointer-events-none absolute inset-0 h-128 overflow-hidden px-3 py-3 font-mono text-xs leading-5 whitespace-pre text-[#D4D4D4]">{#each highlightedSource as token}<span
+								class={tokenClass(token.type)}>{token.text}</span
+							>{/each}</pre>
 					<textarea
 						bind:value={source}
 						wrap="off"
@@ -479,13 +482,11 @@
 
 		<div class="h-full xl:col-span-3">
 			<div class="grid h-full gap-3 sm:grid-cols-3 xl:grid-cols-1 xl:grid-rows-3">
-				{#each [
-					{ label: "Parsed Settings", value: String(settings.length), description: "typed fields" },
-					{ label: "Changed", value: String(changedCount), description: "since last parse" },
-					{ label: "Warnings", value: String(warnings.length), description: "needs review" },
-				] as stat}
+				{#each [{ label: "Parsed Settings", value: String(settings.length), description: "typed fields" }, { label: "Changed", value: String(changedCount), description: "since last parse" }, { label: "Warnings", value: String(warnings.length), description: "needs review" }] as stat}
 					<Card.Root class="group relative h-full overflow-hidden rounded-sm border-border bg-card shadow-sm transition-transform duration-300 hover:-translate-y-0.5">
-						<div class="pointer-events-none absolute inset-x-4 top-0 h-px bg-linear-to-r from-transparent via-primary/70 to-transparent opacity-0 transition-opacity duration-300 group-hover:opacity-100"></div>
+						<div
+							class="pointer-events-none absolute inset-x-4 top-0 h-px bg-linear-to-r from-transparent via-primary/70 to-transparent opacity-0 transition-opacity duration-300 group-hover:opacity-100"
+						></div>
 						<Card.Content class="p-3">
 							<p class="text-xs text-muted-foreground">{stat.label}</p>
 							<p class="mt-1 text-xl font-semibold text-foreground">{stat.value}</p>
@@ -536,7 +537,9 @@
 	{#if config}
 		<div class="grid gap-4 xl:grid-cols-12">
 			<Card.Root class="group relative flex max-h-200 flex-col overflow-hidden rounded-sm border-border bg-card shadow-sm transition-transform duration-300 hover:-translate-y-0.5 xl:col-span-5">
-				<div class="pointer-events-none absolute inset-x-4 top-0 h-px bg-linear-to-r from-transparent via-primary/70 to-transparent opacity-0 transition-opacity duration-300 group-hover:opacity-100"></div>
+				<div
+					class="pointer-events-none absolute inset-x-4 top-0 h-px bg-linear-to-r from-transparent via-primary/70 to-transparent opacity-0 transition-opacity duration-300 group-hover:opacity-100"
+				></div>
 				<Card.Header class="border-b border-border pb-4">
 					<div class="flex items-center gap-3">
 						<div class="flex size-9 shrink-0 items-center justify-center rounded-sm bg-muted text-muted-foreground ring-1 ring-border">
@@ -565,10 +568,7 @@
 						<div class="max-h-48 space-y-1 overflow-auto rounded-sm border border-border bg-background/60 p-1">
 							{#each groups as group (group.id)}
 								<button
-									class={[
-										"grid w-full gap-1 rounded-xs px-2 py-2 text-left transition-colors hover:bg-muted/50",
-										selectedGroupId === group.id ? "bg-muted text-foreground" : "text-muted-foreground",
-									]}
+									class={["grid w-full gap-1 rounded-xs px-2 py-2 text-left transition-colors hover:bg-muted/50", selectedGroupId === group.id ? "bg-muted text-foreground" : "text-muted-foreground"]}
 									onclick={() => selectGroup(group.id)}
 									title={`Show fields in ${group.label}`}
 								>
@@ -652,7 +652,9 @@
 			</Card.Root>
 
 			<Card.Root class="group relative flex max-h-200 flex-col overflow-hidden rounded-sm border-border bg-card shadow-sm transition-transform duration-300 hover:-translate-y-0.5 xl:col-span-7">
-				<div class="pointer-events-none absolute inset-x-4 top-0 h-px bg-linear-to-r from-transparent via-primary/70 to-transparent opacity-0 transition-opacity duration-300 group-hover:opacity-100"></div>
+				<div
+					class="pointer-events-none absolute inset-x-4 top-0 h-px bg-linear-to-r from-transparent via-primary/70 to-transparent opacity-0 transition-opacity duration-300 group-hover:opacity-100"
+				></div>
 				<Card.Header class="border-b border-border pb-4">
 					<div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
 						<div>
@@ -737,7 +739,14 @@
 										{#each selected.value.values as component, index}
 											<label class="grid gap-2">
 												<span class="text-xs font-medium text-muted-foreground">{["X", "Y", "Z", "W"][index]}</span>
-												<Input type="number" value={component} placeholder="0.0" title="Vector component must be numeric." oninput={(event) => updateVector(index, event)} class="rounded-sm font-mono" />
+												<Input
+													type="number"
+													value={component}
+													placeholder="0.0"
+													title="Vector component must be numeric."
+													oninput={(event) => updateVector(index, event)}
+													class="rounded-sm font-mono"
+												/>
 											</label>
 										{/each}
 									</div>
@@ -747,7 +756,9 @@
 							{:else if selected.value.type === "raw"}
 								<pre class="max-h-72 overflow-auto rounded-sm border border-red-400/20 bg-red-400/10 p-3 font-mono text-xs text-red-100">{selected.value.value}</pre>
 							{:else}
-								<p class="rounded-sm border border-border bg-background/70 px-3 py-2 text-sm text-muted-foreground">Empty {selected.value.type === "array" ? "array" : "object"} values are preserved in the generated output. Add entries through the selected object panel.</p>
+								<p class="rounded-sm border border-border bg-background/70 px-3 py-2 text-sm text-muted-foreground">
+									Empty {selected.value.type === "array" ? "array" : "object"} values are preserved in the generated output. Add entries through the selected object panel.
+								</p>
 							{/if}
 						</div>
 
@@ -767,7 +778,9 @@
 								<span class="text-xs font-medium text-muted-foreground">Lua Preview</span>
 								<span class="truncate font-mono text-[11px] text-muted-foreground">{selected.label}</span>
 							</div>
-							<pre class="max-h-28 overflow-auto rounded-xs border border-border bg-card/80 p-3 font-mono text-xs leading-5 whitespace-pre text-[#D4D4D4]">{#each selectedPreviewTokens as token}<span class={tokenClass(token.type)}>{token.text}</span>{/each}</pre>
+							<pre class="max-h-28 overflow-auto rounded-xs border border-border bg-card/80 p-3 font-mono text-xs leading-5 whitespace-pre text-[#D4D4D4]">{#each selectedPreviewTokens as token}<span
+										class={tokenClass(token.type)}>{token.text}</span
+									>{/each}</pre>
 						</div>
 					{:else}
 						<div class="grid min-h-80 place-items-center rounded-sm border border-dashed border-border bg-background/60 p-8 text-center">
@@ -782,7 +795,9 @@
 		</div>
 
 		<Card.Root class="group relative flex max-h-176 flex-col overflow-hidden rounded-sm border-border bg-card shadow-sm transition-transform duration-300 hover:-translate-y-0.5">
-			<div class="pointer-events-none absolute inset-x-4 top-0 h-px bg-linear-to-r from-transparent via-primary/70 to-transparent opacity-0 transition-opacity duration-300 group-hover:opacity-100"></div>
+			<div
+				class="pointer-events-none absolute inset-x-4 top-0 h-px bg-linear-to-r from-transparent via-primary/70 to-transparent opacity-0 transition-opacity duration-300 group-hover:opacity-100"
+			></div>
 			<Card.Header class="border-b border-border pb-4">
 				<div class="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
 					<div>
@@ -806,7 +821,9 @@
 				</div>
 			</Card.Header>
 			<Card.Content class="min-h-0 overflow-auto">
-				<pre class="max-h-136 overflow-auto rounded-sm border border-border bg-background/70 p-4 font-mono text-xs leading-5 whitespace-pre text-[#D4D4D4]">{#each highlightedOutput as token}<span class={tokenClass(token.type)}>{token.text}</span>{/each}</pre>
+				<pre class="max-h-136 overflow-auto rounded-sm border border-border bg-background/70 p-4 font-mono text-xs leading-5 whitespace-pre text-[#D4D4D4]">{#each highlightedOutput as token}<span
+							class={tokenClass(token.type)}>{token.text}</span
+						>{/each}</pre>
 			</Card.Content>
 		</Card.Root>
 	{/if}

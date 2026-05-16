@@ -7,7 +7,7 @@
 	import TerminalIcon from "@lucide/svelte/icons/terminal";
 	import UploadCloudIcon from "@lucide/svelte/icons/upload-cloud";
 	import * as Card from "$lib/components/ui/card/index.js";
-	import { log } from "$lib/core/logger";
+	import { log } from "$lib/core/logger.svelte";
 	import { Progress } from "$lib/components/ui/progress/index.js";
 	import { analyzeProfilerJson, type FrameProfile, type ProfilerAnalysis, type ResourceState } from "./profilerAnalyzer";
 
@@ -212,14 +212,7 @@
 
 	{#if analysis}
 		<div class="grid gap-4 md:grid-cols-2 xl:grid-cols-6">
-			{#each [
-				{ label: "Recording", value: formatMs(analysis.stats.recordingMs), description: "Capture length" },
-				{ label: "Avg script / frame", value: formatMs(analysis.stats.averageScriptMsPerFrame), description: "Measured script time" },
-				{ label: "Hitches", value: `${formatNumber(analysis.stats.hitchCount)} / ${formatNumber(analysis.stats.frameCount)}`, description: "frames >25ms" },
-				{ label: "Heavy ticks", value: `${formatNumber(analysis.stats.heavyTickCount)} / ${formatNumber(analysis.stats.frameCount)}`, description: "ticks >25ms scripts" },
-				{ label: "Profiler entries", value: formatNumber(analysis.stats.entryCount), description: "Trace rows" },
-				{ label: "Resource manager", value: `${formatMs(analysis.stats.resourceManagerTotalMs)} / ${formatNumber(analysis.stats.resourceManagerCalls)}`, description: "total / frames" },
-			] as stat}
+			{#each [{ label: "Recording", value: formatMs(analysis.stats.recordingMs), description: "Capture length" }, { label: "Avg script / frame", value: formatMs(analysis.stats.averageScriptMsPerFrame), description: "Measured script time" }, { label: "Hitches", value: `${formatNumber(analysis.stats.hitchCount)} / ${formatNumber(analysis.stats.frameCount)}`, description: "frames >25ms" }, { label: "Heavy ticks", value: `${formatNumber(analysis.stats.heavyTickCount)} / ${formatNumber(analysis.stats.frameCount)}`, description: "ticks >25ms scripts" }, { label: "Profiler entries", value: formatNumber(analysis.stats.entryCount), description: "Trace rows" }, { label: "Resource manager", value: `${formatMs(analysis.stats.resourceManagerTotalMs)} / ${formatNumber(analysis.stats.resourceManagerCalls)}`, description: "total / frames" }] as stat}
 				<Card.Root class="group relative overflow-hidden rounded-sm border-border bg-card shadow-sm transition-transform duration-300 hover:-translate-y-0.5">
 					<div
 						class="pointer-events-none absolute inset-x-4 top-0 h-px bg-linear-to-r from-transparent via-primary/70 to-transparent opacity-0 transition-opacity duration-300 group-hover:opacity-100"
@@ -311,10 +304,7 @@
 				{#if analysis.frameTimeline.length}
 					<div class="space-y-4 rounded-sm border border-border bg-background/70 p-4">
 						<div class="relative h-52 overflow-hidden rounded-sm bg-background/70">
-							<div
-								class="absolute inset-x-0 border-t border-dashed border-muted-foreground/35"
-								style={`bottom: ${barWidth(25, Math.max(25, analysis.stats.worstFrameMs))}%`}
-							>
+							<div class="absolute inset-x-0 border-t border-dashed border-muted-foreground/35" style={`bottom: ${barWidth(25, Math.max(25, analysis.stats.worstFrameMs))}%`}>
 								<span class="absolute -top-5 left-1 text-xs text-muted-foreground">25ms script budget</span>
 							</div>
 							<div class="absolute inset-x-0 bottom-0 h-px bg-emerald-500/70"></div>
@@ -344,7 +334,8 @@
 									<span>
 										Top:
 										{#each activeFrame.topEntries as entry, index}
-											{#if index > 0}, {/if}{entry.name} [{formatMs(entry.totalMs)}]
+											{#if index > 0},
+											{/if}{entry.name} [{formatMs(entry.totalMs)}]
 										{/each}
 									</span>
 								</div>

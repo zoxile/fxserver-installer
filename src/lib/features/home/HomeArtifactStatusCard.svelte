@@ -8,15 +8,8 @@
 	import * as Card from "$lib/components/ui/card/index.js";
 	import { Button } from "$lib/components/ui/button/index.js";
 	import { getInstallPath, loadInstallPath } from "$lib/core/paths.svelte";
-	import { log } from "$lib/core/logger";
-	import {
-		fetchArtifactMetadata,
-		getArtifactHealthStatus,
-		getInstalledWindowsArtifactInfo,
-		type ArtifactHealthStatus,
-		type ArtifactMetadata,
-		type InstalledArtifactInfo,
-	} from "$lib/modules/artifact";
+	import { log } from "$lib/core/logger.svelte";
+	import { fetchArtifactMetadata, getArtifactHealthStatus, getInstalledWindowsArtifactInfo, type ArtifactHealthStatus, type ArtifactMetadata, type InstalledArtifactInfo } from "$lib/modules/artifact";
 	import { artifactUrgencyClass, artifactUrgencyTextClass } from "$lib/features/artifacts/artifactUi";
 	import type { PageId } from "$lib/navigation";
 
@@ -47,10 +40,7 @@
 		try {
 			const path = selectedInstallPath || getInstallPath();
 			selectedInstallPath = path;
-			const [nextMetadata, nextInstalled] = await Promise.all([
-				fetchArtifactMetadata(),
-				path ? getInstalledWindowsArtifactInfo(path) : Promise.resolve(null),
-			]);
+			const [nextMetadata, nextInstalled] = await Promise.all([fetchArtifactMetadata(), path ? getInstalledWindowsArtifactInfo(path) : Promise.resolve(null)]);
 			metadata = nextMetadata;
 			installed = nextInstalled;
 		} catch (caught) {
@@ -113,9 +103,7 @@
 			<Button variant="outline" size="sm" class="rounded-sm" onclick={() => onNavigate("artifact-install")} title="Open the artifact installer">
 				{health.urgency === "needed" || health.urgency === "recommended" ? "Update Artifact" : "Open Installer"}
 			</Button>
-			<Button variant="outline" size="sm" class="rounded-sm" onclick={() => onNavigate("artifact-info")} title="Open artifact information">
-				View Details
-			</Button>
+			<Button variant="outline" size="sm" class="rounded-sm" onclick={() => onNavigate("artifact-info")} title="Open artifact information">View Details</Button>
 		</div>
 	</Card.Content>
 </Card.Root>

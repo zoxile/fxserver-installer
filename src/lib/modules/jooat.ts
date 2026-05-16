@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { log } from "$lib/core/logger";
+import { log } from "$lib/core/logger.svelte";
 
 export interface JooatShardManifest {
 	prefix: string;

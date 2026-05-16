@@ -8,7 +8,7 @@
 	import UploadIcon from "@lucide/svelte/icons/upload";
 	import * as Card from "$lib/components/ui/card/index.js";
 	import { Button } from "$lib/components/ui/button/index.js";
-	import { log } from "$lib/core/logger";
+	import { log } from "$lib/core/logger.svelte";
 	import JsonNotice from "./JsonNotice.svelte";
 	import { formatJson, getJsonErrorMessage, minifyJson, repairJson, tryParseJson } from "./jsonRepair";
 

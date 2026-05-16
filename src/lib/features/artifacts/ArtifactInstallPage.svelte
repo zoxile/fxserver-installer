@@ -13,7 +13,7 @@
 	import { Input } from "$lib/components/ui/input/index.js";
 	import { chooseInstallFolder } from "$lib/core/selectFolder";
 	import { getInstallPath, loadInstallPath, setInstallPath } from "$lib/core/paths.svelte";
-	import { log } from "$lib/core/logger";
+	import { log } from "$lib/core/logger.svelte";
 	import {
 		artifactIsFlagged,
 		fetchArtifactMetadata,
@@ -51,10 +51,7 @@
 		message = "";
 
 		try {
-			const [nextMetadata, nextInstalled] = await Promise.all([
-				fetchArtifactMetadata(),
-				installPath ? getInstalledWindowsArtifactInfo(installPath) : Promise.resolve(null),
-			]);
+			const [nextMetadata, nextInstalled] = await Promise.all([fetchArtifactMetadata(), installPath ? getInstalledWindowsArtifactInfo(installPath) : Promise.resolve(null)]);
 			metadata = nextMetadata;
 			installed = nextInstalled;
 			message = `Artifact ${metadata.recommendedArtifact} is ready to install for Windows.`;
@@ -120,7 +117,7 @@
 	const checklist = [
 		"Stop FXServer or txAdmin before replacing artifact files.",
 		"Keep a backup of your current server folder before extracting.",
-		"Install only the Windows artifact while this app is Windows-only.",
+		"Do not close the application while it's installing.",
 		"Start the server after install and check console output for resource errors.",
 	];
 </script>
@@ -156,7 +153,9 @@
 
 	<div class="grid gap-4 xl:grid-cols-12">
 		<Card.Root class="group relative overflow-hidden rounded-sm border-border bg-card shadow-sm transition-transform duration-300 hover:-translate-y-0.5 xl:col-span-7">
-			<div class="pointer-events-none absolute inset-x-4 top-0 h-px bg-linear-to-r from-transparent via-primary/70 to-transparent opacity-0 transition-opacity duration-300 group-hover:opacity-100"></div>
+			<div
+				class="pointer-events-none absolute inset-x-4 top-0 h-px bg-linear-to-r from-transparent via-primary/70 to-transparent opacity-0 transition-opacity duration-300 group-hover:opacity-100"
+			></div>
 			<Card.Header class="border-b border-border pb-4">
 				<div class="flex items-center gap-3">
 					<div class="flex size-9 shrink-0 items-center justify-center rounded-sm border border-sky-400/30 bg-sky-400/10 text-sky-200">
@@ -222,7 +221,9 @@
 
 		<div class="grid gap-4 xl:col-span-5">
 			<Card.Root class="group relative overflow-hidden rounded-sm border-border bg-card shadow-sm transition-transform duration-300 hover:-translate-y-0.5">
-				<div class="pointer-events-none absolute inset-x-4 top-0 h-px bg-linear-to-r from-transparent via-primary/70 to-transparent opacity-0 transition-opacity duration-300 group-hover:opacity-100"></div>
+				<div
+					class="pointer-events-none absolute inset-x-4 top-0 h-px bg-linear-to-r from-transparent via-primary/70 to-transparent opacity-0 transition-opacity duration-300 group-hover:opacity-100"
+				></div>
 				<Card.Header class="border-b border-border pb-4">
 					<Card.Title>Before Installing</Card.Title>
 					<Card.Description>Quick checks to avoid a bad update.</Card.Description>
@@ -238,7 +239,9 @@
 			</Card.Root>
 
 			<Card.Root class="group relative overflow-hidden rounded-sm border-border bg-card shadow-sm transition-transform duration-300 hover:-translate-y-0.5">
-				<div class="pointer-events-none absolute inset-x-4 top-0 h-px bg-linear-to-r from-transparent via-primary/70 to-transparent opacity-0 transition-opacity duration-300 group-hover:opacity-100"></div>
+				<div
+					class="pointer-events-none absolute inset-x-4 top-0 h-px bg-linear-to-r from-transparent via-primary/70 to-transparent opacity-0 transition-opacity duration-300 group-hover:opacity-100"
+				></div>
 				<Card.Header class="border-b border-border pb-4">
 					<Card.Title>Install Result</Card.Title>
 					<Card.Description>Written after a successful local extraction.</Card.Description>
@@ -251,9 +254,7 @@
 							<p class="break-all font-mono text-xs text-muted-foreground">Marker: {result.markerPath}</p>
 						</div>
 					{:else}
-						<div class="flex min-h-40 items-center justify-center px-4 text-center text-sm text-muted-foreground">
-							No artifact has been installed from this page yet.
-						</div>
+						<div class="flex min-h-40 items-center justify-center px-4 text-center text-sm text-muted-foreground">No artifact has been installed from this page yet.</div>
 					{/if}
 				</Card.Content>
 			</Card.Root>

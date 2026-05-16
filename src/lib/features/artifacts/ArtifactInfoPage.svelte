@@ -10,7 +10,7 @@
 	import { onMount } from "svelte";
 	import * as Card from "$lib/components/ui/card/index.js";
 	import { Button } from "$lib/components/ui/button/index.js";
-	import { log } from "$lib/core/logger";
+	import { log } from "$lib/core/logger.svelte";
 	import { openExternalUrl } from "$lib/core/openExternal";
 	import { getInstallPath, loadInstallPath } from "$lib/core/paths.svelte";
 	import {
@@ -49,10 +49,7 @@
 		try {
 			const path = selectedInstallPath || getInstallPath();
 			selectedInstallPath = path;
-			const [nextMetadata, nextInstalled] = await Promise.all([
-				fetchArtifactMetadata(),
-				path ? getInstalledWindowsArtifactInfo(path) : Promise.resolve(null),
-			]);
+			const [nextMetadata, nextInstalled] = await Promise.all([fetchArtifactMetadata(), path ? getInstalledWindowsArtifactInfo(path) : Promise.resolve(null)]);
 			metadata = nextMetadata;
 			installed = nextInstalled;
 		} catch (caught) {
@@ -78,7 +75,9 @@
 		<div>
 			<p class="text-xs font-semibold tracking-wide text-muted-foreground uppercase">Artifacts</p>
 			<h1 class="mt-2 text-3xl font-semibold tracking-normal text-foreground">Artifact Information</h1>
-			<p class="mt-2 max-w-2xl text-sm leading-6 text-muted-foreground">Inspect the Windows FXServer artifact JG Scripts currently considers healthy, plus known versions and ranges with reported issues.</p>
+			<p class="mt-2 max-w-2xl text-sm leading-6 text-muted-foreground">
+				Inspect the Windows FXServer artifact JG Scripts currently considers healthy, plus known versions and ranges with reported issues.
+			</p>
 		</div>
 		<div class="flex flex-wrap gap-2">
 			<Button variant="outline" onclick={refresh} disabled={busy} title="Refresh artifact metadata from JG Scripts">
@@ -103,14 +102,34 @@
 
 	{#if metadata}
 		<div class="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-			<ArtifactStatCard label="Installed Build" value={health.currentVersion ?? (installed?.installed ? "Unknown" : "None")} description={health.description} icon={ArchiveIcon} tone={health.urgency === "needed" ? "error" : health.urgency === "recommended" ? "warn" : health.urgency === "none" ? "success" : "info"} />
-			<ArtifactStatCard label="Healthy Windows Build" value={metadata.recommendedArtifact} description={recommendedIsFlagged ? "This build appears in the reported issue list." : "Latest artifact with no reported issues according to JG Scripts."} icon={ShieldCheckIcon} tone={recommendedIsFlagged ? "warn" : "success"} />
+			<ArtifactStatCard
+				label="Installed Build"
+				value={health.currentVersion ?? (installed?.installed ? "Unknown" : "None")}
+				description={health.description}
+				icon={ArchiveIcon}
+				tone={health.urgency === "needed" ? "error" : health.urgency === "recommended" ? "warn" : health.urgency === "none" ? "success" : "info"}
+			/>
+			<ArtifactStatCard
+				label="Healthy Windows Build"
+				value={metadata.recommendedArtifact}
+				description={recommendedIsFlagged ? "This build appears in the reported issue list." : "Latest artifact with no reported issues according to JG Scripts."}
+				icon={ShieldCheckIcon}
+				tone={recommendedIsFlagged ? "warn" : "success"}
+			/>
 			<ArtifactStatCard label="Platform" value="Windows" description="Linux artifacts are intentionally hidden until the app supports Linux installs." icon={MonitorDownIcon} tone="info" />
-			<ArtifactStatCard label="Reported Issues" value={String(metadata.brokenArtifacts.length)} description="Known broken builds and ranges loaded from the JG Scripts database." icon={ArchiveIcon} tone={metadata.brokenArtifacts.length ? "warn" : "success"} />
+			<ArtifactStatCard
+				label="Reported Issues"
+				value={String(metadata.brokenArtifacts.length)}
+				description="Known broken builds and ranges loaded from the JG Scripts database."
+				icon={ArchiveIcon}
+				tone={metadata.brokenArtifacts.length ? "warn" : "success"}
+			/>
 		</div>
 
 		<Card.Root class="group relative overflow-hidden rounded-sm border-border bg-card shadow-sm transition-transform duration-300 hover:-translate-y-0.5">
-			<div class="pointer-events-none absolute inset-x-4 top-0 h-px bg-linear-to-r from-transparent via-primary/70 to-transparent opacity-0 transition-opacity duration-300 group-hover:opacity-100"></div>
+			<div
+				class="pointer-events-none absolute inset-x-4 top-0 h-px bg-linear-to-r from-transparent via-primary/70 to-transparent opacity-0 transition-opacity duration-300 group-hover:opacity-100"
+			></div>
 			<Card.Header class="border-b border-border pb-4">
 				<Card.Title>Installed Artifact Status</Card.Title>
 				<Card.Description>Compared against the current healthy Windows recommendation from JG Scripts.</Card.Description>
@@ -145,7 +164,9 @@
 		</Card.Root>
 
 		<Card.Root class="group relative overflow-hidden rounded-sm border-border bg-card shadow-sm transition-transform duration-300 hover:-translate-y-0.5">
-			<div class="pointer-events-none absolute inset-x-4 top-0 h-px bg-linear-to-r from-transparent via-primary/70 to-transparent opacity-0 transition-opacity duration-300 group-hover:opacity-100"></div>
+			<div
+				class="pointer-events-none absolute inset-x-4 top-0 h-px bg-linear-to-r from-transparent via-primary/70 to-transparent opacity-0 transition-opacity duration-300 group-hover:opacity-100"
+			></div>
 			<Card.Header class="border-b border-border pb-4">
 				<Card.Title>Windows Download</Card.Title>
 				<Card.Description>The install page uses this Windows artifact link. Linux output from the API is ignored for now.</Card.Description>
