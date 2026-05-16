@@ -43,7 +43,7 @@
 		<div class="max-h-144 overflow-auto rounded-sm border border-border bg-background/60">
 			{#if filteredIssues.length}
 				<div class="divide-y divide-border/70">
-					{#each filteredIssues as issue}
+					{#each filteredIssues.reverse() as issue}
 						<article class="grid gap-2 px-4 py-3 text-sm md:grid-cols-4 md:items-start">
 							<span class="w-fit rounded-xs border border-red-400/30 bg-red-400/10 px-2 py-0.5 font-mono text-xs font-semibold text-red-200 md:col-span-1">{issue.artifact}</span>
 							<p class="min-w-0 text-muted-foreground md:col-span-3">{issue.reason}</p>
@@ -51,9 +51,7 @@
 					{/each}
 				</div>
 			{:else}
-				<div class="flex min-h-40 items-center justify-center px-4 text-center text-sm text-muted-foreground">
-					No reported artifact issues match that filter.
-				</div>
+				<div class="flex min-h-40 items-center justify-center px-4 text-center text-sm text-muted-foreground">No reported artifact issues match that filter.</div>
 			{/if}
 		</div>
 	</Card.Content>
