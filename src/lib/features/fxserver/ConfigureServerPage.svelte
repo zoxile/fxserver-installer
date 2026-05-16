@@ -31,6 +31,7 @@
 	let drafts = $state<Record<string, string>>({});
 	let editorElement = $state<HTMLTextAreaElement | null>(null);
 	let gutterElement = $state<HTMLDivElement | null>(null);
+	let editorScroll = $state({ top: 0, left: 0 });
 
 	const profileOptions = $derived(fxserverSettings.profiles.map((profileName) => ({ value: profileName, label: profileName })));
 	const filteredFiles = $derived(
@@ -49,6 +50,7 @@
 		lines: editorContent ? editorContent.split("\n").length : 0,
 		chars: editorContent.length,
 	});
+	const highlightedLines = $derived(editorContent.split("\n").map((line) => highlightCfgLine(line)));
 	const rconReady = $derived(Boolean(result?.rconPasswordFound && result?.rconlogFound));
 	const rconCommands = [
 		{ command: "say <message>", description: "Send a chat message to all players." },
@@ -284,6 +286,76 @@
 	function syncLineNumbers() {
 		if (!editorElement || !gutterElement) return;
 		gutterElement.scrollTop = editorElement.scrollTop;
+		editorScroll = { top: editorElement.scrollTop, left: editorElement.scrollLeft };
+	}
+
+	function handleEditorKeydown(event: KeyboardEvent) {
+		if (!(event.ctrlKey || event.metaKey)) return;
+
+		const key = event.key.toLowerCase();
+		if (key === "s") {
+			event.preventDefault();
+			if (selectedFile && dirty && !saving) void saveFile();
+		}
+
+		if (key === "z") {
+			event.preventDefault();
+			if (dirty) revertFile();
+		}
+	}
+
+	function escapeHtml(value: string) {
+		return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+	}
+
+	function highlightCfgLine(line: string) {
+		const escapedLine = escapeHtml(line);
+		const trimmed = line.trimStart();
+		const leading = line.slice(0, line.length - trimmed.length);
+
+		if (!line) return "&nbsp;";
+		if (trimmed.startsWith("#") || trimmed.startsWith("//")) {
+			return `<span class="text-emerald-300/70">${escapedLine || "&nbsp;"}</span>`;
+		}
+
+		const commandMatch = trimmed.match(/^([A-Za-z_][\w.-]*)(\s+)?(.*)$/);
+		if (!commandMatch) return escapedLine;
+
+		const [, command, spacing = "", rest = ""] = commandMatch;
+		const lowerCommand = command.toLowerCase();
+		const commandClass =
+			lowerCommand === "ensure" || lowerCommand === "start" || lowerCommand === "stop" || lowerCommand === "restart"
+				? "text-sky-300"
+				: lowerCommand === "set" || lowerCommand === "setr" || lowerCommand === "sets"
+					? "text-violet-300"
+					: lowerCommand.includes("rcon")
+						? "text-amber-200"
+						: "text-cyan-200";
+		const highlightedRest = highlightCfgValue(rest);
+
+		return `${escapeHtml(leading)}<span class="${commandClass}">${escapeHtml(command)}</span>${escapeHtml(spacing)}${highlightedRest}`;
+	}
+
+	function highlightCfgValue(value: string) {
+		const matcher = /"[^"]*"|\btrue\b|\bfalse\b|\bnull\b|\b\d+(\.\d+)?\b/gi;
+		let cursor = 0;
+		let output = "";
+
+		for (const match of value.matchAll(matcher)) {
+			const token = match[0];
+			const index = match.index ?? 0;
+			output += escapeHtml(value.slice(cursor, index));
+			output += `<span class="${cfgValueClass(token)}">${escapeHtml(token)}</span>`;
+			cursor = index + token.length;
+		}
+
+		return output + escapeHtml(value.slice(cursor));
+	}
+
+	function cfgValueClass(token: string) {
+		if (token.startsWith('"')) return "text-amber-200";
+		if (/^(true|false|null)$/i.test(token)) return "text-fuchsia-200";
+		return "text-orange-200";
 	}
 </script>
 
@@ -503,16 +575,29 @@
 								<div class={`h-5 px-2 leading-5 ${line === rconLineInSelectedFile ? "bg-amber-400/20 text-amber-100" : line === rconlogLineInSelectedFile ? "bg-emerald-400/20 text-emerald-100" : ""}`}>{line}</div>
 							{/each}
 						</div>
-						<textarea
-							bind:this={editorElement}
-							bind:value={editorContent}
-							disabled={!selectedFile}
-							spellcheck="false"
-							onscroll={syncLineNumbers}
-							class="h-160 resize-none overflow-auto bg-transparent px-3 py-3 leading-5 text-foreground outline-none placeholder:text-muted-foreground disabled:cursor-not-allowed disabled:opacity-60"
-							placeholder="Select a .cfg file to edit..."
-							title="Server config editor"
-						></textarea>
+						<div class="relative h-160 overflow-hidden">
+							<div
+								class="pointer-events-none absolute inset-0 min-w-max px-3 py-3 leading-5 whitespace-pre text-foreground"
+								style={`transform: translate(${-editorScroll.left}px, ${-editorScroll.top}px);`}
+								aria-hidden="true"
+							>
+								{#each highlightedLines as line, index}
+									<div class={`h-5 min-w-max ${index + 1 === rconLineInSelectedFile ? "bg-amber-400/15" : index + 1 === rconlogLineInSelectedFile ? "bg-emerald-400/15" : ""}`}>{@html line}</div>
+								{/each}
+							</div>
+							<textarea
+								bind:this={editorElement}
+								bind:value={editorContent}
+								disabled={!selectedFile}
+								spellcheck="false"
+								wrap="off"
+								onkeydown={handleEditorKeydown}
+								onscroll={syncLineNumbers}
+								class="relative h-160 w-full resize-none overflow-auto whitespace-pre bg-transparent px-3 py-3 leading-5 text-transparent caret-foreground outline-none placeholder:text-muted-foreground selection:bg-primary/35 disabled:cursor-not-allowed disabled:opacity-60"
+								placeholder="Select a .cfg file to edit..."
+								title="Server config editor"
+							></textarea>
+						</div>
 					</div>
 				</Card.Content>
 			</Card.Root>
