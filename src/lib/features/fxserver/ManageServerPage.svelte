@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { ALIGNMENT, VirtualList } from "svelte-virtuallists";
 	import ActivityIcon from "@lucide/svelte/icons/activity";
 	import AlertCircleIcon from "@lucide/svelte/icons/alert-circle";
 	import CheckCircle2Icon from "@lucide/svelte/icons/check-circle-2";
@@ -10,6 +11,7 @@
 	import ServerIcon from "@lucide/svelte/icons/server";
 	import SquareIcon from "@lucide/svelte/icons/square";
 	import { onDestroy, onMount } from "svelte";
+	import { Checkbox } from "$lib/components/ui/checkbox/index.js";
 	import * as Card from "$lib/components/ui/card/index.js";
 	import { Button } from "$lib/components/ui/button/index.js";
 	import { Input } from "$lib/components/ui/input/index.js";
@@ -18,7 +20,16 @@
 	import { chooseFolder as chooseAnyFolder, chooseInstallFolder } from "$lib/core/selectFolder";
 	import { getInstallPath, loadInstallPath, setInstallPath } from "$lib/core/paths.svelte";
 	import { getInstalledWindowsArtifactInfo, type InstalledArtifactInfo } from "$lib/modules/artifact";
-	import { getFxserverStatus, getFxserverTerminal, sendFxserverCommand, startFxserver, stopFxserver, type FxserverStatus, type FxserverTerminalEntry } from "$lib/modules/fxserver";
+	import {
+		getFxserverStatus,
+		getFxserverTerminal,
+		sendFxserverCommand,
+		startFxserver,
+		stopFxserver,
+		type FxserverRconConfig,
+		type FxserverStatus,
+		type FxserverTerminalEntry,
+	} from "$lib/modules/fxserver";
 	import TxHostFieldInput from "./TxHostFieldInput.svelte";
 	import { sensitiveTxHostKeys, txHostFields, txHostGroups } from "./fxserverEnv";
 	import { fxserverSettings, loadFxserverSettings, readSavedEnvironment, refreshTxDataProfiles, setServerProfile, setTxDataPath, writeSavedEnvironment } from "./fxserverSettings.svelte";
@@ -28,6 +39,11 @@
 	let status = $state<FxserverStatus>({ running: false });
 	let terminalEntries = $state<FxserverTerminalEntry[]>([]);
 	let terminalCommand = $state("");
+	let rconConfig = $state<FxserverRconConfig>({
+		host: "127.0.0.1",
+		port: 30120,
+		password: "",
+	});
 	let envValues = $state<Record<string, string>>(emptyEnvironment());
 	let serverProfile = $state("");
 	let storageReady = false;
@@ -38,7 +54,8 @@
 	let message = $state("");
 	let refreshTimer: number | undefined;
 	let terminalTimer: number | undefined;
-	let terminalViewport: HTMLDivElement;
+	let terminalVisibleRange = $state({ start: 0, end: 0 });
+	let terminalScrollToIndex = $state(0);
 
 	const activeEnvCount = $derived(Object.values(envValues).filter((value) => value.trim()).length + (serverProfile.trim() ? 1 : 0));
 	const canStart = $derived(Boolean(artifactPath.trim()) && !status.running && !starting && !busy);
@@ -47,6 +64,9 @@
 		...(fxserverSettings.hasRootLogs ? [{ value: "", label: "Root logs folder" }] : []),
 		...fxserverSettings.profiles.map((profile) => ({ value: profile, label: profile })),
 	]);
+
+	let autoScrollTerminal = $state(true);
+	let lastTerminalEntryId = $state<number | null>(null);
 
 	onMount(() => {
 		loadInstallPath();
@@ -73,8 +93,19 @@
 	$effect(() => {
 		JSON.stringify(envValues);
 		serverProfile;
+		JSON.stringify(rconConfig);
 
 		if (storageReady) saveEnvironment();
+	});
+
+	$effect(() => {
+		const lastEntry = terminalEntries.at(-1);
+
+		if (!lastEntry || lastEntry.id === lastTerminalEntryId) return;
+
+		lastTerminalEntryId = lastEntry.id;
+
+		if (autoScrollTerminal) terminalScrollToIndex = terminalEntries.length - 1;
 	});
 
 	$effect(() => {
@@ -96,9 +127,15 @@
 		try {
 			const saved = readSavedEnvironment();
 			envValues = { ...emptyEnvironment(), ...saved, TXHOST_DATA_PATH: fxserverSettings.txDataPath };
+			rconConfig = {
+				host: saved.TXHOST_RCON_HOST || "127.0.0.1",
+				port: Number.parseInt(saved.TXHOST_RCON_PORT || "30120", 10) || 30120,
+				password: "",
+			};
 			serverProfile = fxserverSettings.profile;
 		} catch {
 			envValues = emptyEnvironment();
+			rconConfig = { host: "127.0.0.1", port: 30120, password: "" };
 			serverProfile = "";
 		}
 	}
@@ -111,7 +148,11 @@
 		const trimmedEntries = Object.entries(envValues)
 			.map(([key, value]) => [key, value.trim()])
 			.filter(([key, value]) => value && !sensitiveTxHostKeys.has(key));
-		writeSavedEnvironment(Object.fromEntries(trimmedEntries));
+		writeSavedEnvironment({
+			...Object.fromEntries(trimmedEntries),
+			TXHOST_RCON_HOST: rconConfig.host.trim(),
+			TXHOST_RCON_PORT: String(rconConfig.port || 30120),
+		});
 		setTxDataPath((envValues.TXHOST_DATA_PATH ?? "").trim());
 		setServerProfile(serverProfile.trim());
 	}
@@ -179,21 +220,14 @@
 		try {
 			const result = await getFxserverTerminal(700);
 			terminalEntries = result.entries;
-			if (scrollToBottom) requestAnimationFrame(scrollTerminalToBottom);
+			if (scrollToBottom && result.entries.length) terminalScrollToIndex = result.entries.length - 1;
 		} catch (caught) {
 			error = caught instanceof Error ? caught.message : String(caught);
 		}
 	}
 
-	function scrollTerminalToBottom() {
-		if (!terminalViewport) return;
-		terminalViewport.scrollTop = terminalViewport.scrollHeight;
-	}
-
 	function launchEnvironment() {
-		return txHostFields
-			.map((field) => ({ key: field.key, value: (envValues[field.key] ?? "").trim() }))
-			.filter((entry) => entry.value);
+		return txHostFields.map((field) => ({ key: field.key, value: (envValues[field.key] ?? "").trim() })).filter((entry) => entry.value);
 	}
 
 	async function startServer() {
@@ -271,12 +305,26 @@
 	}
 
 	function terminalStreamClass(stream: string) {
-		return {
-			stdout: "border-sky-400/30 bg-sky-400/10 text-sky-200",
+		return (
+			{
+				stdout: "border-sky-400/30 bg-sky-400/10 text-sky-200",
 			stderr: "border-red-400/30 bg-red-400/10 text-red-200",
 			system: "border-emerald-400/30 bg-emerald-400/10 text-emerald-200",
 			command: "border-amber-400/30 bg-amber-400/10 text-amber-200",
-		}[stream] ?? "border-border bg-background text-muted-foreground";
+			rcon: "border-violet-400/30 bg-violet-400/10 text-violet-200",
+		}[stream] ?? "border-border bg-background text-muted-foreground"
+	);
+}
+
+	function updateRconPort(event: Event) {
+		const value = Number.parseInt((event.currentTarget as HTMLInputElement).value, 10);
+		rconConfig = { ...rconConfig, port: Number.isFinite(value) ? value : 30120 };
+	}
+
+	function updateAutoScrollFromRange(start: number, end: number) {
+		terminalVisibleRange = { start, end };
+		if (terminalEntries.length <= 1) return;
+		autoScrollTerminal = end >= terminalEntries.length - 2;
 	}
 
 	async function submitTerminalCommand() {
@@ -284,7 +332,7 @@
 		if (!command) return;
 
 		try {
-			await sendFxserverCommand(command);
+			await sendFxserverCommand(command, rconConfig);
 			terminalCommand = "";
 			await refreshTerminal();
 		} catch (caught) {
@@ -298,7 +346,9 @@
 		<div>
 			<p class="text-xs font-semibold tracking-wide text-muted-foreground uppercase">FXServer</p>
 			<h1 class="mt-2 text-3xl font-semibold tracking-normal text-foreground">Manage Server</h1>
-			<p class="mt-2 max-w-2xl text-sm leading-6 text-muted-foreground">Start FXServer from your selected artifact folder with txAdmin TXHOST environment variables, then watch the process while it runs.</p>
+			<p class="mt-2 max-w-2xl text-sm leading-6 text-muted-foreground">
+				Start FXServer from your selected artifact folder with txAdmin TXHOST environment variables, then watch the process while it runs.
+			</p>
 		</div>
 		<Button variant="outline" onclick={() => refreshAll()} disabled={busy || starting || stopping} title="Refresh artifact details and FXServer process status">
 			<RefreshCwIcon class={busy ? "animate-spin" : undefined} />
@@ -324,7 +374,9 @@
 
 	<div class="grid gap-4 xl:grid-cols-12">
 		<Card.Root class="group relative overflow-hidden rounded-sm border-border bg-card shadow-sm transition-transform duration-300 hover:-translate-y-0.5 xl:col-span-7">
-			<div class="pointer-events-none absolute inset-x-4 top-0 h-px bg-linear-to-r from-transparent via-primary/70 to-transparent opacity-0 transition-opacity duration-300 group-hover:opacity-100"></div>
+			<div
+				class="pointer-events-none absolute inset-x-4 top-0 h-px bg-linear-to-r from-transparent via-primary/70 to-transparent opacity-0 transition-opacity duration-300 group-hover:opacity-100"
+			></div>
 			<Card.Header class="border-b border-border pb-4">
 				<div class="flex items-center gap-3">
 					<div class="flex size-9 shrink-0 items-center justify-center rounded-sm border border-sky-400/30 bg-sky-400/10 text-sky-200">
@@ -368,7 +420,9 @@
 		</Card.Root>
 
 		<Card.Root class="group relative flex overflow-hidden rounded-sm border-border bg-card shadow-sm transition-transform duration-300 hover:-translate-y-0.5 xl:col-span-5">
-			<div class="pointer-events-none absolute inset-x-4 top-0 h-px bg-linear-to-r from-transparent via-primary/70 to-transparent opacity-0 transition-opacity duration-300 group-hover:opacity-100"></div>
+			<div
+				class="pointer-events-none absolute inset-x-4 top-0 h-px bg-linear-to-r from-transparent via-primary/70 to-transparent opacity-0 transition-opacity duration-300 group-hover:opacity-100"
+			></div>
 			<div class="flex w-full flex-col">
 				<Card.Header class="border-b border-border pb-4">
 					<div class="flex items-center justify-between gap-3">
@@ -376,7 +430,9 @@
 							<Card.Title>Process Status</Card.Title>
 							<Card.Description>{status.running ? `Running as PID ${status.pid}` : "Not started from this app."}</Card.Description>
 						</div>
-						<div class={`rounded-sm border px-2 py-1 text-xs font-semibold ${status.running ? "border-emerald-400/30 bg-emerald-400/10 text-emerald-200" : "border-red-400/30 bg-red-400/10 text-red-200"}`}>
+						<div
+							class={`rounded-sm border px-2 py-1 text-xs font-semibold ${status.running ? "border-emerald-400/30 bg-emerald-400/10 text-emerald-200" : "border-red-400/30 bg-red-400/10 text-red-200"}`}
+						>
 							{status.running ? "RUNNING" : "STOPPED"}
 						</div>
 					</div>
@@ -448,33 +504,79 @@
 	</div>
 
 	<Card.Root class="group relative overflow-hidden rounded-sm border-border bg-card shadow-sm transition-transform duration-300 hover:-translate-y-0.5">
-		<div class="pointer-events-none absolute inset-x-4 top-0 h-px bg-linear-to-r from-transparent via-primary/70 to-transparent opacity-0 transition-opacity duration-300 group-hover:opacity-100"></div>
+		<div
+			class="pointer-events-none absolute inset-x-4 top-0 h-px bg-linear-to-r from-transparent via-primary/70 to-transparent opacity-0 transition-opacity duration-300 group-hover:opacity-100"
+		></div>
 		<Card.Header class="border-b border-border pb-4">
 			<div class="flex flex-col justify-between gap-3 md:flex-row md:items-start">
 				<div>
 					<Card.Title>Server Console</Card.Title>
-					<Card.Description>Live output from the hidden FXServer process, with stdin command forwarding when it is running.</Card.Description>
+					<Card.Description>Live output from the hidden FXServer process, with command input sent through RCON.</Card.Description>
 				</div>
 				<div class="rounded-sm border border-border bg-background px-2 py-1 text-xs font-semibold text-muted-foreground">{terminalEntries.length} lines</div>
 			</div>
 		</Card.Header>
 		<Card.Content class="space-y-3">
-			<div bind:this={terminalViewport} class="h-104 overflow-auto rounded-sm border border-border bg-black/40 p-3 font-mono text-xs">
+			<div class="flex items-center justify-between gap-3 rounded-sm border border-border bg-muted/30 px-3 py-2">
+				<div>
+					<div class="text-sm font-medium">Console output</div>
+					<p class="text-xs text-muted-foreground">Visible {terminalVisibleRange.start + 1}-{Math.min(terminalVisibleRange.end + 1, terminalEntries.length)} of {terminalEntries.length} lines.</p>
+				</div>
+
+				<label
+					class="flex cursor-pointer select-none items-center gap-2 rounded-sm border border-border bg-background px-2.5 py-1.5 text-xs font-medium text-muted-foreground shadow-xs transition-colors hover:bg-transparent hover:text-foreground"
+				>
+					<Checkbox
+						bind:checked={autoScrollTerminal}
+						class="size-4 rounded-lg border-border data-[state=checked]:border-primary data-[state=checked]:bg-primary data-[state=checked]:text-primary-foreground"
+					/>
+					<span>Auto-scroll</span>
+				</label>
+			</div>
+
+			<div class="h-104 overflow-hidden rounded-sm border border-border bg-black/40 font-mono text-xs">
 				{#if terminalEntries.length}
-					<div class="space-y-1.5">
-						{#each terminalEntries as entry (entry.id)}
-							<div class="grid gap-2 text-muted-foreground sm:grid-cols-[5.5rem_5.5rem_minmax(0,1fr)]">
-								<span class="text-[11px] text-muted-foreground/80">{terminalTime(entry.timestamp)}</span>
-								<span class={`w-fit rounded-xs border px-1.5 py-0.5 text-[10px] font-semibold uppercase ${terminalStreamClass(entry.stream)}`}>{entry.stream}</span>
-								<span class="min-w-0 break-words whitespace-pre-wrap text-foreground">{entry.line}</span>
+					<VirtualList
+						items={terminalEntries}
+						scrollToIndex={terminalScrollToIndex}
+						scrollToAlignment={ALIGNMENT.END}
+						onVisibleRangeUpdate={({ start, end }) => updateAutoScrollFromRange(Number(start), Number(end))}
+						style="height:100%;width:100%;overflow:auto;"
+					>
+						{#snippet vl_slot({ item })}
+							<div class="flex h-6 min-w-0 items-center gap-2 px-3 text-muted-foreground">
+								<span class="w-20 shrink-0 truncate text-[11px] text-muted-foreground/80">
+									{terminalTime(item.timestamp)}
+								</span>
+
+								<span class={`w-16 shrink-0 truncate rounded-xs border px-1.5 py-0.5 text-center text-[10px] leading-none font-semibold uppercase ${terminalStreamClass(item.stream)}`}>
+									{item.stream}
+								</span>
+
+								<span class="min-w-0 flex-1 truncate text-foreground" title={item.line}>
+									{item.line}
+								</span>
 							</div>
-						{/each}
-					</div>
+						{/snippet}
+					</VirtualList>
 				{:else}
-					<div class="flex h-full items-center justify-center text-center text-sm text-muted-foreground">
-						Start FXServer to see console output here.
-					</div>
+					<div class="flex h-full items-center justify-center p-3 text-center text-sm text-muted-foreground">Start FXServer to see console output here.</div>
 				{/if}
+			</div>
+
+			<div class="grid gap-3 rounded-sm border border-border bg-muted/20 p-3 md:grid-cols-[minmax(0,1fr)_8rem_minmax(0,1fr)]">
+				<label class="grid gap-2">
+					<span class="text-xs font-medium text-muted-foreground">RCON Host</span>
+					<Input bind:value={rconConfig.host} placeholder="127.0.0.1" title="Host where FXServer accepts RCON connections." class="rounded-sm font-mono text-xs" />
+				</label>
+				<label class="grid gap-2">
+					<span class="text-xs font-medium text-muted-foreground">Port</span>
+					<Input value={String(rconConfig.port)} oninput={updateRconPort} type="number" min="1" max="65535" placeholder="30120" title="FXServer RCON port." class="rounded-sm font-mono text-xs" />
+				</label>
+				<label class="grid gap-2">
+					<span class="text-xs font-medium text-muted-foreground">Password</span>
+					<Input bind:value={rconConfig.password} type="password" placeholder="server.cfg rcon_password" title="Value configured with rcon_password in server.cfg." class="rounded-sm font-mono text-xs" />
+				</label>
 			</div>
 
 			<form
@@ -484,8 +586,14 @@
 					void submitTerminalCommand();
 				}}
 			>
-				<Input bind:value={terminalCommand} placeholder="status, refresh, say hello..." title="Command to send to the running FXServer process" disabled={!status.running} class="rounded-sm font-mono text-xs" />
-				<Button type="submit" disabled={!status.running || !terminalCommand.trim()} title="Send command to FXServer stdin">
+				<Input
+					bind:value={terminalCommand}
+					placeholder="status, refresh, say hello..."
+					title="Command to send to FXServer through RCON"
+					disabled={!status.running || !rconConfig.password.trim()}
+					class="rounded-sm font-mono text-xs"
+				/>
+				<Button type="submit" disabled={!status.running || !terminalCommand.trim() || !rconConfig.password.trim()} title="Send command through RCON">
 					<SendIcon />
 					Send
 				</Button>
@@ -494,7 +602,9 @@
 	</Card.Root>
 
 	<Card.Root class="group relative overflow-hidden rounded-sm border-border bg-card shadow-sm transition-transform duration-300 hover:-translate-y-0.5">
-		<div class="pointer-events-none absolute inset-x-4 top-0 h-px bg-linear-to-r from-transparent via-primary/70 to-transparent opacity-0 transition-opacity duration-300 group-hover:opacity-100"></div>
+		<div
+			class="pointer-events-none absolute inset-x-4 top-0 h-px bg-linear-to-r from-transparent via-primary/70 to-transparent opacity-0 transition-opacity duration-300 group-hover:opacity-100"
+		></div>
 		<Card.Header class="border-b border-border pb-4">
 			<div class="flex flex-col justify-between gap-3 md:flex-row md:items-start">
 				<div>
@@ -584,7 +694,7 @@
 					</div>
 					<div class="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
 						{#each txHostEditableFields.filter((field) => field.group === group) as field}
-							<TxHostFieldInput field={field} sensitive={sensitiveTxHostKeys.has(field.key)} bind:value={envValues[field.key]} />
+							<TxHostFieldInput {field} sensitive={sensitiveTxHostKeys.has(field.key)} bind:value={envValues[field.key]} />
 						{/each}
 					</div>
 				</div>

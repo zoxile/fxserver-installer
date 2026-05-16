@@ -17,6 +17,14 @@ pub struct FxserverEnvironmentVariable {
     pub value: String,
 }
 
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct FxserverRconConfig {
+    pub host: String,
+    pub port: u16,
+    pub password: String,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FxserverLaunchResult {
@@ -60,6 +68,13 @@ pub struct FxserverTerminalEntry {
 #[serde(rename_all = "camelCase")]
 pub struct FxserverTerminalResult {
     pub entries: Vec<FxserverTerminalEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FxserverCommandRequest {
+    pub command: String,
+    pub rcon: FxserverRconConfig,
 }
 
 #[derive(Debug, Deserialize)]

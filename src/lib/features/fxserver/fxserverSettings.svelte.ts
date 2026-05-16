@@ -1,4 +1,4 @@
-import { log } from "$lib/core/logger";
+import { log } from "$lib/core/logger.svelte";
 import { listTxDataProfiles } from "$lib/modules/fxserver";
 
 const envStorageKey = "fxserver.manage.env";

@@ -1,17 +1,19 @@
 use std::{
     fs,
     io::{BufRead, BufReader, Write},
+    net::TcpStream,
     path::PathBuf,
-    process::{Child, ChildStdin, Command, Stdio},
+    process::{Child, Command, Stdio},
     sync::{Arc, Mutex},
     thread,
-    time::{Duration, SystemTime},
+    time::{Duration, Instant, SystemTime},
 };
 
 use crate::models::fxserver::{
-    FxserverEnvironmentVariable, FxserverLaunchRequest, FxserverLaunchResult, FxserverResources,
-    FxserverStatus, FxserverTerminalEntry, FxserverTerminalResult, TxDataLogRequest,
-    TxDataLogResult, TxDataProfilesResult,
+    FxserverCommandRequest, FxserverEnvironmentVariable, FxserverLaunchRequest,
+    FxserverLaunchResult, FxserverRconConfig, FxserverResources, FxserverStatus,
+    FxserverTerminalEntry, FxserverTerminalResult, TxDataLogRequest, TxDataLogResult,
+    TxDataProfilesResult,
 };
 
 pub struct FxserverManager {
@@ -21,15 +23,21 @@ pub struct FxserverManager {
 
 struct ManagedFxserverProcess {
     child: Child,
-    stdin: Option<ChildStdin>,
     artifact_path: PathBuf,
     started_at: SystemTime,
+    resource_sample: Option<ResourceSample>,
 }
 
 #[derive(Default)]
 struct TerminalState {
     entries: Vec<FxserverTerminalEntry>,
     next_id: u64,
+}
+
+#[derive(Clone, Copy)]
+struct ResourceSample {
+    cpu_seconds: f64,
+    sampled_at: Instant,
 }
 
 impl Default for FxserverManager {
@@ -77,7 +85,7 @@ pub fn start_fxserver(
     let mut command = Command::new(&executable_path);
     command
         .current_dir(&artifact_path)
-        .stdin(Stdio::piped())
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
@@ -97,7 +105,6 @@ pub fn start_fxserver(
     let pid = child.id();
     let started_at = SystemTime::now();
     let started_at_label = system_time_to_label(started_at);
-    let stdin = child.stdin.take();
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
 
@@ -105,7 +112,10 @@ pub fn start_fxserver(
     append_terminal_line(
         &manager.terminal,
         "system",
-        format!("Started FXServer.exe from {}", artifact_path.to_string_lossy()),
+        format!(
+            "Started FXServer.exe from {}",
+            artifact_path.to_string_lossy()
+        ),
     )?;
 
     if let Some(stdout) = stdout {
@@ -118,9 +128,9 @@ pub fn start_fxserver(
 
     *guard = Some(ManagedFxserverProcess {
         child,
-        stdin,
         artifact_path: artifact_path.clone(),
         started_at,
+        resource_sample: None,
     });
 
     Ok(FxserverLaunchResult {
@@ -204,7 +214,7 @@ pub fn get_fxserver_status(
         artifact_path: Some(process.artifact_path.to_string_lossy().to_string()),
         started_at: Some(system_time_to_label(process.started_at)),
         uptime_seconds: Some(uptime_seconds),
-        resources: read_process_resources(pid),
+        resources: read_process_resources(pid, &mut process.resource_sample),
     })
 }
 
@@ -227,10 +237,10 @@ pub fn get_fxserver_terminal(
 
 #[tauri::command]
 pub fn send_fxserver_command(
-    command: String,
+    request: FxserverCommandRequest,
     manager: tauri::State<'_, FxserverManager>,
 ) -> Result<(), String> {
-    let command = command.trim();
+    let command = request.command.trim();
     if command.is_empty() {
         return Ok(());
     }
@@ -249,18 +259,17 @@ pub fn send_fxserver_command(
         return Err("FXServer is not running from this app.".to_string());
     }
 
-    let Some(stdin) = process.stdin.as_mut() else {
-        return Err("FXServer command input is unavailable.".to_string());
-    };
+    append_terminal_line(&manager.terminal, "command", format!("rcon> {command}"))?;
 
-    stdin
-        .write_all(format!("{command}\n").as_bytes())
-        .map_err(|error| format!("Failed to send command to FXServer: {error}"))?;
-    stdin
-        .flush()
-        .map_err(|error| format!("Failed to flush command to FXServer: {error}"))?;
+    let response = send_rcon_command(&request.rcon, command)?;
 
-    append_terminal_line(&manager.terminal, "command", format!("> {command}"))?;
+    if response.trim().is_empty() {
+        append_terminal_line(&manager.terminal, "system", "RCON command accepted.")?;
+    } else {
+        for line in response.lines() {
+            append_terminal_line(&manager.terminal, "rcon", line)?;
+        }
+    }
 
     Ok(())
 }
@@ -450,27 +459,95 @@ fn system_time_to_label(value: SystemTime) -> String {
 }
 
 #[cfg(target_os = "windows")]
-fn read_process_resources(pid: u32) -> Option<FxserverResources> {
+fn read_process_resources(
+    pid: u32,
+    previous_sample: &mut Option<ResourceSample>,
+) -> Option<FxserverResources> {
     let script = format!(
         r#"
 $ErrorActionPreference = "Stop"
-$pidValue = {pid}
-$proc = Get-Process -Id $pidValue -ErrorAction Stop
+
+$rootPid = {pid}
+
+function Get-ChildProcessIds {{
+    param([UInt32[]]$ParentIds)
+
+    $all = @()
+    $frontier = $ParentIds
+
+    while ($frontier.Count -gt 0) {{
+        $children = Get-CimInstance Win32_Process |
+            Where-Object {{ $frontier -contains [uint32]$_.ParentProcessId }} |
+            Select-Object -ExpandProperty ProcessId
+
+        $children = @($children | Where-Object {{ $null -ne $_ }})
+
+        if ($children.Count -eq 0) {{
+            break
+        }}
+
+        $all += $children
+        $frontier = $children
+    }}
+
+    return $all
+}}
+
+$pids = @($rootPid) + (Get-ChildProcessIds -ParentIds @($rootPid))
+$pids = $pids | Select-Object -Unique
+
+function Get-FxServerProcesses {{
+    param($ProcessIds)
+
+    $items = @()
+
+    foreach ($id in $ProcessIds) {{
+        $p = Get-Process -Id $id -ErrorAction SilentlyContinue
+
+        if ($p -and $p.ProcessName -eq "FXServer") {{
+            $items += $p
+        }}
+    }}
+
+    return $items
+}}
+
+$procs = Get-FxServerProcesses -ProcessIds $pids
+
+$cpuSeconds = ($procs | Measure-Object -Property CPU -Sum).Sum
+if ($null -eq $cpuSeconds) {{ $cpuSeconds = 0 }}
+
 $os = Get-CimInstance Win32_OperatingSystem
-$perf = Get-CimInstance Win32_PerfFormattedData_PerfProc_Process | Where-Object {{ $_.IDProcess -eq $pidValue }} | Select-Object -First 1
-$logicalProcessors = [Environment]::ProcessorCount
-$rawCpu = if ($perf -and $null -ne $perf.PercentProcessorTime) {{ [double]$perf.PercentProcessorTime }} else {{ 0 }}
-$cpu = if ($logicalProcessors -gt 0) {{ [Math]::Min(100, $rawCpu / $logicalProcessors) }} else {{ [Math]::Min(100, $rawCpu) }}
+
 $totalMemory = [uint64]$os.TotalVisibleMemorySize * 1024
-$memory = [uint64]$proc.WorkingSet64
-$memoryPercent = if ($totalMemory -gt 0) {{ ($memory / $totalMemory) * 100 }} else {{ 0 }}
+
+# Real resident RAM usage (matches actual system memory pressure)
+$memory = [uint64](($procs | Measure-Object -Property WorkingSet64 -Sum).Sum)
+
+$threads = [uint32]((
+    $procs |
+    ForEach-Object {{ $_.Threads.Count }} |
+    Measure-Object -Sum
+).Sum)
+
+$handles = [uint32]((
+    $procs |
+    Measure-Object -Property HandleCount -Sum
+).Sum)
+
+$memoryPercent = 0
+
+if ($totalMemory -gt 0) {{
+    $memoryPercent = ($memory / $totalMemory) * 100
+}}
+
 [pscustomobject]@{{
-    CpuPercent = [Math]::Round($cpu, 2)
+    CpuSeconds = [Math]::Round($cpuSeconds, 4)
     MemoryBytes = $memory
     TotalMemoryBytes = $totalMemory
     MemoryPercent = [Math]::Round($memoryPercent, 2)
-    ThreadCount = $proc.Threads.Count
-    HandleCount = $proc.HandleCount
+    ThreadCount = $threads
+    HandleCount = $handles
 }} | ConvertTo-Json -Compress
 "#
     );
@@ -489,21 +566,137 @@ $memoryPercent = if ($totalMemory -gt 0) {{ ($memory / $totalMemory) * 100 }} el
     }
 
     let content = String::from_utf8_lossy(&output.stdout);
+
     let value: serde_json::Value = serde_json::from_str(content.trim()).ok()?;
+    let current_sample = ResourceSample {
+        cpu_seconds: number_from_json(value.get("CpuSeconds")).unwrap_or(0.0),
+        sampled_at: Instant::now(),
+    };
+    let cpu_percent = previous_sample
+        .and_then(|previous| {
+            let elapsed = current_sample
+                .sampled_at
+                .duration_since(previous.sampled_at)
+                .as_secs_f64();
+            if elapsed <= 0.0 {
+                return None;
+            }
+            let cpu_delta = current_sample.cpu_seconds - previous.cpu_seconds;
+            if cpu_delta < 0.0 {
+                return None;
+            }
+
+            let logical_processors = std::thread::available_parallelism()
+                .map(|value| value.get() as f64)
+                .unwrap_or(1.0)
+                .max(1.0);
+            Some(((cpu_delta / elapsed) * 100.0 / logical_processors).clamp(0.0, 100.0))
+        })
+        .unwrap_or(0.0);
+    *previous_sample = Some(current_sample);
 
     Some(FxserverResources {
-        cpu_percent: number_from_json(value.get("CpuPercent")).unwrap_or(0.0),
+        cpu_percent: (cpu_percent * 100.0).round() / 100.0,
+
         memory_bytes: integer_from_json(value.get("MemoryBytes")).unwrap_or(0),
+
         total_memory_bytes: integer_from_json(value.get("TotalMemoryBytes")).unwrap_or(0),
+
         memory_percent: number_from_json(value.get("MemoryPercent")).unwrap_or(0.0),
+
         thread_count: integer_from_json(value.get("ThreadCount")).unwrap_or(0) as u32,
+
         handle_count: integer_from_json(value.get("HandleCount")).unwrap_or(0) as u32,
     })
 }
 
 #[cfg(not(target_os = "windows"))]
-fn read_process_resources(_pid: u32) -> Option<FxserverResources> {
+fn read_process_resources(
+    _pid: u32,
+    _previous_sample: &mut Option<ResourceSample>,
+) -> Option<FxserverResources> {
     None
+}
+
+fn send_rcon_command(config: &FxserverRconConfig, command: &str) -> Result<String, String> {
+    let host = config.host.trim();
+    let password = config.password.trim();
+
+    if host.is_empty() {
+        return Err("Set an RCON host before sending console commands.".to_string());
+    }
+
+    if password.is_empty() {
+        return Err("Set the server rcon_password before sending console commands.".to_string());
+    }
+
+    let mut stream = TcpStream::connect((host, config.port)).map_err(|error| {
+        format!(
+            "Failed to connect to RCON at {host}:{}: {error}",
+            config.port
+        )
+    })?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(4)))
+        .map_err(|error| format!("Failed to configure RCON read timeout: {error}"))?;
+    stream
+        .set_write_timeout(Some(Duration::from_secs(4)))
+        .map_err(|error| format!("Failed to configure RCON write timeout: {error}"))?;
+
+    write_rcon_packet(&mut stream, 1, 3, password)?;
+    let mut auth = read_rcon_packet(&mut stream)?;
+    if auth.0 != -1 && auth.1 != 2 {
+        auth = read_rcon_packet(&mut stream)?;
+    }
+    if auth.0 == -1 {
+        return Err("RCON authentication failed. Check rcon_password.".to_string());
+    }
+
+    write_rcon_packet(&mut stream, 2, 2, command)?;
+    let response = read_rcon_packet(&mut stream)?;
+    Ok(response.2)
+}
+
+fn write_rcon_packet(
+    stream: &mut TcpStream,
+    id: i32,
+    packet_type: i32,
+    body: &str,
+) -> Result<(), String> {
+    let mut packet = Vec::with_capacity(body.len() + 14);
+    packet.extend_from_slice(&id.to_le_bytes());
+    packet.extend_from_slice(&packet_type.to_le_bytes());
+    packet.extend_from_slice(body.as_bytes());
+    packet.extend_from_slice(&[0, 0]);
+
+    let size = packet.len() as i32;
+    stream
+        .write_all(&size.to_le_bytes())
+        .and_then(|_| stream.write_all(&packet))
+        .and_then(|_| stream.flush())
+        .map_err(|error| format!("Failed to write RCON packet: {error}"))
+}
+
+fn read_rcon_packet(stream: &mut TcpStream) -> Result<(i32, i32, String), String> {
+    let mut size_buffer = [0_u8; 4];
+    std::io::Read::read_exact(stream, &mut size_buffer)
+        .map_err(|error| format!("Failed to read RCON response size: {error}"))?;
+
+    let size = i32::from_le_bytes(size_buffer);
+    if !(10..=4096).contains(&size) {
+        return Err(format!("RCON returned an invalid packet size: {size}"));
+    }
+
+    let mut packet = vec![0_u8; size as usize];
+    std::io::Read::read_exact(stream, &mut packet)
+        .map_err(|error| format!("Failed to read RCON response: {error}"))?;
+
+    let id = i32::from_le_bytes(packet[0..4].try_into().unwrap_or_default());
+    let packet_type = i32::from_le_bytes(packet[4..8].try_into().unwrap_or_default());
+    let body_end = packet.len().saturating_sub(2);
+    let body = String::from_utf8_lossy(&packet[8..body_end]).to_string();
+
+    Ok((id, packet_type, body))
 }
 
 fn number_from_json(value: Option<&serde_json::Value>) -> Option<f64> {

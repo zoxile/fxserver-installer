@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { log } from "$lib/core/logger";
+import { log } from "$lib/core/logger.svelte";
 
 export interface FxserverEnvironmentVariable {
 	key: string;
@@ -10,6 +10,12 @@ export interface FxserverLaunchRequest {
 	artifactPath: string;
 	environment: FxserverEnvironmentVariable[];
 	serverProfile?: string | null;
+}
+
+export interface FxserverRconConfig {
+	host: string;
+	port: number;
+	password: string;
 }
 
 export interface FxserverLaunchResult {
@@ -159,15 +165,15 @@ export async function getFxserverTerminal(maxLines = 500) {
 	}
 }
 
-export async function sendFxserverCommand(command: string) {
+export async function sendFxserverCommand(command: string, rcon: FxserverRconConfig) {
 	if (!hasTauriRuntime()) return unavailableOutsideTauri<void>();
 
 	try {
-		await invoke<void>("send_fxserver_command", { command });
+		await invoke<void>("send_fxserver_command", { request: { command, rcon } });
 		log("FXServer command sent.", {
 			level: "debug",
 			scope: "fxserver.terminal",
-			detail: command,
+			detail: `${rcon.host}:${rcon.port} ${command}`,
 		});
 	} catch (error) {
 		log("FXServer command failed.", {
