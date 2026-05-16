@@ -73,6 +73,34 @@ export interface TxDataProfilesResult {
 	hasRootLogs: boolean;
 }
 
+export interface ServerConfigRequest {
+	txDataPath: string;
+	profile: string;
+}
+
+export interface ServerConfigFile {
+	name: string;
+	path: string;
+	content: string;
+	size: number;
+	modified?: number | null;
+	hasRconPassword: boolean;
+	hasRconlog: boolean;
+}
+
+export interface ServerConfigResult {
+	txDataPath: string;
+	profile: string;
+	profileConfigPath: string;
+	dataPath: string;
+	files: ServerConfigFile[];
+	rconPasswordFound: boolean;
+	rconPasswordFile?: string | null;
+	rconPasswordLine?: number | null;
+	rconlogFound: boolean;
+	rconlogLine?: number | null;
+}
+
 function hasTauriRuntime() {
 	return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 }
@@ -227,6 +255,61 @@ export async function listTxDataProfiles(dataPath: string) {
 		log("txData profile scan failed.", {
 			level: "error",
 			scope: "fxserver.profiles",
+			detail: errorMessage(error),
+		});
+		throw error;
+	}
+}
+
+export async function readServerConfig(request: ServerConfigRequest) {
+	if (!hasTauriRuntime()) {
+		return {
+			txDataPath: request.txDataPath,
+			profile: request.profile,
+			profileConfigPath: `${request.txDataPath}\\${request.profile}\\config.json`,
+			dataPath: "",
+			files: [],
+			rconPasswordFound: false,
+			rconPasswordFile: null,
+			rconPasswordLine: null,
+			rconlogFound: false,
+			rconlogLine: null,
+		} satisfies ServerConfigResult;
+	}
+
+	try {
+		const result = await invoke<ServerConfigResult>("read_server_config", { request });
+		log(`Loaded ${result.files.length} server config file${result.files.length === 1 ? "" : "s"}.`, {
+			level: "success",
+			scope: "fxserver.config",
+			detail: result.dataPath,
+		});
+		return result;
+	} catch (error) {
+		log("Server config read failed.", {
+			level: "error",
+			scope: "fxserver.config",
+			detail: errorMessage(error),
+		});
+		throw error;
+	}
+}
+
+export async function saveServerConfig(path: string, content: string) {
+	if (!hasTauriRuntime()) return unavailableOutsideTauri<ServerConfigFile>();
+
+	try {
+		const file = await invoke<ServerConfigFile>("save_server_config", { request: { path, content } });
+		log(`Saved ${file.name}.`, {
+			level: "success",
+			scope: "fxserver.config",
+			detail: file.path,
+		});
+		return file;
+	} catch (error) {
+		log("Server config save failed.", {
+			level: "error",
+			scope: "fxserver.config",
 			detail: errorMessage(error),
 		});
 		throw error;

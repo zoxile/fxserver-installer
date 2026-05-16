@@ -2,7 +2,7 @@ use std::{
     fs,
     io::{BufRead, BufReader, Write},
     net::TcpStream,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::{Arc, Mutex},
     thread,
@@ -12,7 +12,8 @@ use std::{
 use crate::models::fxserver::{
     FxserverCommandRequest, FxserverEnvironmentVariable, FxserverLaunchRequest,
     FxserverLaunchResult, FxserverRconConfig, FxserverResources, FxserverStatus,
-    FxserverTerminalEntry, FxserverTerminalResult, TxDataLogRequest, TxDataLogResult,
+    FxserverTerminalEntry, FxserverTerminalResult, SaveServerConfigRequest, ServerConfigFile,
+    ServerConfigRequest, ServerConfigResult, TxDataLogRequest, TxDataLogResult,
     TxDataProfilesResult,
 };
 
@@ -343,6 +344,87 @@ pub fn list_txdata_profiles(data_path: String) -> Result<TxDataProfilesResult, S
     })
 }
 
+#[tauri::command]
+pub fn read_server_config(request: ServerConfigRequest) -> Result<ServerConfigResult, String> {
+    let tx_data_path = PathBuf::from(request.tx_data_path.trim());
+    if tx_data_path.as_os_str().is_empty() {
+        return Err("Set TXHOST_DATA_PATH before configuring server files.".to_string());
+    }
+
+    let profile = request.profile.trim();
+    if profile.is_empty() {
+        return Err("Choose a txData profile before configuring server files.".to_string());
+    }
+
+    let profile_config_path = tx_data_path.join(profile).join("config.json");
+    let profile_config = fs::read_to_string(&profile_config_path).map_err(|error| {
+        format!(
+            "Failed to read txData profile config {}: {error}",
+            profile_config_path.to_string_lossy()
+        )
+    })?;
+    let profile_config: serde_json::Value =
+        serde_json::from_str(&profile_config).map_err(|error| {
+            format!(
+                "Failed to parse txData profile config {}: {error}",
+                profile_config_path.to_string_lossy()
+            )
+        })?;
+    let data_path = profile_config
+        .get("dataPath")
+        .or_else(|| profile_config.get("server").and_then(|server| server.get("dataPath")))
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .ok_or_else(|| {
+            format!(
+                "txData profile config {} does not include a dataPath value.",
+                profile_config_path.to_string_lossy()
+            )
+        })?;
+
+    if !data_path.is_dir() {
+        return Err(format!(
+            "Configured server data path was not found: {}",
+            data_path.to_string_lossy()
+        ));
+    }
+
+    let files = read_cfg_files(&data_path)?;
+    let rcon = find_rcon_password(&files);
+    let rconlog = find_rconlog(&files);
+
+    Ok(ServerConfigResult {
+        tx_data_path: tx_data_path.to_string_lossy().to_string(),
+        profile: profile.to_string(),
+        profile_config_path: profile_config_path.to_string_lossy().to_string(),
+        data_path: data_path.to_string_lossy().to_string(),
+        files,
+        rcon_password_found: rcon.is_some(),
+        rcon_password_file: rcon.as_ref().map(|(file, _)| file.clone()),
+        rcon_password_line: rcon.map(|(_, line)| line),
+        rconlog_found: rconlog.is_some(),
+        rconlog_line: rconlog.map(|(_, line)| line),
+    })
+}
+
+#[tauri::command]
+pub fn save_server_config(request: SaveServerConfigRequest) -> Result<ServerConfigFile, String> {
+    let path = PathBuf::from(request.path.trim());
+    if path.as_os_str().is_empty() {
+        return Err("Choose a config file before saving.".to_string());
+    }
+
+    if !path.is_file() || !is_cfg_file(&path) {
+        return Err("Only existing .cfg files can be saved from this editor.".to_string());
+    }
+
+    fs::write(&path, request.content)
+        .map_err(|error| format!("Failed to save {}: {error}", path.to_string_lossy()))?;
+    read_cfg_file(&path)
+}
+
 fn process_is_running(process: &mut ManagedFxserverProcess) -> Result<bool, String> {
     Ok(process
         .child
@@ -416,6 +498,134 @@ fn resolve_log_path(data_path: PathBuf, profile: &str, log_name: &str) -> PathBu
     }
 
     data_path.join(profile).join("logs").join(log_name)
+}
+
+fn read_cfg_files(data_path: &Path) -> Result<Vec<ServerConfigFile>, String> {
+    let entries = fs::read_dir(data_path).map_err(|error| {
+        format!(
+            "Failed to inspect server data path {}: {error}",
+            data_path.to_string_lossy()
+        )
+    })?;
+    let mut paths = Vec::new();
+
+    for entry in entries {
+        let entry =
+            entry.map_err(|error| format!("Failed to inspect server config file: {error}"))?;
+        let path = entry.path();
+        if path.is_file() && is_cfg_file(&path) {
+            paths.push(path);
+        }
+    }
+
+    paths.sort_by(|left, right| {
+        cfg_sort_rank(left)
+            .cmp(&cfg_sort_rank(right))
+            .then_with(|| cfg_name(left).cmp(&cfg_name(right)))
+    });
+
+    paths.into_iter().map(|path| read_cfg_file(&path)).collect()
+}
+
+fn read_cfg_file(path: &Path) -> Result<ServerConfigFile, String> {
+    let content = fs::read_to_string(path)
+        .map_err(|error| format!("Failed to read {}: {error}", path.to_string_lossy()))?;
+    let metadata = fs::metadata(path)
+        .map_err(|error| format!("Failed to inspect {}: {error}", path.to_string_lossy()))?;
+
+    Ok(ServerConfigFile {
+        name: cfg_name(path),
+        path: path.to_string_lossy().to_string(),
+        has_rcon_password: cfg_has_rcon_password(&content),
+        has_rconlog: cfg_has_rconlog(&content),
+        content,
+        size: metadata.len(),
+        modified: metadata
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(SystemTime::UNIX_EPOCH).ok())
+            .map(|duration| duration.as_secs()),
+    })
+}
+
+fn is_cfg_file(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| extension.eq_ignore_ascii_case("cfg"))
+        .unwrap_or(false)
+}
+
+fn cfg_name(path: &Path) -> String {
+    path.file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| path.to_string_lossy().to_string())
+}
+
+fn cfg_sort_rank(path: &Path) -> usize {
+    match cfg_name(path).to_ascii_lowercase().as_str() {
+        "server.cfg" => 0,
+        "permissions.cfg" => 1,
+        "misc.cfg" => 2,
+        "ox.cfg" => 3,
+        "voice.cfg" => 4,
+        _ => 10,
+    }
+}
+
+fn cfg_has_rcon_password(content: &str) -> bool {
+    content.lines().any(is_rcon_password_line)
+}
+
+fn cfg_has_rconlog(content: &str) -> bool {
+    content.lines().any(is_rconlog_line)
+}
+
+fn find_rcon_password(files: &[ServerConfigFile]) -> Option<(String, usize)> {
+    files
+        .iter()
+        .filter(|file| file.name.eq_ignore_ascii_case("server.cfg"))
+        .find_map(|file| {
+            file.content
+                .lines()
+                .position(is_rcon_password_line)
+                .map(|index| (file.name.clone(), index + 1))
+        })
+}
+
+fn is_rcon_password_line(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    if trimmed.starts_with('#') || trimmed.starts_with("//") {
+        return false;
+    }
+
+    let lower = trimmed.to_ascii_lowercase();
+    lower.starts_with("rcon_password") || lower.starts_with("set rcon_password")
+}
+
+fn find_rconlog(files: &[ServerConfigFile]) -> Option<(String, usize)> {
+    files
+        .iter()
+        .filter(|file| file.name.eq_ignore_ascii_case("server.cfg"))
+        .find_map(|file| {
+            file.content
+                .lines()
+                .position(is_rconlog_line)
+                .map(|index| (file.name.clone(), index + 1))
+        })
+}
+
+fn is_rconlog_line(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    if trimmed.starts_with('#') || trimmed.starts_with("//") {
+        return false;
+    }
+
+    let mut parts = trimmed.split_whitespace();
+    matches!(
+        (parts.next(), parts.next(), parts.next()),
+        (Some(command), Some(resource), None)
+            if command.eq_ignore_ascii_case("ensure") && resource.eq_ignore_ascii_case("rconlog")
+    )
 }
 
 fn sanitize_environment(

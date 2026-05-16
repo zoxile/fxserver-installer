@@ -104,3 +104,44 @@ pub struct TxDataProfilesResult {
     pub profiles: Vec<String>,
     pub has_root_logs: bool,
 }
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServerConfigRequest {
+    pub tx_data_path: String,
+    pub profile: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServerConfigFile {
+    pub name: String,
+    pub path: String,
+    pub content: String,
+    pub size: u64,
+    pub modified: Option<u64>,
+    pub has_rcon_password: bool,
+    pub has_rconlog: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServerConfigResult {
+    pub tx_data_path: String,
+    pub profile: String,
+    pub profile_config_path: String,
+    pub data_path: String,
+    pub files: Vec<ServerConfigFile>,
+    pub rcon_password_found: bool,
+    pub rcon_password_file: Option<String>,
+    pub rcon_password_line: Option<usize>,
+    pub rconlog_found: bool,
+    pub rconlog_line: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveServerConfigRequest {
+    pub path: String,
+    pub content: String,
+}
