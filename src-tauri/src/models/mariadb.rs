@@ -98,3 +98,29 @@ pub struct MariaDBQueryResult {
     pub columns: Vec<String>,
     pub rows: Vec<Vec<String>>,
 }
+
+#[derive(Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct MariaDBBackupOptions {
+    pub output_dir: String,
+    pub file_name: Option<String>,
+    pub database: Option<String>,
+    pub tables: Vec<String>,
+    pub all_databases: bool,
+    pub schema_only: bool,
+    pub data_only: bool,
+    pub include_routines: bool,
+    pub include_triggers: bool,
+    pub include_events: bool,
+    pub single_transaction: bool,
+    pub add_drop_statements: bool,
+    pub where_clause: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct MariaDBBackupResult {
+    pub path: String,
+    pub size_bytes: u64,
+    pub stderr: String,
+}

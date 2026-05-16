@@ -69,7 +69,7 @@ pub fn run_admin_query(credentials: MariaDBCredentials, query: String) -> Result
     }
 }
 
-fn write_defaults_file(credentials: &MariaDBCredentials) -> Result<PathBuf, String> {
+pub(crate) fn write_defaults_file(credentials: &MariaDBCredentials) -> Result<PathBuf, String> {
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|error| format!("System clock error: {error}"))?
@@ -85,7 +85,7 @@ fn write_defaults_file(credentials: &MariaDBCredentials) -> Result<PathBuf, Stri
     Ok(path)
 }
 
-fn find_mariadb_client() -> Option<String> {
+pub(crate) fn find_mariadb_client() -> Option<String> {
     if let Some(install_path) = get_install_path() {
         let client_path = PathBuf::from(install_path).join("bin").join("mariadb.exe");
         if client_path.exists() {

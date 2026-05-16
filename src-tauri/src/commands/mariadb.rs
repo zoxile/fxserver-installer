@@ -1,9 +1,11 @@
 use crate::{
     models::mariadb::{
-        MariaDBCredentials, MariaDBInstallOptions, MariaDBQueryResult, MariaDBStatus, MariaDBUser,
-        MariaDBUserAccess, MariaDBUserConfig, MariaDBUserUpdateConfig,
+        MariaDBBackupOptions, MariaDBBackupResult, MariaDBCredentials, MariaDBInstallOptions,
+        MariaDBQueryResult, MariaDBStatus, MariaDBUser, MariaDBUserAccess, MariaDBUserConfig,
+        MariaDBUserUpdateConfig,
     },
     services::mariadb::{
+        backup::create_backup,
         detect::detect_mariadb,
         install::install_mariadb as install_mariadb_service,
         query::execute_query,
@@ -49,6 +51,14 @@ pub fn execute_mariadb_query(
     query: String,
 ) -> Result<MariaDBQueryResult, String> {
     execute_query(credentials, query)
+}
+
+#[tauri::command]
+pub fn backup_mariadb(
+    credentials: MariaDBCredentials,
+    options: MariaDBBackupOptions,
+) -> Result<MariaDBBackupResult, String> {
+    create_backup(credentials, options)
 }
 
 #[tauri::command]

@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { onMount } from "svelte";
+	import BackupCard from "./BackupCard.svelte";
 	import LoaderCircleIcon from "@lucide/svelte/icons/loader-circle";
 	import ConnectionCard from "./ConnectionCard.svelte";
 	import ExistingUsersCard from "./ExistingUsersCard.svelte";
@@ -8,10 +9,11 @@
 	import QueryConsole from "./QueryConsole.svelte";
 	import StatusOverview from "./StatusOverview.svelte";
 	import UserManagementCard from "./UserManagementCard.svelte";
-	import { log } from "$lib/core/logger";
+	import { log } from "$lib/core/logger.svelte";
 	import {
 		deleteMariaDBUser,
 		executeMariaDBQuery,
+		backupMariaDB,
 		getMariaDBStatus,
 		getMariaDBUserAccess,
 		installMariaDB,
@@ -21,6 +23,7 @@
 		startMariaDBService,
 		stopMariaDBService,
 		updateMariaDBUser,
+		type MariaDBBackupOptions,
 		type MariaDBCredentials,
 		type MariaDBInstallOptions,
 		type MariaDBQueryResult,
@@ -36,6 +39,21 @@
 	let credentialsReady = $state(false);
 	let query = $state("SELECT VERSION();");
 	let queryResult = $state<MariaDBQueryResult | null>(null);
+	let backupOptions = $state<MariaDBBackupOptions>({
+		outputDir: "",
+		fileName: "",
+		database: "",
+		tables: [],
+		allDatabases: false,
+		schemaOnly: false,
+		dataOnly: false,
+		includeRoutines: true,
+		includeTriggers: true,
+		includeEvents: false,
+		singleTransaction: true,
+		addDropStatements: false,
+		whereClause: "",
+	});
 	let users = $state<MariaDBUser[]>([]);
 	let selectedUser = $state<MariaDBUser | null>(null);
 	let selectedAccess = $state<MariaDBUserAccess | null>(null);
@@ -104,7 +122,11 @@
 	}
 
 	async function refreshStatus(force = true) {
-		await runTask(() => getMariaDBStatus(force), force ? "MariaDB status refreshed." : "MariaDB status loaded.", (value) => (status = value));
+		await runTask(
+			() => getMariaDBStatus(force),
+			force ? "MariaDB status refreshed." : "MariaDB status loaded.",
+			(value) => (status = value),
+		);
 	}
 
 	async function install() {
@@ -274,6 +296,28 @@
 			(value) => (queryResult = value),
 		);
 	}
+
+	async function backupDatabase() {
+		if (!credentialsReady) {
+			error = "Apply valid admin credentials before creating MariaDB backups.";
+			log("MariaDB backup action blocked until credentials are applied.", { level: "warn", scope: "mariadb.ui" });
+			return;
+		}
+
+		await runTask(
+			() =>
+				backupMariaDB(credentials, {
+					...backupOptions,
+					database: backupOptions.database?.trim() || credentials.database || null,
+					fileName: backupOptions.fileName?.trim() || null,
+					whereClause: backupOptions.whereClause?.trim() || null,
+				}),
+			"MariaDB backup created.",
+			(value) => {
+				message = `Backup created: ${value.path}`;
+			},
+		);
+	}
 </script>
 
 <section class="space-y-6">
@@ -326,6 +370,9 @@
 		</div>
 		<div class="xl:col-span-5">
 			<QueryConsole bind:query {busy} canExecute={credentialsReady} result={queryResult} onExecute={executeQuery} />
+		</div>
+		<div class="xl:col-span-12">
+			<BackupCard bind:backupOptions {busy} canBackup={credentialsReady} onBackup={backupDatabase} />
 		</div>
 	</div>
 </section>

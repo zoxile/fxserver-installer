@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { log } from "$lib/core/logger";
+import { log } from "$lib/core/logger.svelte";
 
 export interface MariaDBStatus {
 	installed: boolean;
@@ -82,6 +82,28 @@ export interface MariaDBQueryResult {
 	rows: string[][];
 }
 
+export interface MariaDBBackupOptions {
+	outputDir: string;
+	fileName?: string | null;
+	database?: string | null;
+	tables: string[];
+	allDatabases: boolean;
+	schemaOnly: boolean;
+	dataOnly: boolean;
+	includeRoutines: boolean;
+	includeTriggers: boolean;
+	includeEvents: boolean;
+	singleTransaction: boolean;
+	addDropStatements: boolean;
+	whereClause?: string | null;
+}
+
+export interface MariaDBBackupResult {
+	path: string;
+	sizeBytes: number;
+	stderr: string;
+}
+
 let cachedStatus: MariaDBStatus | null = null;
 
 function hasTauriRuntime() {
@@ -137,27 +159,21 @@ export function getMariaDBStatus(force = false) {
 		return Promise.resolve(cacheStatus(browserPreviewStatus()));
 	}
 
-	return invokeMariaDB<MariaDBStatus>(
-		"get_mariadb_status",
-		{},
-		force ? "MariaDB status refresh" : "MariaDB initial status load",
-		(status) => (status.installed ? `MariaDB detected${status.version ? `: ${status.version}` : "."}` : "MariaDB is not installed."),
+	return invokeMariaDB<MariaDBStatus>("get_mariadb_status", {}, force ? "MariaDB status refresh" : "MariaDB initial status load", (status) =>
+		status.installed ? `MariaDB detected${status.version ? `: ${status.version}` : "."}` : "MariaDB is not installed.",
 	).then(cacheStatus);
 }
 
 export function installMariaDB(options: MariaDBInstallOptions) {
 	if (!hasTauriRuntime()) return unavailableOutsideTauri<string>();
-	return invokeMariaDB<string>(
-		"install_mariadb",
-		{ options },
-		"MariaDB install",
-		() => "MariaDB installer finished.",
-	);
+	return invokeMariaDB<string>("install_mariadb", { options }, "MariaDB install", () => "MariaDB installer finished.");
 }
 
 export function startMariaDBService(serviceName?: string | null) {
 	if (!hasTauriRuntime()) return unavailableOutsideTauri<MariaDBStatus>();
-	return invokeMariaDB<MariaDBStatus>("start_mariadb_service", { serviceName }, "MariaDB service start", (status) => `MariaDB service is ${status.running ? "running" : "not running"}.`).then(cacheStatus);
+	return invokeMariaDB<MariaDBStatus>("start_mariadb_service", { serviceName }, "MariaDB service start", (status) => `MariaDB service is ${status.running ? "running" : "not running"}.`).then(
+		cacheStatus,
+	);
 }
 
 export function stopMariaDBService(serviceName?: string | null) {
@@ -167,7 +183,9 @@ export function stopMariaDBService(serviceName?: string | null) {
 
 export function restartMariaDBService(serviceName?: string | null) {
 	if (!hasTauriRuntime()) return unavailableOutsideTauri<MariaDBStatus>();
-	return invokeMariaDB<MariaDBStatus>("restart_mariadb_service", { serviceName }, "MariaDB service restart", (status) => `MariaDB service restart completed; running=${status.running}.`).then(cacheStatus);
+	return invokeMariaDB<MariaDBStatus>("restart_mariadb_service", { serviceName }, "MariaDB service restart", (status) => `MariaDB service restart completed; running=${status.running}.`).then(
+		cacheStatus,
+	);
 }
 
 export function executeMariaDBQuery(credentials: MariaDBCredentials, query: string) {
@@ -178,6 +196,11 @@ export function executeMariaDBQuery(credentials: MariaDBCredentials, query: stri
 		"MariaDB query execution",
 		(result) => `MariaDB query ${result.success ? "succeeded" : "returned an error"} with ${result.rows.length} rows.`,
 	);
+}
+
+export function backupMariaDB(credentials: MariaDBCredentials, options: MariaDBBackupOptions) {
+	if (!hasTauriRuntime()) return unavailableOutsideTauri<MariaDBBackupResult>();
+	return invokeMariaDB<MariaDBBackupResult>("backup_mariadb", { credentials, options }, "MariaDB backup", (result) => `Backup created at ${result.path}.`);
 }
 
 export function saveMariaDBUser(credentials: MariaDBCredentials, config: MariaDBUserConfig) {
@@ -197,7 +220,12 @@ export function updateMariaDBUser(credentials: MariaDBCredentials, config: Maria
 
 export function getMariaDBUserAccess(credentials: MariaDBCredentials, username: string, host: string) {
 	if (!hasTauriRuntime()) return unavailableOutsideTauri<MariaDBUserAccess>();
-	return invokeMariaDB<MariaDBUserAccess>("get_mariadb_user_access", { credentials, username, host }, `MariaDB access refresh for ${username}@${host}`, (access) => `Loaded ${access.grants.length} grants for ${username}@${host}.`);
+	return invokeMariaDB<MariaDBUserAccess>(
+		"get_mariadb_user_access",
+		{ credentials, username, host },
+		`MariaDB access refresh for ${username}@${host}`,
+		(access) => `Loaded ${access.grants.length} grants for ${username}@${host}.`,
+	);
 }
 
 export function deleteMariaDBUser(credentials: MariaDBCredentials, username: string, host: string) {
