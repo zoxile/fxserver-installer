@@ -26,7 +26,8 @@ pub fn read_app_logs(app: AppHandle) -> Result<AppLogFile, String> {
         });
     }
 
-    let content = fs::read_to_string(&path).map_err(|error| format!("Failed to read application log file: {error}"))?;
+    let content = fs::read_to_string(&path)
+        .map_err(|error| format!("Failed to read application log file: {error}"))?;
 
     Ok(AppLogFile {
         path: path.to_string_lossy().to_string(),
@@ -43,7 +44,8 @@ pub fn append_app_log(app: AppHandle, entry: String) -> Result<(), String> {
         .open(&path)
         .map_err(|error| format!("Failed to open application log file: {error}"))?;
 
-    writeln!(file, "{entry}").map_err(|error| format!("Failed to write application log file: {error}"))
+    writeln!(file, "{entry}")
+        .map_err(|error| format!("Failed to write application log file: {error}"))
 }
 
 #[tauri::command]
@@ -59,7 +61,8 @@ fn log_path(app: &AppHandle) -> Result<PathBuf, String> {
         .map_err(|error| format!("Failed to resolve application data directory: {error}"))?
         .join(LOG_FOLDER);
 
-    fs::create_dir_all(&directory).map_err(|error| format!("Failed to create application log directory: {error}"))?;
+    fs::create_dir_all(&directory)
+        .map_err(|error| format!("Failed to create application log directory: {error}"))?;
 
     Ok(directory.join(LOG_FILE))
 }

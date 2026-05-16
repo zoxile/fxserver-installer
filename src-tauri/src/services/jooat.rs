@@ -28,24 +28,36 @@ pub fn get_status(app: &AppHandle) -> JooatResolverStatus {
     }
 }
 
-pub fn prepare_database(app: &AppHandle, manifest: JooatResolverManifest) -> Result<JooatResolverStatus, String> {
+pub fn prepare_database(
+    app: &AppHandle,
+    manifest: JooatResolverManifest,
+) -> Result<JooatResolverStatus, String> {
     validate_manifest(&manifest)?;
 
     let database_dir = database_dir(app)?;
-    fs::create_dir_all(shards_dir(&database_dir)).map_err(|error| format!("Failed to create JOOAT shard directory: {error}"))?;
+    fs::create_dir_all(shards_dir(&database_dir))
+        .map_err(|error| format!("Failed to create JOOAT shard directory: {error}"))?;
 
-    let manifest_json = serde_json::to_string_pretty(&manifest).map_err(|error| format!("Failed to encode JOOAT manifest: {error}"))?;
-    fs::write(manifest_path(&database_dir), manifest_json).map_err(|error| format!("Failed to write JOOAT manifest: {error}"))?;
+    let manifest_json = serde_json::to_string_pretty(&manifest)
+        .map_err(|error| format!("Failed to encode JOOAT manifest: {error}"))?;
+    fs::write(manifest_path(&database_dir), manifest_json)
+        .map_err(|error| format!("Failed to write JOOAT manifest: {error}"))?;
 
     Ok(build_status(database_dir))
 }
 
-pub fn save_shard(app: &AppHandle, prefix: String, content: String) -> Result<JooatResolverStatus, String> {
+pub fn save_shard(
+    app: &AppHandle,
+    prefix: String,
+    content: String,
+) -> Result<JooatResolverStatus, String> {
     let normalized_prefix = normalize_prefix(&prefix)?;
     let database_dir = database_dir(app)?;
-    fs::create_dir_all(shards_dir(&database_dir)).map_err(|error| format!("Failed to create JOOAT shard directory: {error}"))?;
+    fs::create_dir_all(shards_dir(&database_dir))
+        .map_err(|error| format!("Failed to create JOOAT shard directory: {error}"))?;
 
-    fs::write(shard_path(&database_dir, &normalized_prefix), content).map_err(|error| format!("Failed to write JOOAT shard {normalized_prefix}: {error}"))?;
+    fs::write(shard_path(&database_dir, &normalized_prefix), content)
+        .map_err(|error| format!("Failed to write JOOAT shard {normalized_prefix}: {error}"))?;
 
     Ok(build_status(database_dir))
 }
@@ -54,17 +66,24 @@ pub fn remove_database(app: &AppHandle) -> Result<JooatResolverStatus, String> {
     let database_dir = database_dir(app)?;
 
     if database_dir.exists() {
-        fs::remove_dir_all(&database_dir).map_err(|error| format!("Failed to remove JOOAT resolver database: {error}"))?;
+        fs::remove_dir_all(&database_dir)
+            .map_err(|error| format!("Failed to remove JOOAT resolver database: {error}"))?;
     }
 
     Ok(build_status(database_dir))
 }
 
-pub fn resolve_hashes(app: &AppHandle, queries: Vec<String>) -> Result<Vec<JooatResolvedHash>, String> {
+pub fn resolve_hashes(
+    app: &AppHandle,
+    queries: Vec<String>,
+) -> Result<Vec<JooatResolvedHash>, String> {
     let database_dir = database_dir(app)?;
     let status = build_status(database_dir.clone());
     if !status.available {
-        return Err("Install the optional JOOAT resolver database before using offline resolver lookups.".to_string());
+        return Err(
+            "Install the optional JOOAT resolver database before using offline resolver lookups."
+                .to_string(),
+        );
     }
 
     let manifest_lookup = status.manifest.as_ref().map(shard_lookup);
@@ -79,7 +98,10 @@ pub fn resolve_hashes(app: &AppHandle, queries: Vec<String>) -> Result<Vec<Jooat
 
         match parse_hash(&trimmed) {
             Ok(value) => {
-                hashes_by_prefix.entry(hash_prefix(value)).or_default().insert(value);
+                hashes_by_prefix
+                    .entry(hash_prefix(value))
+                    .or_default()
+                    .insert(value);
                 parsed_queries.push((trimmed, Some(value), None));
             }
             Err(error) => parsed_queries.push((trimmed, None, Some(error))),
@@ -115,7 +137,10 @@ pub fn resolve_hashes(app: &AppHandle, queries: Vec<String>) -> Result<Vec<Jooat
 
 fn build_status(database_dir: PathBuf) -> JooatResolverStatus {
     let manifest = read_manifest(&database_dir).ok();
-    let expected_shards = manifest.as_ref().map(|manifest| manifest.shards.len()).unwrap_or(0);
+    let expected_shards = manifest
+        .as_ref()
+        .map(|manifest| manifest.shards.len())
+        .unwrap_or(0);
     let installed_shards = manifest
         .as_ref()
         .map(|manifest| installed_manifest_shards(&database_dir, manifest))
@@ -125,7 +150,10 @@ fn build_status(database_dir: PathBuf) -> JooatResolverStatus {
     let available = complete_manifest && installed_shards >= expected_shards;
     let message = if available {
         "Complete offline resolver database is installed.".to_string()
-    } else if manifest.as_ref().is_some_and(|manifest| !manifest_is_complete(manifest)) {
+    } else if manifest
+        .as_ref()
+        .is_some_and(|manifest| !manifest_is_complete(manifest))
+    {
         format!("Resolver manifest is incomplete. Expected {COMPLETE_SHARD_COUNT} prefix shards from 00 through ff.")
     } else if manifest.is_some() {
         format!("Resolver manifest is installed, but only {installed_shards} of {expected_shards} shards are present.")
@@ -145,7 +173,10 @@ fn build_status(database_dir: PathBuf) -> JooatResolverStatus {
 }
 
 fn database_dir(app: &AppHandle) -> Result<PathBuf, String> {
-    let app_data = app.path().app_data_dir().map_err(|error| format!("Failed to resolve app data directory: {error}"))?;
+    let app_data = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("Failed to resolve app data directory: {error}"))?;
     Ok(app_data.join(DATABASE_FOLDER))
 }
 
@@ -162,8 +193,10 @@ fn shard_path(database_dir: &Path, prefix: &str) -> PathBuf {
 }
 
 fn read_manifest(database_dir: &Path) -> Result<JooatResolverManifest, String> {
-    let content = fs::read_to_string(manifest_path(database_dir)).map_err(|error| format!("Failed to read JOOAT manifest: {error}"))?;
-    serde_json::from_str(&content).map_err(|error| format!("Failed to parse JOOAT manifest: {error}"))
+    let content = fs::read_to_string(manifest_path(database_dir))
+        .map_err(|error| format!("Failed to read JOOAT manifest: {error}"))?;
+    serde_json::from_str(&content)
+        .map_err(|error| format!("Failed to parse JOOAT manifest: {error}"))
 }
 
 fn validate_manifest(manifest: &JooatResolverManifest) -> Result<(), String> {
@@ -181,7 +214,10 @@ fn validate_manifest(manifest: &JooatResolverManifest) -> Result<(), String> {
         normalize_prefix(&shard.prefix)?;
         let shard_path = Path::new(&shard.path);
         if shard.path.contains("..") || shard_path.is_absolute() || shard.path.contains(':') {
-            return Err(format!("Invalid JOOAT shard path for prefix {}.", shard.prefix));
+            return Err(format!(
+                "Invalid JOOAT shard path for prefix {}.",
+                shard.prefix
+            ));
         }
     }
 
@@ -207,7 +243,12 @@ fn installed_shards(database_dir: &Path) -> usize {
         .map(|entries| {
             entries
                 .flatten()
-                .filter(|entry| entry.path().extension().is_some_and(|extension| extension == "tsv"))
+                .filter(|entry| {
+                    entry
+                        .path()
+                        .extension()
+                        .is_some_and(|extension| extension == "tsv")
+                })
                 .count()
         })
         .unwrap_or(0)
@@ -249,7 +290,11 @@ fn shard_lookup(manifest: &JooatResolverManifest) -> HashMap<String, String> {
     manifest
         .shards
         .iter()
-        .filter_map(|shard| normalize_prefix(&shard.prefix).ok().map(|prefix| (prefix, shard.path.clone())))
+        .filter_map(|shard| {
+            normalize_prefix(&shard.prefix)
+                .ok()
+                .map(|prefix| (prefix, shard.path.clone()))
+        })
         .collect()
 }
 
@@ -270,7 +315,8 @@ fn load_matches(
             continue;
         }
 
-        let content = fs::read_to_string(&path).map_err(|error| format!("Failed to read JOOAT shard {prefix}: {error}"))?;
+        let content = fs::read_to_string(&path)
+            .map_err(|error| format!("Failed to read JOOAT shard {prefix}: {error}"))?;
         for line in content.lines() {
             if let Some((hash, name)) = parse_shard_line(line) {
                 if targets.contains(&hash) {
@@ -294,7 +340,9 @@ fn parse_shard_line(line: &str) -> Option<(u32, String)> {
         return None;
     }
 
-    let mut parts = trimmed.splitn(2, |character: char| character == '\t' || character == ',' || character.is_whitespace());
+    let mut parts = trimmed.splitn(2, |character: char| {
+        character == '\t' || character == ',' || character.is_whitespace()
+    });
     let hash = parse_hash(parts.next()?.trim()).ok()?;
     let name = parts.next()?.trim();
     if name.is_empty() {
@@ -308,15 +356,25 @@ fn parse_hash(input: &str) -> Result<u32, String> {
     let cleaned = input.trim();
     let lowercase = cleaned.to_lowercase();
 
-    if let Some(hex) = lowercase.strip_prefix("0x").or_else(|| lowercase.strip_prefix("hash_")) {
+    if let Some(hex) = lowercase
+        .strip_prefix("0x")
+        .or_else(|| lowercase.strip_prefix("hash_"))
+    {
         return u32::from_str_radix(hex, 16).map_err(|_| "Invalid hex JOOAT hash.".to_string());
     }
 
-    if lowercase.len() == 8 && lowercase.chars().all(|character| character.is_ascii_hexdigit()) {
-        return u32::from_str_radix(&lowercase, 16).map_err(|_| "Invalid hex JOOAT hash.".to_string());
+    if lowercase.len() == 8
+        && lowercase
+            .chars()
+            .all(|character| character.is_ascii_hexdigit())
+    {
+        return u32::from_str_radix(&lowercase, 16)
+            .map_err(|_| "Invalid hex JOOAT hash.".to_string());
     }
 
-    let value = cleaned.parse::<i64>().map_err(|_| "Enter a hex, unsigned, or signed 32-bit hash.".to_string())?;
+    let value = cleaned
+        .parse::<i64>()
+        .map_err(|_| "Enter a hex, unsigned, or signed 32-bit hash.".to_string())?;
     if value < i32::MIN as i64 || value > u32::MAX as i64 {
         return Err("JOOAT hash must fit in a signed or unsigned 32-bit value.".to_string());
     }
@@ -331,7 +389,11 @@ fn parse_hash(input: &str) -> Result<u32, String> {
 fn normalize_prefix(prefix: &str) -> Result<String, String> {
     let normalized = prefix.trim().to_lowercase();
 
-    if normalized.len() == 2 && normalized.chars().all(|character| character.is_ascii_hexdigit()) {
+    if normalized.len() == 2
+        && normalized
+            .chars()
+            .all(|character| character.is_ascii_hexdigit())
+    {
         Ok(normalized)
     } else {
         Err(format!("Invalid JOOAT shard prefix: {prefix}"))
