@@ -8,7 +8,7 @@ use crate::{
         backup::create_backup,
         detect::detect_mariadb,
         install::install_mariadb as install_mariadb_service,
-        query::execute_query,
+        query::{execute_query, list_databases, list_tables, validate_connection},
         service::{restart_service, start_service, stop_service},
         users::{
             create_or_update_user, drop_user, get_user_access, grant_permissions, list_users,
@@ -51,6 +51,24 @@ pub fn execute_mariadb_query(
     query: String,
 ) -> Result<MariaDBQueryResult, String> {
     execute_query(credentials, query)
+}
+
+#[tauri::command]
+pub fn validate_mariadb_credentials(credentials: MariaDBCredentials) -> Result<(), String> {
+    validate_connection(credentials)
+}
+
+#[tauri::command]
+pub fn list_mariadb_databases(credentials: MariaDBCredentials) -> Result<Vec<String>, String> {
+    list_databases(credentials)
+}
+
+#[tauri::command]
+pub fn list_mariadb_tables(
+    credentials: MariaDBCredentials,
+    database: String,
+) -> Result<Vec<String>, String> {
+    list_tables(credentials, database)
 }
 
 #[tauri::command]

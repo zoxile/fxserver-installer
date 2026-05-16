@@ -8,11 +8,13 @@
 
 	type Props = {
 		busy: boolean;
+		credentialsReady: boolean;
+		connectionError: string;
 		credentials: MariaDBCredentials;
 		onApply: () => void;
 	};
 
-	let { busy, credentials = $bindable(), onApply }: Props = $props();
+	let { busy, credentialsReady, connectionError, credentials = $bindable(), onApply }: Props = $props();
 </script>
 
 <Card.Root class="h-full rounded-md border-border bg-card shadow-sm">
@@ -55,5 +57,12 @@
 			<RefreshCwIcon class={busy ? "animate-spin" : undefined} />
 			Change Credentials
 		</Button>
+		{#if connectionError}
+			<p class="rounded-sm border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">{connectionError}</p>
+		{:else if credentialsReady}
+			<p class="rounded-sm border border-emerald-400/25 bg-emerald-400/10 px-3 py-2 text-xs text-emerald-200">Credentials validated.</p>
+		{:else}
+			<p class="rounded-sm border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">Apply credentials to validate the MariaDB connection.</p>
+		{/if}
 	</Card.Content>
 </Card.Root>

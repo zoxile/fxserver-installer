@@ -6,7 +6,7 @@ use std::{
 };
 
 use crate::models::mariadb::{MariaDBCredentials, MariaDBQueryResult};
-use crate::services::mariadb::detect::get_install_path;
+use crate::services::mariadb::{detect::get_install_path, permissions::escape_identifier};
 
 pub fn execute_query(
     credentials: MariaDBCredentials,
@@ -67,6 +67,50 @@ pub fn run_admin_query(credentials: MariaDBCredentials, query: String) -> Result
             result.stderr
         })
     }
+}
+
+pub fn validate_connection(credentials: MariaDBCredentials) -> Result<(), String> {
+    run_admin_query(credentials, "SELECT 1;".to_string())
+}
+
+pub fn list_databases(credentials: MariaDBCredentials) -> Result<Vec<String>, String> {
+    let result = execute_query(credentials, "SHOW DATABASES;".to_string())?;
+    if !result.success {
+        return Err(if result.stderr.is_empty() {
+            "MariaDB rejected the database list query.".to_string()
+        } else {
+            result.stderr
+        });
+    }
+
+    Ok(result
+        .rows
+        .into_iter()
+        .filter_map(|row| row.into_iter().next())
+        .filter(|database| !database.trim().is_empty())
+        .collect())
+}
+
+pub fn list_tables(credentials: MariaDBCredentials, database: String) -> Result<Vec<String>, String> {
+    let database = escape_identifier(&database)?;
+    let result = execute_query(
+        credentials,
+        format!("SHOW FULL TABLES FROM {database} WHERE Table_type = 'BASE TABLE';"),
+    )?;
+    if !result.success {
+        return Err(if result.stderr.is_empty() {
+            "MariaDB rejected the table list query.".to_string()
+        } else {
+            result.stderr
+        });
+    }
+
+    Ok(result
+        .rows
+        .into_iter()
+        .filter_map(|row| row.into_iter().next())
+        .filter(|table| !table.trim().is_empty())
+        .collect())
 }
 
 pub(crate) fn write_defaults_file(credentials: &MariaDBCredentials) -> Result<PathBuf, String> {

@@ -14,15 +14,19 @@
 		deleteMariaDBUser,
 		executeMariaDBQuery,
 		backupMariaDB,
+		getDefaultMariaDBBackupOutputDir,
 		getMariaDBStatus,
 		getMariaDBUserAccess,
 		installMariaDB,
+		listMariaDBDatabases,
+		listMariaDBTables,
 		listMariaDBUsers,
 		restartMariaDBService,
 		saveMariaDBUser,
 		startMariaDBService,
 		stopMariaDBService,
 		updateMariaDBUser,
+		validateMariaDBCredentials,
 		type MariaDBBackupOptions,
 		type MariaDBCredentials,
 		type MariaDBInstallOptions,
@@ -37,8 +41,18 @@
 	let message = $state("");
 	let error = $state("");
 	let credentialsReady = $state(false);
+	let connectionError = $state("");
 	let query = $state("SELECT VERSION();");
 	let queryResult = $state<MariaDBQueryResult | null>(null);
+	let queryDatabase = $state("__global__");
+	let databases = $state<string[]>([]);
+	let backupTables = $state<string[]>([]);
+	let backupMode = $state<"database" | "tables" | "all">("database");
+	let backupDatabaseName = $state("");
+	let selectedBackupTable = $state("");
+	let loadedBackupTablesFor = $state("");
+	let loadingBackupTablesFor = $state("");
+	let backupTableRequestId = 0;
 	let backupOptions = $state<MariaDBBackupOptions>({
 		outputDir: "",
 		fileName: "",
@@ -96,12 +110,40 @@
 	});
 
 	onMount(() => {
+		void initializeBackupOutputDir();
+
 		const timer = window.setTimeout(() => {
 			void refreshStatus(false);
 		}, 80);
 
 		return () => window.clearTimeout(timer);
 	});
+
+	$effect(() => {
+		const database = backupDatabaseName.trim();
+		const canLoadTables = credentialsReady && backupMode === "tables" && database;
+
+		if (!canLoadTables) {
+			backupTables = [];
+			selectedBackupTable = "";
+			loadedBackupTablesFor = "";
+			loadingBackupTablesFor = "";
+			return;
+		}
+
+		if (loadedBackupTablesFor === database || loadingBackupTablesFor === database) return;
+
+		void refreshBackupTables(database);
+	});
+
+	async function initializeBackupOutputDir() {
+		if (backupOptions.outputDir.trim()) return;
+
+		const outputDir = await getDefaultMariaDBBackupOutputDir();
+		if (outputDir && !backupOptions.outputDir.trim()) {
+			backupOptions.outputDir = outputDir;
+		}
+	}
 
 	async function runTask<T>(task: () => Promise<T>, success: string, after?: (value: T) => void) {
 		busy = true;
@@ -231,18 +273,65 @@
 
 	async function applyCredentials() {
 		credentialsReady = false;
+		connectionError = "";
+		databases = [];
+		backupTables = [];
+		loadedBackupTablesFor = "";
+		loadingBackupTablesFor = "";
 		selectedAccess = null;
 		log("MariaDB admin credentials changed; refreshing status and users.", { scope: "mariadb.ui", detail: `${credentials.username}@${credentials.host}:${credentials.port}` });
 		await refreshStatus(true);
-		const loadedUsers = await runTask(
-			() => listMariaDBUsers(credentials),
-			"Admin credentials applied.",
-			(value) => (users = value),
-		);
 
-		if (loadedUsers) {
+		busy = true;
+		error = "";
+		message = "";
+
+		try {
+			await validateMariaDBCredentials(credentials);
+			const [loadedUsers, loadedDatabases] = await Promise.all([listMariaDBUsers(credentials), listMariaDBDatabases(credentials)]);
+			users = loadedUsers;
+			databases = loadedDatabases;
 			credentialsReady = true;
+			message = "Admin credentials applied.";
+			if (credentials.database && loadedDatabases.includes(credentials.database)) {
+				backupDatabaseName ||= credentials.database;
+				queryDatabase = credentials.database;
+			} else if (!backupDatabaseName && loadedDatabases.length) {
+				backupDatabaseName = loadedDatabases[0];
+			}
 			await refreshUserAccess();
+		} catch (caught) {
+			connectionError = caught instanceof Error ? caught.message : String(caught);
+			error = connectionError;
+			log("MariaDB credentials rejected.", { level: "error", scope: "mariadb.ui", detail: connectionError });
+		} finally {
+			busy = false;
+		}
+	}
+
+	async function refreshBackupTables(database: string) {
+		const requestId = ++backupTableRequestId;
+		loadingBackupTablesFor = database;
+
+		try {
+			const tables = await listMariaDBTables(credentials, database);
+			if (requestId !== backupTableRequestId || backupDatabaseName.trim() !== database) return;
+
+			backupTables = tables;
+			backupOptions.tables = backupOptions.tables.filter((table) => tables.includes(table));
+			if (selectedBackupTable && !tables.includes(selectedBackupTable)) {
+				selectedBackupTable = "";
+			}
+			loadedBackupTablesFor = database;
+		} catch (caught) {
+			const detail = caught instanceof Error ? caught.message : String(caught);
+			log("MariaDB table list refresh failed.", { level: "error", scope: "mariadb.ui", detail });
+			backupTables = [];
+			loadedBackupTablesFor = "";
+		} finally {
+			if (requestId === backupTableRequestId && loadingBackupTablesFor === database) {
+				loadingBackupTablesFor = "";
+			}
 		}
 	}
 
@@ -291,7 +380,14 @@
 		}
 
 		await runTask(
-			() => executeMariaDBQuery(credentials, query),
+			() =>
+				executeMariaDBQuery(
+					{
+						...credentials,
+						database: queryDatabase === "__global__" ? null : queryDatabase,
+					},
+					query,
+				),
 			"Query executed.",
 			(value) => (queryResult = value),
 		);
@@ -304,11 +400,18 @@
 			return;
 		}
 
+		if (backupMode === "tables" && backupOptions.tables.length === 0) {
+			error = "Choose at least one table to back up.";
+			return;
+		}
+
 		await runTask(
 			() =>
 				backupMariaDB(credentials, {
 					...backupOptions,
-					database: backupOptions.database?.trim() || credentials.database || null,
+					allDatabases: backupMode === "all",
+					database: backupMode === "all" ? null : backupDatabaseName.trim() || credentials.database || null,
+					tables: backupMode === "tables" ? backupOptions.tables : [],
 					fileName: backupOptions.fileName?.trim() || null,
 					whereClause: backupOptions.whereClause?.trim() || null,
 				}),
@@ -349,7 +452,7 @@
 			<StatusOverview {status} {busy} onRefresh={refreshStatus} onStart={startService} onStop={stopService} onRestart={restartService} />
 		</div>
 		<div class="xl:col-span-6">
-			<ConnectionCard bind:credentials {busy} onApply={applyCredentials} />
+			<ConnectionCard bind:credentials {busy} {credentialsReady} {connectionError} onApply={applyCredentials} />
 		</div>
 		<div class="xl:col-span-5">
 			<UserManagementCard bind:userConfig {busy} {credentialsReady} onSave={saveUser} />
@@ -368,11 +471,21 @@
 				onDelete={removeExistingUser}
 			/>
 		</div>
-		<div class="xl:col-span-5">
-			<QueryConsole bind:query {busy} canExecute={credentialsReady} result={queryResult} onExecute={executeQuery} />
+		<div class="xl:col-span-12">
+			<BackupCard
+				bind:backupOptions
+				bind:backupMode
+				bind:backupDatabase={backupDatabaseName}
+				bind:selectedTable={selectedBackupTable}
+				{busy}
+				canBackup={credentialsReady}
+				{databases}
+				tables={backupTables}
+				onBackup={backupDatabase}
+			/>
 		</div>
 		<div class="xl:col-span-12">
-			<BackupCard bind:backupOptions {busy} canBackup={credentialsReady} onBackup={backupDatabase} />
+			<QueryConsole bind:query bind:selectedDatabase={queryDatabase} {busy} canExecute={credentialsReady} {databases} result={queryResult} onExecute={executeQuery} />
 		</div>
 	</div>
 </section>

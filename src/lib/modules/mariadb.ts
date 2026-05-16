@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { downloadDir } from "@tauri-apps/api/path";
 import { log } from "$lib/core/logger.svelte";
 
 export interface MariaDBStatus {
@@ -110,6 +111,17 @@ function hasTauriRuntime() {
 	return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 }
 
+export async function getDefaultMariaDBBackupOutputDir() {
+	if (!hasTauriRuntime()) return "";
+
+	try {
+		return await downloadDir();
+	} catch (error) {
+		log("Could not resolve the default MariaDB backup folder.", { level: "warn", scope: "mariadb.backup", detail: errorMessage(error) });
+		return "";
+	}
+}
+
 function unavailableOutsideTauri<T>(): Promise<T> {
 	log("MariaDB action blocked outside the desktop runtime.", { level: "warn", scope: "mariadb.runtime" });
 	return Promise.reject(new Error("MariaDB actions are available in the Tauri desktop app."));
@@ -196,6 +208,21 @@ export function executeMariaDBQuery(credentials: MariaDBCredentials, query: stri
 		"MariaDB query execution",
 		(result) => `MariaDB query ${result.success ? "succeeded" : "returned an error"} with ${result.rows.length} rows.`,
 	);
+}
+
+export function validateMariaDBCredentials(credentials: MariaDBCredentials) {
+	if (!hasTauriRuntime()) return unavailableOutsideTauri<void>();
+	return invokeMariaDB<void>("validate_mariadb_credentials", { credentials }, "MariaDB credential validation", () => "MariaDB credentials are valid.");
+}
+
+export function listMariaDBDatabases(credentials: MariaDBCredentials) {
+	if (!hasTauriRuntime()) return unavailableOutsideTauri<string[]>();
+	return invokeMariaDB<string[]>("list_mariadb_databases", { credentials }, "MariaDB database list refresh", (databases) => `MariaDB returned ${databases.length} databases.`);
+}
+
+export function listMariaDBTables(credentials: MariaDBCredentials, database: string) {
+	if (!hasTauriRuntime()) return unavailableOutsideTauri<string[]>();
+	return invokeMariaDB<string[]>("list_mariadb_tables", { credentials, database }, `MariaDB table list refresh for ${database}`, (tables) => `MariaDB returned ${tables.length} tables.`);
 }
 
 export function backupMariaDB(credentials: MariaDBCredentials, options: MariaDBBackupOptions) {

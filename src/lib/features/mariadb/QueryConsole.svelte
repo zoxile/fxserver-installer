@@ -3,17 +3,25 @@
 	import TerminalIcon from "@lucide/svelte/icons/terminal";
 	import * as Card from "$lib/components/ui/card/index.js";
 	import { Button } from "$lib/components/ui/button/index.js";
+	import * as Select from "$lib/components/ui/select/index.js";
 	import type { MariaDBQueryResult } from "$lib/modules/mariadb";
 
 	type Props = {
 		busy: boolean;
 		canExecute: boolean;
+		databases: string[];
+		selectedDatabase: string;
 		query: string;
 		result: MariaDBQueryResult | null;
 		onExecute: () => void;
 	};
 
-	let { busy, canExecute, query = $bindable(), result, onExecute }: Props = $props();
+	let { busy, canExecute, databases, selectedDatabase = $bindable(), query = $bindable(), result, onExecute }: Props = $props();
+	const globalQueryValue = "__global__";
+	const databaseOptions = $derived([
+		{ value: globalQueryValue, label: "Global query" },
+		...databases.map((database) => ({ value: database, label: database })),
+	]);
 </script>
 
 <Card.Root class="h-full rounded-md border-border bg-card shadow-sm">
@@ -36,6 +44,22 @@
 	</Card.Header>
 
 	<Card.Content class="space-y-4">
+		<div class="grid gap-2">
+			<span class="text-xs font-medium text-muted-foreground">Query Scope</span>
+			<Select.Root bind:value={selectedDatabase} type="single" items={databaseOptions} disabled={!canExecute}>
+				<Select.Trigger title="Choose whether the query runs globally or inside one database" class="w-full rounded-sm font-mono text-xs">
+					{selectedDatabase === globalQueryValue ? "Global query" : selectedDatabase || "Choose database"}
+				</Select.Trigger>
+				<Select.Content class="rounded-sm">
+					{#each databaseOptions as option}
+						<Select.Item value={option.value} label={option.label}>
+							{option.label}
+						</Select.Item>
+					{/each}
+				</Select.Content>
+			</Select.Root>
+		</div>
+
 		<textarea
 			bind:value={query}
 			spellcheck="false"
