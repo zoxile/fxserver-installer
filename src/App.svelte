@@ -4,6 +4,7 @@
 	import Sidebar from "$lib/components/layout/Sidebar.svelte";
 	import ArtifactInfoPage from "$lib/features/artifacts/ArtifactInfoPage.svelte";
 	import ArtifactInstallPage from "$lib/features/artifacts/ArtifactInstallPage.svelte";
+	import ClientLogsPage from "$lib/features/client-logs/ClientLogsPage.svelte";
 	import ConfiguratorPage from "$lib/features/configurator/ConfiguratorPage.svelte";
 	import FxserverLogsPage from "$lib/features/fxserver/FxserverLogsPage.svelte";
 	import HomePage from "$lib/features/home/HomePage.svelte";
@@ -28,7 +29,7 @@
 	let navigationFrame = 0;
 
 	const placeholders: Record<
-		Exclude<PageId, "home" | "mariadb" | "artifact-install" | "artifact-info" | "server-manage" | "server-logs" | "json-formatter" | "profiler" | "jooat" | "logs" | "configurator">,
+		Exclude<PageId, "home" | "mariadb" | "artifact-install" | "artifact-info" | "server-manage" | "server-logs" | "json-formatter" | "profiler" | "jooat" | "logs" | "client-logs" | "configurator">,
 		string
 	> = {};
 
@@ -106,6 +107,8 @@
 					<JooatResolverPage />
 				{:else if activePage === "logs"}
 					<LogViewerPage />
+				{:else if activePage === "client-logs"}
+					<ClientLogsPage />
 				{:else if activePage === "configurator"}
 					<ConfiguratorPage />
 				{:else}

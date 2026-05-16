@@ -26,6 +26,7 @@ pub fn run() {
             commands::logs::read_app_logs,
             commands::logs::append_app_log,
             commands::logs::clear_app_logs,
+            commands::logs::read_client_logs,
             commands::system::open_external_url,
             commands::mariadb::get_mariadb_status,
             commands::mariadb::install_mariadb,

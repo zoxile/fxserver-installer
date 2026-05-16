@@ -1,4 +1,6 @@
 <script lang="ts">
+	import AlertCircleIcon from "@lucide/svelte/icons/alert-circle";
+	import CheckCircle2Icon from "@lucide/svelte/icons/check-circle-2";
 	import ClipboardIcon from "@lucide/svelte/icons/clipboard";
 	import EraserIcon from "@lucide/svelte/icons/eraser";
 	import RefreshCwIcon from "@lucide/svelte/icons/refresh-cw";
@@ -12,6 +14,7 @@
 	let level = $state<LogLevel | "all">("all");
 	let busy = $state(false);
 	let notice = $state("");
+	let noticeLevel = $state<"success" | "error">("success");
 
 	const levels: Array<LogLevel | "all"> = ["all", "debug", "info", "success", "warn", "error"];
 	const filteredLogs = $derived(
@@ -31,9 +34,11 @@
 		try {
 			await refreshLogs();
 			notice = "Log file refreshed.";
+			noticeLevel = "success";
 			log("Log viewer refreshed persisted logs.", { level: "debug", scope: "logs.viewer" });
 		} catch (error) {
 			notice = error instanceof Error ? error.message : String(error);
+			noticeLevel = "error";
 			log("Log viewer could not refresh logs.", { level: "error", scope: "logs.viewer", detail: notice });
 		} finally {
 			busy = false;
@@ -47,8 +52,10 @@
 		try {
 			await clearLogs();
 			notice = "Log file cleared.";
+			noticeLevel = "success";
 		} catch (error) {
 			notice = error instanceof Error ? error.message : String(error);
+			noticeLevel = "error";
 			log("Log viewer could not clear logs.", { level: "error", scope: "logs.viewer", detail: notice });
 		} finally {
 			busy = false;
@@ -58,6 +65,7 @@
 	async function copyPath() {
 		await navigator.clipboard.writeText(logFilePath.value);
 		notice = "Log path copied.";
+		noticeLevel = "success";
 		log("Application log path copied.", { level: "debug", scope: "logs.viewer", detail: logFilePath.value });
 	}
 
@@ -95,10 +103,7 @@
 		</div>
 	</div>
 
-	<Card.Root class="group relative overflow-hidden rounded-sm border-border bg-card shadow-sm transition-transform duration-300 hover:-translate-y-0.5">
-		<div
-			class="pointer-events-none absolute inset-x-4 top-0 h-px bg-linear-to-r from-transparent via-primary/70 to-transparent opacity-0 transition-opacity duration-300 group-hover:opacity-100"
-		></div>
+	<Card.Root class="overflow-hidden rounded-sm border-border bg-card shadow-sm">
 		<Card.Header class="border-b border-border pb-4">
 			<div class="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
 				<div class="min-w-0">
@@ -140,10 +145,19 @@
 			</div>
 
 			{#if notice}
-				<p class="rounded-sm border border-border bg-background/70 px-3 py-2 text-xs text-muted-foreground">{notice}</p>
+				<div class={`rounded-sm border px-3 py-2 text-xs ${noticeLevel === "success" ? "border-emerald-400/30 bg-emerald-400/10 text-emerald-100" : "border-red-400/30 bg-red-400/10 text-red-100"}`}>
+					<div class="flex items-start gap-2">
+						{#if noticeLevel === "success"}
+							<CheckCircle2Icon class="mt-0.5 size-3.5 shrink-0" />
+						{:else}
+							<AlertCircleIcon class="mt-0.5 size-3.5 shrink-0" />
+						{/if}
+						<p>{notice}</p>
+					</div>
+				</div>
 			{/if}
 
-			<div class="max-h-144 overflow-auto rounded-sm border border-border bg-background/60">
+			<div class="max-h-160 overflow-auto rounded-sm border border-border bg-background/60">
 				{#if filteredLogs.length}
 					<div class="divide-y divide-border/70">
 						{#each filteredLogs as entry, index (`${entry.id}-${index}`)}

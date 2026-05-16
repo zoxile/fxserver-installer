@@ -23,7 +23,8 @@ export type PageId =
 	| "profiler"
 	| "jooat"
 	| "json-formatter"
-	| "logs";
+	| "logs"
+	| "client-logs";
 
 export interface NavigationChild {
 	id: PageId;
@@ -111,6 +112,11 @@ export const navigation: NavigationItem[] = [
 			{
 				id: "logs",
 				label: "Application Logs",
+				icon: ScrollTextIcon,
+			},
+			{
+				id: "client-logs",
+				label: "Client Logs",
 				icon: ScrollTextIcon,
 			},
 		],
