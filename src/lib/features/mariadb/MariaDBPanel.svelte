@@ -454,7 +454,7 @@
 			<StatusOverview {status} {busy} onRefresh={refreshStatus} onStart={startService} onStop={stopService} onRestart={restartService} />
 		</div>
 		<div class="xl:col-span-6">
-			<ConnectionCard bind:credentials {busy} {credentialsReady} {connectionError} connectionString={databaseSession.connectionString} onApply={applyCredentials} />
+			<ConnectionCard bind:credentials {busy} {credentialsReady} {connectionError} onApply={applyCredentials} />
 		</div>
 		<div class="xl:col-span-5">
 			<UserManagementCard bind:userConfig {busy} {credentialsReady} {databases} onSave={saveUser} />

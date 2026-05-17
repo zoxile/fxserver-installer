@@ -1,6 +1,8 @@
 <script lang="ts">
 	import AlertCircleIcon from "@lucide/svelte/icons/alert-circle";
 	import ClipboardIcon from "@lucide/svelte/icons/clipboard";
+	import EyeIcon from "@lucide/svelte/icons/eye";
+	import EyeOffIcon from "@lucide/svelte/icons/eye-off";
 	import FileTextIcon from "@lucide/svelte/icons/file-text";
 	import FolderOpenIcon from "@lucide/svelte/icons/folder-open";
 	import KeyRoundIcon from "@lucide/svelte/icons/key-round";
@@ -17,7 +19,7 @@
 	import * as Select from "$lib/components/ui/select/index.js";
 	import { chooseFolder } from "$lib/core/selectFolder";
 	import { databaseSession, formatMariaDBConnectionString, rememberDatabaseCredentials } from "$lib/core/databaseSession.svelte";
-	import { validateMariaDBCredentials, type MariaDBCredentials } from "$lib/modules/mariadb";
+	import { listMariaDBDatabases, validateMariaDBCredentials, type MariaDBCredentials } from "$lib/modules/mariadb";
 	import { readServerConfig, saveServerConfig, type ServerConfigFile, type ServerConfigResult } from "$lib/modules/fxserver";
 	import { fxserverSettings, loadFxserverSettings, refreshTxDataProfiles, setServerProfile, setTxDataPath } from "./fxserverSettings.svelte";
 
@@ -33,15 +35,16 @@
 	let noticeLevel = $state<"success" | "error">("success");
 	let drafts = $state<Record<string, string>>({});
 	let editorElement = $state<HTMLTextAreaElement | null>(null);
-	let gutterElement = $state<HTMLDivElement | null>(null);
-	let editorScroll = $state({ top: 0, left: 0 });
+	let selectedFxDatabase = $state(databaseSession.credentials?.database ?? "fxserver");
 	let dbCredentials = $state<MariaDBCredentials>({
-		host: databaseSession.credentials?.host ?? "127.0.0.1",
+		host: databaseSession.credentials?.host ?? "localhost",
 		port: databaseSession.credentials?.port ?? 3306,
 		username: databaseSession.credentials?.username ?? "fxserver",
 		password: databaseSession.credentials?.password ?? "",
 		database: databaseSession.credentials?.database ?? "fxserver",
 	});
+	let fxDatabases = $state<string[]>([]);
+	let showDbConnectionString = $state(false);
 	let dbCredentialsReady = $state(Boolean(databaseSession.credentials));
 	let dbNotice = $state("");
 	let dbNoticeLevel = $state<"success" | "error">("success");
@@ -54,8 +57,12 @@
 		}),
 	);
 	const selectedFile = $derived((result?.files ?? []).find((file) => file.path === selectedPath) ?? null);
+	const selectedFileName = $derived(selectedFile?.name.toLowerCase() ?? "");
+	const serverCfgSelected = $derived(selectedFileName === "server.cfg");
+	const permissionsCfgSelected = $derived(selectedFileName === "permissions.cfg");
 	const dirty = $derived(Boolean(selectedFile && editorContent !== selectedFile.content));
 	const lineNumbers = $derived(Array.from({ length: Math.max(editorContent.split("\n").length, 1) }, (_, index) => index + 1));
+	const editorContentHeight = $derived(`${Math.max(640, lineNumbers.length * 20 + 24)}px`);
 	const rconLineInSelectedFile = $derived(selectedFile && result?.rconPasswordFile === selectedFile.name ? (result.rconPasswordLine ?? null) : null);
 	const rconlogLineInSelectedFile = $derived(selectedFile?.name.toLowerCase() === "server.cfg" ? (result?.rconlogLine ?? null) : null);
 	const stats = $derived({
@@ -65,7 +72,8 @@
 	});
 	const highlightedLines = $derived(editorContent.split("\n").map((line) => highlightCfgLine(line)));
 	const rconReady = $derived(Boolean(result?.rconPasswordFound && result?.rconlogFound));
-	const dbConnectionString = $derived(dbCredentialsReady ? formatMariaDBConnectionString(dbCredentials) : databaseSession.connectionString);
+	const dbConnectionString = $derived(dbCredentialsReady ? formatMariaDBConnectionString({ ...dbCredentials, database: selectedFxDatabase }) : databaseSession.connectionString);
+	const fxDatabaseOptions = $derived(fxDatabases.map((database) => ({ value: database, label: database })));
 	const popularCfgValues = $derived({
 		hostname: getCfgValue(editorContent, "sv_hostname"),
 		maxClients: getCfgValue(editorContent, "sv_maxclients"),
@@ -94,6 +102,9 @@
 			await refreshTxDataProfiles();
 			dataPath = fxserverSettings.txDataPath;
 			profile = fxserverSettings.profile;
+			if (databaseSession.credentials) {
+				await validateFxDatabaseCredentials(false);
+			}
 			if (dataPath.trim() && profile.trim()) {
 				await loadConfig();
 			}
@@ -127,19 +138,30 @@
 		}
 	}
 
-	async function validateFxDatabaseCredentials() {
+	async function validateFxDatabaseCredentials(showNotice = true) {
 		dbCredentialsReady = false;
-		dbNotice = "";
+		if (showNotice) dbNotice = "";
+		fxDatabases = [];
 
 		try {
 			await validateMariaDBCredentials(dbCredentials);
+			fxDatabases = await listMariaDBDatabases(dbCredentials);
 			dbCredentialsReady = true;
+			dbCredentials.database = selectedFxDatabase;
 			rememberDatabaseCredentials(dbCredentials);
-			dbNotice = "Database credentials validated.";
-			dbNoticeLevel = "success";
+			if (!selectedFxDatabase && fxDatabases.length) {
+				selectedFxDatabase = fxDatabases[0];
+				dbCredentials.database = selectedFxDatabase;
+			}
+			if (showNotice) {
+				dbNotice = "Database credentials validated.";
+				dbNoticeLevel = "success";
+			}
 		} catch (error) {
-			dbNotice = error instanceof Error ? error.message : String(error);
-			dbNoticeLevel = "error";
+			if (showNotice) {
+				dbNotice = error instanceof Error ? error.message : String(error);
+				dbNoticeLevel = "error";
+			}
 		}
 	}
 
@@ -277,6 +299,12 @@
 		return serverCfg;
 	}
 
+	function selectPermissionsCfg() {
+		const permissionsCfg = result?.files.find((file) => file.name.toLowerCase() === "permissions.cfg");
+		if (permissionsCfg) selectFile(permissionsCfg.path);
+		return permissionsCfg;
+	}
+
 	function autofillRconConfig() {
 		const serverCfg = selectServerCfg();
 		if (!serverCfg) {
@@ -317,6 +345,55 @@
 		drafts = { ...drafts, [serverCfg.path]: editorContent };
 		notice = `${command} added to server.cfg.`;
 		noticeLevel = "success";
+	}
+
+	function appendToConfigFile(file: ServerConfigFile | undefined, snippet: string, label: string) {
+		if (!file) {
+			notice = `${label} config file was not found in the resolved server data path.`;
+			noticeLevel = "error";
+			return;
+		}
+
+		selectFile(file.path);
+		const base = (drafts[file.path] ?? file.content).trimEnd();
+		editorContent = `${base}${base ? "\n\n" : ""}${snippet.trimEnd()}\n`;
+		drafts = { ...drafts, [file.path]: editorContent };
+		notice = `${label} helper added to ${file.name}.`;
+		noticeLevel = "success";
+	}
+
+	function addServerAdminPrincipal() {
+		appendToConfigFile(
+			selectServerCfg(),
+			"## Permissions ##\nadd_principal identifier.fivem:14460984 group.admin #Zoxilee",
+			"Server permissions",
+		);
+	}
+
+	function addPermissionsTemplate() {
+		appendToConfigFile(
+			selectPermissionsCfg(),
+			`add_ace group.admin command allow # allow all commands
+
+# Resources
+add_ace resource.qbx_core command allow # Allow qbx_core to execute commands
+
+# Ox_lib
+add_ace resource.ox_lib command.add_ace allow
+add_ace resource.ox_lib command.remove_ace allow
+add_ace resource.ox_lib command.add_principal allow
+add_ace resource.ox_lib command.remove_principal allow
+
+# Ace Groups
+add_ace group.admin admin allow
+add_ace group.mod mod allow
+add_ace group.support support allow
+
+# Inheritance
+add_principal group.admin group.mod
+add_principal group.mod group.support`,
+			"permissions.cfg",
+		);
 	}
 
 	function getCfgValue(content: string, command: string) {
@@ -362,6 +439,18 @@
 		setPopularCfgValue(command, (event.currentTarget as HTMLInputElement).value, quote);
 	}
 
+	function setDbConnectionStringInCfg() {
+		if (!dbConnectionString) {
+			notice = "Validate database credentials before setting the connection string.";
+			noticeLevel = "error";
+			return;
+		}
+
+		setPopularCfgValue("set mysql_connection_string", dbConnectionString);
+		notice = "MySQL connection string set in server.cfg.";
+		noticeLevel = "success";
+	}
+
 	function formatModified(file: ServerConfigFile) {
 		if (!file.modified) return "Unknown";
 		return new Date(file.modified * 1000).toLocaleString(undefined, {
@@ -370,12 +459,6 @@
 			hour: "2-digit",
 			minute: "2-digit",
 		});
-	}
-
-	function syncLineNumbers() {
-		if (!editorElement || !gutterElement) return;
-		gutterElement.scrollTop = editorElement.scrollTop;
-		editorScroll = { top: editorElement.scrollTop, left: editorElement.scrollLeft };
 	}
 
 	function handleEditorKeydown(event: KeyboardEvent) {
@@ -536,7 +619,7 @@
 			<div class="grid gap-3 md:grid-cols-5">
 				<label class="grid gap-2">
 					<span class="text-xs font-medium text-muted-foreground">Host</span>
-					<Input bind:value={dbCredentials.host} placeholder="127.0.0.1" class="rounded-sm font-mono text-xs" />
+					<Input bind:value={dbCredentials.host} placeholder="localhost" class="rounded-sm font-mono text-xs" />
 				</label>
 				<label class="grid gap-2">
 					<span class="text-xs font-medium text-muted-foreground">Port</span>
@@ -552,16 +635,44 @@
 				</label>
 				<label class="grid gap-2">
 					<span class="text-xs font-medium text-muted-foreground">Database</span>
-					<Input bind:value={dbCredentials.database} placeholder="fxserver" class="rounded-sm font-mono text-xs" />
+					<Select.Root bind:value={selectedFxDatabase} type="single" items={fxDatabaseOptions} disabled={!dbCredentialsReady || !fxDatabaseOptions.length}>
+						<Select.Trigger title="Choose database for the connection string" class="w-full rounded-sm font-mono text-xs">
+							{selectedFxDatabase || "Choose database"}
+						</Select.Trigger>
+						<Select.Content class="rounded-sm">
+							{#if fxDatabaseOptions.length}
+								{#each fxDatabaseOptions as option}
+									<Select.Item value={option.value} label={option.label}>
+										{option.label}
+									</Select.Item>
+								{/each}
+							{:else}
+								<Select.Item value="" label="Validate first" disabled>Validate first</Select.Item>
+							{/if}
+						</Select.Content>
+					</Select.Root>
 				</label>
 			</div>
-			<div class="grid gap-2 lg:grid-cols-[minmax(0,1fr)_auto_auto]">
-				<code class="truncate rounded-sm border border-border bg-background/70 px-3 py-2 font-mono text-xs text-foreground">
-					{dbConnectionString || "Validate credentials to generate a connection string."}
-				</code>
-				<Button variant="outline" onclick={validateFxDatabaseCredentials} disabled={busy} title="Validate these database credentials">
+			<div class="grid gap-2 lg:grid-cols-[minmax(0,1fr)_auto_auto_auto]">
+				{#if showDbConnectionString}
+					<code class="truncate rounded-sm border border-border bg-background/70 px-3 py-2 font-mono text-xs text-foreground">
+						{dbConnectionString || "Validate credentials to generate a connection string."}
+					</code>
+				{:else}
+					<div class="rounded-sm border border-border bg-background/70 px-3 py-2 text-xs text-muted-foreground">Connection string hidden.</div>
+				{/if}
+				<Button variant="outline" onclick={() => validateFxDatabaseCredentials()} disabled={busy} title="Validate these database credentials">
 					<KeyRoundIcon />
 					Validate
+				</Button>
+				<Button variant="outline" onclick={() => (showDbConnectionString = !showDbConnectionString)} disabled={!dbConnectionString} title={showDbConnectionString ? "Hide connection string" : "Show connection string"}>
+					{#if showDbConnectionString}
+						<EyeOffIcon />
+						Hide
+					{:else}
+						<EyeIcon />
+						Show
+					{/if}
 				</Button>
 				<Button variant="outline" onclick={copyDbConnectionString} disabled={!dbConnectionString} title="Copy database connection string">
 					<ClipboardIcon />
@@ -600,86 +711,6 @@
 				</div>
 			</div>
 		{/if}
-
-		<Card.Root class="overflow-hidden rounded-sm border-border bg-card shadow-sm">
-			<Card.Header class="border-b border-border pb-4">
-				<div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-					<div>
-						<Card.Title>RCON Autofill</Card.Title>
-						<Card.Description>Add the recommended RCON setup lines and common command snippets to `server.cfg`.</Card.Description>
-					</div>
-					<Button variant="outline" onclick={autofillRconConfig} title="Add missing RCON setup lines to server.cfg">
-						<ListPlusIcon />
-						Add RCON Setup
-					</Button>
-				</div>
-			</Card.Header>
-			<Card.Content class="space-y-3">
-				<div class="grid gap-2 md:grid-cols-2 xl:grid-cols-4">
-					{#each rconCommands as item}
-						<button
-							type="button"
-							class="rounded-sm border border-border bg-background/60 px-3 py-2 text-left transition-colors hover:bg-accent"
-							onclick={() => autofillCommand(item.command)}
-							title={`Add ${item.command} to server.cfg`}
-						>
-							<span class="block font-mono text-xs text-foreground">{item.command}</span>
-							<span class="mt-1 block text-xs leading-5 text-muted-foreground">{item.description}</span>
-						</button>
-					{/each}
-				</div>
-			</Card.Content>
-		</Card.Root>
-
-		<Card.Root class="overflow-hidden rounded-sm border-border bg-card shadow-sm">
-			<Card.Header class="border-b border-border pb-4">
-				<Card.Title>Popular server.cfg Values</Card.Title>
-				<Card.Description>Adjust common server settings here; the editor below stays as the source of truth.</Card.Description>
-			</Card.Header>
-			<Card.Content class="space-y-4">
-				<div class="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-					<label class="grid gap-2">
-						<span class="text-xs font-medium text-muted-foreground">Server Name</span>
-						<Input value={popularCfgValues.hostname} onchange={(event) => updatePopularValue("sv_hostname", event)} placeholder="My FiveM Server" class="rounded-sm font-mono text-xs" />
-					</label>
-					<label class="grid gap-2">
-						<span class="text-xs font-medium text-muted-foreground">Max Clients</span>
-						<Input value={popularCfgValues.maxClients} onchange={(event) => updatePopularValue("sv_maxclients", event, false)} placeholder="48" class="rounded-sm font-mono text-xs" />
-					</label>
-					<label class="grid gap-2">
-						<span class="text-xs font-medium text-muted-foreground">Project Name</span>
-						<Input value={popularCfgValues.projectName} onchange={(event) => updatePopularValue("sets sv_projectName", event)} placeholder="Qbox Roleplay" class="rounded-sm font-mono text-xs" />
-					</label>
-					<label class="grid gap-2">
-						<span class="text-xs font-medium text-muted-foreground">Project Description</span>
-						<Input value={popularCfgValues.projectDescription} onchange={(event) => updatePopularValue("sets sv_projectDesc", event)} placeholder="A FiveM roleplay server" class="rounded-sm font-mono text-xs" />
-					</label>
-					<label class="grid gap-2">
-						<span class="text-xs font-medium text-muted-foreground">License Key</span>
-						<Input value={popularCfgValues.licenseKey} onchange={(event) => updatePopularValue("sv_licenseKey", event)} placeholder="cfxk_..." class="rounded-sm font-mono text-xs" />
-					</label>
-					<label class="grid gap-2">
-						<span class="text-xs font-medium text-muted-foreground">MySQL Connection String</span>
-						<Input
-							value={popularCfgValues.mysqlConnectionString || dbConnectionString}
-							onchange={(event) => updatePopularValue("set mysql_connection_string", event)}
-							placeholder="mysql://user:pass@127.0.0.1:3306/db"
-							class="rounded-sm font-mono text-xs"
-						/>
-					</label>
-				</div>
-				<div class="flex flex-wrap gap-2">
-					<Button variant="outline" onclick={() => setPopularCfgValue("set mysql_connection_string", dbConnectionString)} disabled={!dbConnectionString} title="Use the validated database connection string">
-						<ClipboardIcon />
-						Use Validated DB String
-					</Button>
-					<Button variant="outline" onclick={autofillRconConfig} title="Add missing RCON setup lines to server.cfg">
-						<ListPlusIcon />
-						Ensure RCON
-					</Button>
-				</div>
-			</Card.Content>
-		</Card.Root>
 
 		<div class="grid gap-4 xl:grid-cols-[20rem_minmax(0,1fr)]">
 			<Card.Root class="overflow-hidden rounded-sm border-border bg-card shadow-sm">
@@ -753,39 +784,141 @@
 							<span class="rounded-sm border border-emerald-400/30 bg-emerald-400/10 px-2 py-1 text-emerald-100">rconlog line {rconlogLineInSelectedFile}</span>
 						{/if}
 					</div>
-					<div class="grid h-160 grid-cols-[3.5rem_minmax(0,1fr)] overflow-hidden rounded-sm border border-border bg-background/70 font-mono text-xs">
-						<div bind:this={gutterElement} class="overflow-hidden border-r border-border bg-muted/30 py-3 text-right text-muted-foreground select-none">
-							{#each lineNumbers as line}
-								<div style={editorLineStyle} class={`px-2 ${line === rconLineInSelectedFile ? "bg-amber-400/20 text-amber-100" : line === rconlogLineInSelectedFile ? "bg-emerald-400/20 text-emerald-100" : ""}`}>{line}</div>
-							{/each}
-						</div>
-						<div class="relative h-160 overflow-hidden">
-							<div
-								class="pointer-events-none absolute inset-0 min-w-max px-3 py-3 leading-5 whitespace-pre text-foreground"
-								style={`transform: translate(${-editorScroll.left}px, ${-editorScroll.top}px);`}
-								aria-hidden="true"
-							>
-								{#each highlightedLines as line, index}
-									<div style={editorLineStyle} class={`min-w-max ${index + 1 === rconLineInSelectedFile ? "bg-amber-400/15" : index + 1 === rconlogLineInSelectedFile ? "bg-emerald-400/15" : ""}`}>{@html line}</div>
+					<div class="h-160 overflow-auto rounded-sm border border-border bg-background/70 font-mono text-xs">
+						<div class="grid min-h-full grid-cols-[3.5rem_minmax(max-content,1fr)]">
+							<div class="border-r border-border bg-muted/30 py-3 text-right text-muted-foreground select-none" style={`height: ${editorContentHeight};`}>
+								{#each lineNumbers as line}
+									<div style={editorLineStyle} class={`px-2 ${line === rconLineInSelectedFile ? "bg-amber-400/20 text-amber-100" : line === rconlogLineInSelectedFile ? "bg-emerald-400/20 text-emerald-100" : ""}`}>{line}</div>
 								{/each}
 							</div>
-							<textarea
-								bind:this={editorElement}
-								bind:value={editorContent}
-								disabled={!selectedFile}
-								spellcheck="false"
-								wrap="off"
-								onkeydown={handleEditorKeydown}
-								onscroll={syncLineNumbers}
-								style="line-height: 20px;"
-								class="relative h-160 w-full resize-none overflow-auto whitespace-pre bg-transparent px-3 py-3 text-transparent caret-foreground outline-none placeholder:text-muted-foreground selection:bg-primary/35 disabled:cursor-not-allowed disabled:opacity-60"
-								placeholder="Select a .cfg file to edit..."
-								title="Server config editor"
-							></textarea>
+							<div class="relative min-w-max overflow-hidden" style={`height: ${editorContentHeight};`}>
+								<div class="pointer-events-none min-w-max px-3 py-3 whitespace-pre text-foreground" aria-hidden="true">
+									{#each highlightedLines as line, index}
+										<div style={editorLineStyle} class={`min-w-max ${index + 1 === rconLineInSelectedFile ? "bg-amber-400/15" : index + 1 === rconlogLineInSelectedFile ? "bg-emerald-400/15" : ""}`}>{@html line}</div>
+									{/each}
+								</div>
+								<textarea
+									bind:this={editorElement}
+									bind:value={editorContent}
+									disabled={!selectedFile}
+									spellcheck="false"
+									wrap="off"
+									onkeydown={handleEditorKeydown}
+									style={`height: ${editorContentHeight}; line-height: 20px;`}
+									class="absolute inset-0 w-full min-w-full resize-none overflow-hidden whitespace-pre bg-transparent px-3 py-3 text-transparent caret-foreground outline-none placeholder:text-muted-foreground selection:bg-primary/35 disabled:cursor-not-allowed disabled:opacity-60"
+									placeholder="Select a .cfg file to edit..."
+									title="Server config editor"
+								></textarea>
+							</div>
 						</div>
 					</div>
 				</Card.Content>
 			</Card.Root>
 		</div>
+
+		{#if serverCfgSelected}
+			<Card.Root class="overflow-hidden rounded-sm border-border bg-card shadow-sm">
+				<Card.Header class="border-b border-border pb-4">
+					<div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+						<div>
+							<Card.Title>RCON Autofill</Card.Title>
+							<Card.Description>Add the recommended RCON setup lines and common command snippets to `server.cfg`.</Card.Description>
+						</div>
+						<Button variant="outline" onclick={autofillRconConfig} title="Add missing RCON setup lines to server.cfg">
+							<ListPlusIcon />
+							Add RCON Setup
+						</Button>
+					</div>
+				</Card.Header>
+				<Card.Content class="space-y-3">
+					<div class="grid gap-2 md:grid-cols-2 xl:grid-cols-4">
+						{#each rconCommands as item}
+							<button
+								type="button"
+								class="rounded-sm border border-border bg-background/60 px-3 py-2 text-left transition-colors hover:bg-accent"
+								onclick={() => autofillCommand(item.command)}
+								title={`Add ${item.command} to server.cfg`}
+							>
+								<span class="block font-mono text-xs text-foreground">{item.command}</span>
+								<span class="mt-1 block text-xs leading-5 text-muted-foreground">{item.description}</span>
+							</button>
+						{/each}
+					</div>
+				</Card.Content>
+			</Card.Root>
+
+			<Card.Root class="overflow-hidden rounded-sm border-border bg-card shadow-sm">
+				<Card.Header class="border-b border-border pb-4">
+					<Card.Title>Popular server.cfg Values</Card.Title>
+					<Card.Description>Adjust common server settings here; the editor above stays as the source of truth.</Card.Description>
+				</Card.Header>
+				<Card.Content class="space-y-4">
+					<div class="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+						<label class="grid gap-2">
+							<span class="text-xs font-medium text-muted-foreground">Server Name</span>
+							<Input value={popularCfgValues.hostname} onchange={(event) => updatePopularValue("sv_hostname", event)} placeholder="My FiveM Server" class="rounded-sm font-mono text-xs" />
+						</label>
+						<label class="grid gap-2">
+							<span class="text-xs font-medium text-muted-foreground">Max Clients</span>
+							<Input value={popularCfgValues.maxClients} onchange={(event) => updatePopularValue("sv_maxclients", event, false)} placeholder="48" class="rounded-sm font-mono text-xs" />
+						</label>
+						<label class="grid gap-2">
+							<span class="text-xs font-medium text-muted-foreground">Project Name</span>
+							<Input value={popularCfgValues.projectName} onchange={(event) => updatePopularValue("sets sv_projectName", event)} placeholder="Qbox Roleplay" class="rounded-sm font-mono text-xs" />
+						</label>
+						<label class="grid gap-2">
+							<span class="text-xs font-medium text-muted-foreground">Project Description</span>
+							<Input value={popularCfgValues.projectDescription} onchange={(event) => updatePopularValue("sets sv_projectDesc", event)} placeholder="A FiveM roleplay server" class="rounded-sm font-mono text-xs" />
+						</label>
+						<label class="grid gap-2">
+							<span class="text-xs font-medium text-muted-foreground">License Key</span>
+							<Input value={popularCfgValues.licenseKey} onchange={(event) => updatePopularValue("sv_licenseKey", event)} placeholder="cfxk_..." class="rounded-sm font-mono text-xs" />
+						</label>
+						<label class="grid gap-2">
+							<span class="text-xs font-medium text-muted-foreground">MySQL Connection String</span>
+							<Input
+								value={popularCfgValues.mysqlConnectionString || dbConnectionString}
+								onchange={(event) => updatePopularValue("set mysql_connection_string", event)}
+								placeholder="mysql://user:pass@localhost:3306/db"
+								class="rounded-sm font-mono text-xs"
+							/>
+						</label>
+					</div>
+					<div class="flex flex-wrap gap-2">
+						<Button variant="outline" onclick={setDbConnectionStringInCfg} disabled={!dbConnectionString} title="Use the validated database connection string">
+							<ClipboardIcon />
+							Set Validated DB String
+						</Button>
+						<Button variant="outline" onclick={autofillRconConfig} title="Add missing RCON setup lines to server.cfg">
+							<ListPlusIcon />
+							Ensure RCON
+						</Button>
+					</div>
+				</Card.Content>
+			</Card.Root>
+		{/if}
+
+		{#if serverCfgSelected || permissionsCfgSelected}
+			<Card.Root class="overflow-hidden rounded-sm border-border bg-card shadow-sm">
+				<Card.Header class="border-b border-border pb-4">
+					<Card.Title>Permissions Helpers</Card.Title>
+					<Card.Description>Add the helper snippet that matches the selected config file.</Card.Description>
+				</Card.Header>
+				<Card.Content class="grid gap-3 md:grid-cols-2">
+					{#if serverCfgSelected}
+						<button type="button" class="rounded-sm border border-border bg-background/60 px-3 py-3 text-left transition-colors hover:bg-accent" onclick={addServerAdminPrincipal}>
+							<span class="block font-mono text-xs text-foreground">server.cfg admin principal</span>
+							<span class="mt-1 block text-xs leading-5 text-muted-foreground">Adds `add_principal identifier.fivem:14460984 group.admin #Zoxilee` under a permissions heading.</span>
+						</button>
+					{/if}
+					{#if permissionsCfgSelected}
+						<button type="button" class="rounded-sm border border-border bg-background/60 px-3 py-3 text-left transition-colors hover:bg-accent" onclick={addPermissionsTemplate}>
+							<span class="block font-mono text-xs text-foreground">permissions.cfg ACE template</span>
+							<span class="mt-1 block text-xs leading-5 text-muted-foreground">Adds admin/mod/support groups, qbx_core, ox_lib commands, and inheritance.</span>
+						</button>
+					{/if}
+				</Card.Content>
+			</Card.Root>
+		{/if}
 	{/if}
 </section>
