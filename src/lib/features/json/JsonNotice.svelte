@@ -2,14 +2,17 @@
 	import AlertCircleIcon from "@lucide/svelte/icons/alert-circle";
 	import CheckCircle2Icon from "@lucide/svelte/icons/check-circle-2";
 	import LightbulbIcon from "@lucide/svelte/icons/lightbulb";
+	import XIcon from "@lucide/svelte/icons/x";
+	import { Button } from "$lib/components/ui/button/index.js";
 
 	type Props = {
 		type: "success" | "error" | "repair";
 		title: string;
 		description: string;
+		onDismiss?: () => void;
 	};
 
-	let { type, title, description }: Props = $props();
+	let { type, title, description, onDismiss }: Props = $props();
 </script>
 
 <div
@@ -28,10 +31,15 @@
 	{:else}
 		<CheckCircle2Icon class="mt-0.5 size-4 shrink-0 text-emerald-400" />
 	{/if}
-	<div class="min-w-0">
+	<div class="min-w-0 flex-1">
 		<p class="font-medium">{title}</p>
 		<p class={["mt-1 wrap-break-word text-xs", type === "error" ? "text-destructive" : "text-muted-foreground"]}>
 			{description}
 		</p>
 	</div>
+	{#if onDismiss}
+		<Button variant="ghost" size="icon-xs" onclick={onDismiss} title="Dismiss notification">
+			<XIcon />
+		</Button>
+	{/if}
 </div>

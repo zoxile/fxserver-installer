@@ -10,6 +10,7 @@
 	import { onMount } from "svelte";
 	import * as Card from "$lib/components/ui/card/index.js";
 	import { Button } from "$lib/components/ui/button/index.js";
+	import { Notice } from "$lib/components/ui/notice/index.js";
 	import { log } from "$lib/core/logger.svelte";
 	import { openExternalUrl } from "$lib/core/openExternal";
 	import { getInstallPath, loadInstallPath } from "$lib/core/paths.svelte";
@@ -92,12 +93,7 @@
 	</div>
 
 	{#if error}
-		<div class="rounded-sm border border-red-400/30 bg-red-400/10 px-4 py-3 text-sm text-red-100">
-			<div class="flex items-start gap-2">
-				<AlertCircleIcon class="mt-0.5 size-4 shrink-0" />
-				<p>{error}</p>
-			</div>
-		</div>
+		<Notice tone="error" message={error} onDismiss={() => (error = "")} class="px-4 py-3 text-sm" />
 	{/if}
 
 	{#if metadata}

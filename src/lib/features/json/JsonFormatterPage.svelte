@@ -154,7 +154,7 @@
 	</div>
 
 	{#if notice}
-		<JsonNotice {...notice} />
+		<JsonNotice {...notice} onDismiss={() => (notice = null)} />
 	{/if}
 
 	<div class="grid gap-4 xl:grid-cols-12">

@@ -1,6 +1,4 @@
 <script lang="ts">
-	import AlertCircleIcon from "@lucide/svelte/icons/alert-circle";
-	import CheckCircle2Icon from "@lucide/svelte/icons/check-circle-2";
 	import ClipboardIcon from "@lucide/svelte/icons/clipboard";
 	import FileTextIcon from "@lucide/svelte/icons/file-text";
 	import FolderOpenIcon from "@lucide/svelte/icons/folder-open";
@@ -11,6 +9,7 @@
 	import { Button } from "$lib/components/ui/button/index.js";
 	import { Checkbox } from "$lib/components/ui/checkbox/index.js";
 	import { Input } from "$lib/components/ui/input/index.js";
+	import { Notice } from "$lib/components/ui/notice/index.js";
 	import * as Select from "$lib/components/ui/select/index.js";
 	import { log } from "$lib/core/logger.svelte";
 	import { chooseFolder } from "$lib/core/selectFolder";
@@ -258,16 +257,7 @@
 			</div>
 
 			{#if notice}
-				<div class={`rounded-sm border px-3 py-2 text-xs ${noticeLevel === "success" ? "border-emerald-400/30 bg-emerald-400/10 text-emerald-100" : "border-red-400/30 bg-red-400/10 text-red-100"}`}>
-					<div class="flex items-start gap-2">
-						{#if noticeLevel === "success"}
-							<CheckCircle2Icon class="mt-0.5 size-3.5 shrink-0" />
-						{:else}
-							<AlertCircleIcon class="mt-0.5 size-3.5 shrink-0" />
-						{/if}
-						<p>{notice}</p>
-					</div>
-				</div>
+				<Notice tone={noticeLevel} message={notice} onDismiss={() => (notice = "")} />
 			{/if}
 
 			<div class="max-h-160 overflow-auto rounded-sm border border-border bg-background/60">

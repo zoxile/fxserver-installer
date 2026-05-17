@@ -17,6 +17,7 @@
 	import * as Select from "$lib/components/ui/select/index.js";
 	import { Button } from "$lib/components/ui/button/index.js";
 	import { Input } from "$lib/components/ui/input/index.js";
+	import { Notice } from "$lib/components/ui/notice/index.js";
 	import { log } from "$lib/core/logger.svelte";
 	import {
 		addConfigEntry,
@@ -408,14 +409,7 @@
 	</div>
 
 	{#if notice}
-		<div class={`flex items-start gap-2 rounded-sm border px-3 py-2 text-sm ${noticeClass(notice.type)}`}>
-			{#if notice.type === "success"}
-				<CheckCircle2Icon class="mt-0.5 size-4 shrink-0" />
-			{:else}
-				<AlertTriangleIcon class="mt-0.5 size-4 shrink-0" />
-			{/if}
-			<span>{notice.message}</span>
-		</div>
+		<Notice tone={notice.type} message={notice.message} onDismiss={() => (notice = null)} class="text-sm" />
 	{/if}
 
 	<div class="grid items-stretch gap-4 xl:grid-cols-12">
