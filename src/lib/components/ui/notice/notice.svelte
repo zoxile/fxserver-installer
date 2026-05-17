@@ -31,11 +31,11 @@
 </script>
 
 <div class={`rounded-sm border px-3 py-2 text-xs ${toneClass} ${className}`} role={tone === "error" ? "alert" : "status"}>
-	<div class="flex items-start gap-2">
+	<div class="flex items-center gap-2">
 		{#if tone === "success"}
-			<CheckCircle2Icon class="mt-0.5 size-3.5 shrink-0" />
+			<CheckCircle2Icon class="size-3.5 shrink-0" />
 		{:else}
-			<AlertCircleIcon class="mt-0.5 size-3.5 shrink-0" />
+			<AlertCircleIcon class="size-3.5 shrink-0" />
 		{/if}
 		<div class="min-w-0 flex-1">
 			{#if title}
