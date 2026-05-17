@@ -48,6 +48,17 @@
 	let dbCredentialsReady = $state(Boolean(databaseSession.credentials));
 	let dbNotice = $state("");
 	let dbNoticeLevel = $state<"success" | "error">("success");
+	let serverPrincipalIdentifier = $state("");
+	let serverPrincipalGroup = $state("group.admin");
+	let serverPrincipalComment = $state("");
+	let acePrincipal = $state("group.admin");
+	let aceObject = $state("command");
+	let aceAccess = $state("allow");
+	let inheritanceChild = $state("group.admin");
+	let inheritanceParent = $state("group.mod");
+	let resourceName = $state("");
+	let resourceAceObject = $state("command");
+	let resourceAceAccess = $state("allow");
 
 	const profileOptions = $derived(fxserverSettings.profiles.map((profileName) => ({ value: profileName, label: profileName })));
 	const filteredFiles = $derived(
@@ -362,38 +373,63 @@
 		noticeLevel = "success";
 	}
 
-	function addServerAdminPrincipal() {
+	function cleanCfgValue(value: string) {
+		return value.trim().replace(/[\r\n]+/g, " ");
+	}
+
+	function addServerPrincipal() {
+		const identifier = cleanCfgValue(serverPrincipalIdentifier);
+		const group = cleanCfgValue(serverPrincipalGroup);
+		const comment = cleanCfgValue(serverPrincipalComment);
+		if (!identifier || !group) {
+			notice = "Enter both an identifier and a group before adding a principal.";
+			noticeLevel = "error";
+			return;
+		}
+
 		appendToConfigFile(
 			selectServerCfg(),
-			"## Permissions ##\nadd_principal identifier.fivem:14460984 group.admin #Zoxilee",
+			`## Permissions ##\nadd_principal ${identifier} ${group}${comment ? ` #${comment.replace(/^#\s*/, "")}` : ""}`,
 			"Server permissions",
 		);
 	}
 
-	function addPermissionsTemplate() {
-		appendToConfigFile(
-			selectPermissionsCfg(),
-			`add_ace group.admin command allow # allow all commands
+	function addPermissionsAce() {
+		const principal = cleanCfgValue(acePrincipal);
+		const object = cleanCfgValue(aceObject);
+		const access = cleanCfgValue(aceAccess);
+		if (!principal || !object || !access) {
+			notice = "Enter a principal, permission, and access value before adding an ACE rule.";
+			noticeLevel = "error";
+			return;
+		}
 
-# Resources
-add_ace resource.qbx_core command allow # Allow qbx_core to execute commands
+		appendToConfigFile(selectPermissionsCfg(), `add_ace ${principal} ${object} ${access}`, "permissions.cfg");
+	}
 
-# Ox_lib
-add_ace resource.ox_lib command.add_ace allow
-add_ace resource.ox_lib command.remove_ace allow
-add_ace resource.ox_lib command.add_principal allow
-add_ace resource.ox_lib command.remove_principal allow
+	function addPermissionsInheritance() {
+		const child = cleanCfgValue(inheritanceChild);
+		const parent = cleanCfgValue(inheritanceParent);
+		if (!child || !parent) {
+			notice = "Enter both groups before adding inheritance.";
+			noticeLevel = "error";
+			return;
+		}
 
-# Ace Groups
-add_ace group.admin admin allow
-add_ace group.mod mod allow
-add_ace group.support support allow
+		appendToConfigFile(selectPermissionsCfg(), `add_principal ${child} ${parent}`, "permissions.cfg");
+	}
 
-# Inheritance
-add_principal group.admin group.mod
-add_principal group.mod group.support`,
-			"permissions.cfg",
-		);
+	function addResourceAce() {
+		const resource = cleanCfgValue(resourceName).replace(/^resource\./, "");
+		const object = cleanCfgValue(resourceAceObject);
+		const access = cleanCfgValue(resourceAceAccess);
+		if (!resource || !object || !access) {
+			notice = "Enter a resource, permission, and access value before adding a resource ACE.";
+			noticeLevel = "error";
+			return;
+		}
+
+		appendToConfigFile(selectPermissionsCfg(), `add_ace resource.${resource} ${object} ${access}`, "permissions.cfg");
 	}
 
 	function getCfgValue(content: string, command: string) {
@@ -902,20 +938,82 @@ add_principal group.mod group.support`,
 			<Card.Root class="overflow-hidden rounded-sm border-border bg-card shadow-sm">
 				<Card.Header class="border-b border-border pb-4">
 					<Card.Title>Permissions Helpers</Card.Title>
-					<Card.Description>Add the helper snippet that matches the selected config file.</Card.Description>
+					<Card.Description>Add permission lines for the selected config file without hunting through the editor.</Card.Description>
 				</Card.Header>
-				<Card.Content class="grid gap-3 md:grid-cols-2">
+				<Card.Content class="space-y-4">
 					{#if serverCfgSelected}
-						<button type="button" class="rounded-sm border border-border bg-background/60 px-3 py-3 text-left transition-colors hover:bg-accent" onclick={addServerAdminPrincipal}>
-							<span class="block font-mono text-xs text-foreground">server.cfg admin principal</span>
-							<span class="mt-1 block text-xs leading-5 text-muted-foreground">Adds `add_principal identifier.fivem:14460984 group.admin #Zoxilee` under a permissions heading.</span>
-						</button>
+						<div class="grid gap-3 md:grid-cols-[minmax(0,1.2fr)_minmax(0,0.8fr)_minmax(0,0.8fr)_auto] md:items-end">
+							<label class="grid gap-2">
+								<span class="text-xs font-medium text-muted-foreground">Player Identifier</span>
+								<Input bind:value={serverPrincipalIdentifier} placeholder="identifier.fivem:12345678" class="rounded-sm font-mono text-xs" />
+							</label>
+							<label class="grid gap-2">
+								<span class="text-xs font-medium text-muted-foreground">Group</span>
+								<Input bind:value={serverPrincipalGroup} placeholder="group.admin" class="rounded-sm font-mono text-xs" />
+							</label>
+							<label class="grid gap-2">
+								<span class="text-xs font-medium text-muted-foreground">Comment</span>
+								<Input bind:value={serverPrincipalComment} placeholder="Player name" class="rounded-sm font-mono text-xs" />
+							</label>
+							<Button onclick={addServerPrincipal} title="Add this principal to server.cfg">
+								<ListPlusIcon />
+								Add Principal
+							</Button>
+						</div>
 					{/if}
 					{#if permissionsCfgSelected}
-						<button type="button" class="rounded-sm border border-border bg-background/60 px-3 py-3 text-left transition-colors hover:bg-accent" onclick={addPermissionsTemplate}>
-							<span class="block font-mono text-xs text-foreground">permissions.cfg ACE template</span>
-							<span class="mt-1 block text-xs leading-5 text-muted-foreground">Adds admin/mod/support groups, qbx_core, ox_lib commands, and inheritance.</span>
-						</button>
+						<div class="space-y-4">
+							<div class="grid gap-3 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_10rem_auto] md:items-end">
+								<label class="grid gap-2">
+									<span class="text-xs font-medium text-muted-foreground">Principal</span>
+									<Input bind:value={acePrincipal} placeholder="group.admin" class="rounded-sm font-mono text-xs" />
+								</label>
+								<label class="grid gap-2">
+									<span class="text-xs font-medium text-muted-foreground">Permission</span>
+									<Input bind:value={aceObject} placeholder="command" class="rounded-sm font-mono text-xs" />
+								</label>
+								<label class="grid gap-2">
+									<span class="text-xs font-medium text-muted-foreground">Access</span>
+									<Input bind:value={aceAccess} placeholder="allow" class="rounded-sm font-mono text-xs" />
+								</label>
+								<Button onclick={addPermissionsAce} title="Add this ACE rule to permissions.cfg">
+									<ListPlusIcon />
+									Add ACE
+								</Button>
+							</div>
+							<div class="grid gap-3 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] md:items-end">
+								<label class="grid gap-2">
+									<span class="text-xs font-medium text-muted-foreground">Child Group</span>
+									<Input bind:value={inheritanceChild} placeholder="group.admin" class="rounded-sm font-mono text-xs" />
+								</label>
+								<label class="grid gap-2">
+									<span class="text-xs font-medium text-muted-foreground">Inherits From</span>
+									<Input bind:value={inheritanceParent} placeholder="group.mod" class="rounded-sm font-mono text-xs" />
+								</label>
+								<Button variant="outline" onclick={addPermissionsInheritance} title="Add this group inheritance to permissions.cfg">
+									<ListPlusIcon />
+									Add Inheritance
+								</Button>
+							</div>
+							<div class="grid gap-3 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_10rem_auto] md:items-end">
+								<label class="grid gap-2">
+									<span class="text-xs font-medium text-muted-foreground">Resource</span>
+									<Input bind:value={resourceName} placeholder="qbx_core" class="rounded-sm font-mono text-xs" />
+								</label>
+								<label class="grid gap-2">
+									<span class="text-xs font-medium text-muted-foreground">Permission</span>
+									<Input bind:value={resourceAceObject} placeholder="command" class="rounded-sm font-mono text-xs" />
+								</label>
+								<label class="grid gap-2">
+									<span class="text-xs font-medium text-muted-foreground">Access</span>
+									<Input bind:value={resourceAceAccess} placeholder="allow" class="rounded-sm font-mono text-xs" />
+								</label>
+								<Button variant="outline" onclick={addResourceAce} title="Add this resource ACE to permissions.cfg">
+									<ListPlusIcon />
+									Add Resource ACE
+								</Button>
+							</div>
+						</div>
 					{/if}
 				</Card.Content>
 			</Card.Root>
