@@ -9,6 +9,7 @@
 	import QueryConsole from "./QueryConsole.svelte";
 	import StatusOverview from "./StatusOverview.svelte";
 	import UserManagementCard from "./UserManagementCard.svelte";
+	import { databaseSession, rememberDatabaseCredentials } from "$lib/core/databaseSession.svelte";
 	import { log } from "$lib/core/logger.svelte";
 	import {
 		deleteMariaDBUser,
@@ -79,11 +80,11 @@
 		privileges: string;
 	} | null>(null);
 	let credentials = $state<MariaDBCredentials>({
-		host: "127.0.0.1",
-		port: 3306,
-		username: "root",
-		password: "",
-		database: "",
+		host: databaseSession.credentials?.host ?? "127.0.0.1",
+		port: databaseSession.credentials?.port ?? 3306,
+		username: databaseSession.credentials?.username ?? "root",
+		password: databaseSession.credentials?.password ?? "",
+		database: databaseSession.credentials?.database ?? "",
 	});
 	let installOptions = $state<MariaDBInstallOptions>({
 		rootPassword: "",
@@ -292,6 +293,7 @@
 			users = loadedUsers;
 			databases = loadedDatabases;
 			credentialsReady = true;
+			rememberDatabaseCredentials(credentials);
 			message = "Admin credentials applied.";
 			if (credentials.database && loadedDatabases.includes(credentials.database)) {
 				backupDatabaseName ||= credentials.database;
@@ -452,10 +454,10 @@
 			<StatusOverview {status} {busy} onRefresh={refreshStatus} onStart={startService} onStop={stopService} onRestart={restartService} />
 		</div>
 		<div class="xl:col-span-6">
-			<ConnectionCard bind:credentials {busy} {credentialsReady} {connectionError} onApply={applyCredentials} />
+			<ConnectionCard bind:credentials {busy} {credentialsReady} {connectionError} connectionString={databaseSession.connectionString} onApply={applyCredentials} />
 		</div>
 		<div class="xl:col-span-5">
-			<UserManagementCard bind:userConfig {busy} {credentialsReady} onSave={saveUser} />
+			<UserManagementCard bind:userConfig {busy} {credentialsReady} {databases} onSave={saveUser} />
 		</div>
 		<div class="xl:col-span-7 xl:row-span-2">
 			<ExistingUsersCard
@@ -465,6 +467,7 @@
 				{selectedUser}
 				{selectedAccess}
 				bind:editingUser
+				{databases}
 				onRefresh={refreshUsers}
 				onEdit={editUser}
 				onSave={saveExistingUser}

@@ -8,6 +8,7 @@
 	import * as Card from "$lib/components/ui/card/index.js";
 	import { Button } from "$lib/components/ui/button/index.js";
 	import { Input } from "$lib/components/ui/input/index.js";
+	import * as Select from "$lib/components/ui/select/index.js";
 	import type { MariaDBUser, MariaDBUserAccess } from "$lib/modules/mariadb";
 
 	type EditableUser = {
@@ -25,13 +26,15 @@
 		selectedUser: MariaDBUser | null;
 		selectedAccess: MariaDBUserAccess | null;
 		editingUser: EditableUser | null;
+		databases: string[];
 		onRefresh: () => void;
 		onEdit: (user: MariaDBUser) => void;
 		onSave: () => void;
 		onDelete: (user: MariaDBUser) => void;
 	};
 
-	let { busy, credentialsReady, users, selectedUser, selectedAccess, editingUser = $bindable(), onRefresh, onEdit, onSave, onDelete }: Props = $props();
+	let { busy, credentialsReady, users, selectedUser, selectedAccess, editingUser = $bindable(), databases, onRefresh, onEdit, onSave, onDelete }: Props = $props();
+	const databaseOptions = $derived(databases.map((database) => ({ value: database, label: database })));
 </script>
 
 <Card.Root class="h-full min-h-136 rounded-md border-border bg-card shadow-sm">
@@ -166,7 +169,22 @@
 					</label>
 					<label class="grid gap-2">
 						<span class="text-xs font-medium text-muted-foreground">Database</span>
-						<Input bind:value={editingUser.database} disabled={!credentialsReady} placeholder="fxserver" title="Database to grant permissions on." />
+						<Select.Root bind:value={editingUser.database} type="single" items={databaseOptions} disabled={!credentialsReady || !databaseOptions.length}>
+							<Select.Trigger title="Choose database to grant permissions on" class="w-full rounded-sm font-mono text-xs">
+								{editingUser.database || "Choose database"}
+							</Select.Trigger>
+							<Select.Content class="rounded-sm">
+								{#if databaseOptions.length}
+									{#each databaseOptions as option}
+										<Select.Item value={option.value} label={option.label}>
+											{option.label}
+										</Select.Item>
+									{/each}
+								{:else}
+									<Select.Item value="" label="No databases loaded" disabled>No databases loaded</Select.Item>
+								{/if}
+							</Select.Content>
+						</Select.Root>
 					</label>
 					<label class="grid gap-2 sm:col-span-2">
 						<span class="text-xs font-medium text-muted-foreground">Permissions</span>
