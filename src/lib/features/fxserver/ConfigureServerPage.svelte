@@ -1,6 +1,6 @@
 <script lang="ts">
 	import AlertCircleIcon from "@lucide/svelte/icons/alert-circle";
-	import CheckCircle2Icon from "@lucide/svelte/icons/check-circle-2";
+	import ClipboardIcon from "@lucide/svelte/icons/clipboard";
 	import FileTextIcon from "@lucide/svelte/icons/file-text";
 	import FolderOpenIcon from "@lucide/svelte/icons/folder-open";
 	import KeyRoundIcon from "@lucide/svelte/icons/key-round";
@@ -13,8 +13,11 @@
 	import * as Card from "$lib/components/ui/card/index.js";
 	import { Button } from "$lib/components/ui/button/index.js";
 	import { Input } from "$lib/components/ui/input/index.js";
+	import { Notice } from "$lib/components/ui/notice/index.js";
 	import * as Select from "$lib/components/ui/select/index.js";
 	import { chooseFolder } from "$lib/core/selectFolder";
+	import { databaseSession, formatMariaDBConnectionString, rememberDatabaseCredentials } from "$lib/core/databaseSession.svelte";
+	import { validateMariaDBCredentials, type MariaDBCredentials } from "$lib/modules/mariadb";
 	import { readServerConfig, saveServerConfig, type ServerConfigFile, type ServerConfigResult } from "$lib/modules/fxserver";
 	import { fxserverSettings, loadFxserverSettings, refreshTxDataProfiles, setServerProfile, setTxDataPath } from "./fxserverSettings.svelte";
 
@@ -32,6 +35,16 @@
 	let editorElement = $state<HTMLTextAreaElement | null>(null);
 	let gutterElement = $state<HTMLDivElement | null>(null);
 	let editorScroll = $state({ top: 0, left: 0 });
+	let dbCredentials = $state<MariaDBCredentials>({
+		host: databaseSession.credentials?.host ?? "127.0.0.1",
+		port: databaseSession.credentials?.port ?? 3306,
+		username: databaseSession.credentials?.username ?? "fxserver",
+		password: databaseSession.credentials?.password ?? "",
+		database: databaseSession.credentials?.database ?? "fxserver",
+	});
+	let dbCredentialsReady = $state(Boolean(databaseSession.credentials));
+	let dbNotice = $state("");
+	let dbNoticeLevel = $state<"success" | "error">("success");
 
 	const profileOptions = $derived(fxserverSettings.profiles.map((profileName) => ({ value: profileName, label: profileName })));
 	const filteredFiles = $derived(
@@ -52,6 +65,15 @@
 	});
 	const highlightedLines = $derived(editorContent.split("\n").map((line) => highlightCfgLine(line)));
 	const rconReady = $derived(Boolean(result?.rconPasswordFound && result?.rconlogFound));
+	const dbConnectionString = $derived(dbCredentialsReady ? formatMariaDBConnectionString(dbCredentials) : databaseSession.connectionString);
+	const popularCfgValues = $derived({
+		hostname: getCfgValue(editorContent, "sv_hostname"),
+		maxClients: getCfgValue(editorContent, "sv_maxclients"),
+		projectName: getCfgValue(editorContent, "sets sv_projectName"),
+		projectDescription: getCfgValue(editorContent, "sets sv_projectDesc"),
+		licenseKey: getCfgValue(editorContent, "sv_licenseKey"),
+		mysqlConnectionString: getCfgValue(editorContent, "set mysql_connection_string") || getCfgValue(editorContent, "setr mysql_connection_string"),
+	});
 	const rconCommands = [
 		{ command: "say <message>", description: "Send a chat message to all players." },
 		{ command: "start <resource-name>", description: "Start a server resource." },
@@ -62,6 +84,7 @@
 		{ command: "clear", description: "Clear server console output." },
 		{ command: "quit", description: "Shut down the server cleanly." },
 	];
+	const editorLineStyle = "height: 20px; line-height: 20px;";
 
 	onMount(() => {
 		loadFxserverSettings();
@@ -102,6 +125,29 @@
 		} finally {
 			busy = false;
 		}
+	}
+
+	async function validateFxDatabaseCredentials() {
+		dbCredentialsReady = false;
+		dbNotice = "";
+
+		try {
+			await validateMariaDBCredentials(dbCredentials);
+			dbCredentialsReady = true;
+			rememberDatabaseCredentials(dbCredentials);
+			dbNotice = "Database credentials validated.";
+			dbNoticeLevel = "success";
+		} catch (error) {
+			dbNotice = error instanceof Error ? error.message : String(error);
+			dbNoticeLevel = "error";
+		}
+	}
+
+	async function copyDbConnectionString() {
+		if (!dbConnectionString) return;
+		await navigator.clipboard.writeText(dbConnectionString);
+		dbNotice = "Connection string copied.";
+		dbNoticeLevel = "success";
 	}
 
 	async function chooseTxDataFolder() {
@@ -273,6 +319,49 @@
 		noticeLevel = "success";
 	}
 
+	function getCfgValue(content: string, command: string) {
+		const lowerCommand = command.toLowerCase();
+		const line = content.split("\n").find((item) => {
+			const trimmed = item.trimStart();
+			return !trimmed.startsWith("#") && !trimmed.startsWith("//") && trimmed.toLowerCase().startsWith(lowerCommand);
+		});
+		if (!line) return "";
+		const value = line.trimStart().slice(command.length).trim();
+		return value.replace(/^"(.*)"$/, "$1");
+	}
+
+	function setPopularCfgValue(command: string, value: string, quote = true) {
+		const serverCfg = selectServerCfg();
+		if (!serverCfg) {
+			notice = "server.cfg was not found in the resolved server data path.";
+			noticeLevel = "error";
+			return;
+		}
+
+		const lineValue = quote ? `"${value.replace(/"/g, '\\"')}"` : value;
+		const nextLine = `${command} ${lineValue}`.trimEnd();
+		const lowerCommand = command.toLowerCase();
+		const lines = editorContent.split("\n");
+		const index = lines.findIndex((line) => {
+			const trimmed = line.trimStart();
+			return !trimmed.startsWith("#") && !trimmed.startsWith("//") && trimmed.toLowerCase().startsWith(lowerCommand);
+		});
+
+		if (index >= 0) {
+			lines[index] = nextLine;
+		} else {
+			if (lines.length && lines.at(-1)?.trim()) lines.push("");
+			lines.push(nextLine);
+		}
+
+		editorContent = lines.join("\n");
+		drafts = { ...drafts, [serverCfg.path]: editorContent };
+	}
+
+	function updatePopularValue(command: string, event: Event, quote = true) {
+		setPopularCfgValue(command, (event.currentTarget as HTMLInputElement).value, quote);
+	}
+
 	function formatModified(file: ServerConfigFile) {
 		if (!file.modified) return "Unknown";
 		return new Date(file.modified * 1000).toLocaleString(undefined, {
@@ -422,20 +511,65 @@
 			</div>
 
 			{#if fxserverSettings.profileError}
-				<div class="rounded-sm border border-red-400/30 bg-red-400/10 px-3 py-2 text-xs text-red-100">{fxserverSettings.profileError}</div>
+				<Notice tone="error" message={fxserverSettings.profileError} onDismiss={() => (fxserverSettings.profileError = "")} />
 			{/if}
 
 			{#if notice}
-				<div class={`rounded-sm border px-3 py-2 text-xs ${noticeLevel === "success" ? "border-emerald-400/30 bg-emerald-400/10 text-emerald-100" : "border-red-400/30 bg-red-400/10 text-red-100"}`}>
-					<div class="flex items-start gap-2">
-						{#if noticeLevel === "success"}
-							<CheckCircle2Icon class="mt-0.5 size-3.5 shrink-0" />
-						{:else}
-							<AlertCircleIcon class="mt-0.5 size-3.5 shrink-0" />
-						{/if}
-						<p>{notice}</p>
-					</div>
+				<Notice tone={noticeLevel} message={notice} onDismiss={() => (notice = "")} />
+			{/if}
+		</Card.Content>
+	</Card.Root>
+
+	<Card.Root class="overflow-hidden rounded-sm border-border bg-card shadow-sm">
+		<Card.Header class="border-b border-border pb-4">
+			<div class="flex items-center gap-3">
+				<div class="flex size-9 shrink-0 items-center justify-center rounded-sm border border-sky-400/30 bg-sky-400/10 text-sky-200">
+					<KeyRoundIcon class="size-4" />
 				</div>
+				<div>
+					<Card.Title>Database Connection String</Card.Title>
+					<Card.Description>Validate the database user you want FXServer resources to use, then copy the generated connection string.</Card.Description>
+				</div>
+			</div>
+		</Card.Header>
+		<Card.Content class="space-y-4">
+			<div class="grid gap-3 md:grid-cols-5">
+				<label class="grid gap-2">
+					<span class="text-xs font-medium text-muted-foreground">Host</span>
+					<Input bind:value={dbCredentials.host} placeholder="127.0.0.1" class="rounded-sm font-mono text-xs" />
+				</label>
+				<label class="grid gap-2">
+					<span class="text-xs font-medium text-muted-foreground">Port</span>
+					<Input type="number" bind:value={dbCredentials.port} placeholder="3306" class="rounded-sm font-mono text-xs" />
+				</label>
+				<label class="grid gap-2">
+					<span class="text-xs font-medium text-muted-foreground">User</span>
+					<Input bind:value={dbCredentials.username} placeholder="fxserver" class="rounded-sm font-mono text-xs" />
+				</label>
+				<label class="grid gap-2">
+					<span class="text-xs font-medium text-muted-foreground">Password</span>
+					<Input type="password" bind:value={dbCredentials.password} placeholder="User password" class="rounded-sm font-mono text-xs" />
+				</label>
+				<label class="grid gap-2">
+					<span class="text-xs font-medium text-muted-foreground">Database</span>
+					<Input bind:value={dbCredentials.database} placeholder="fxserver" class="rounded-sm font-mono text-xs" />
+				</label>
+			</div>
+			<div class="grid gap-2 lg:grid-cols-[minmax(0,1fr)_auto_auto]">
+				<code class="truncate rounded-sm border border-border bg-background/70 px-3 py-2 font-mono text-xs text-foreground">
+					{dbConnectionString || "Validate credentials to generate a connection string."}
+				</code>
+				<Button variant="outline" onclick={validateFxDatabaseCredentials} disabled={busy} title="Validate these database credentials">
+					<KeyRoundIcon />
+					Validate
+				</Button>
+				<Button variant="outline" onclick={copyDbConnectionString} disabled={!dbConnectionString} title="Copy database connection string">
+					<ClipboardIcon />
+					Copy
+				</Button>
+			</div>
+			{#if dbNotice}
+				<Notice tone={dbNoticeLevel} message={dbNotice} onDismiss={() => (dbNotice = "")} />
 			{/if}
 		</Card.Content>
 	</Card.Root>
@@ -493,6 +627,56 @@
 							<span class="mt-1 block text-xs leading-5 text-muted-foreground">{item.description}</span>
 						</button>
 					{/each}
+				</div>
+			</Card.Content>
+		</Card.Root>
+
+		<Card.Root class="overflow-hidden rounded-sm border-border bg-card shadow-sm">
+			<Card.Header class="border-b border-border pb-4">
+				<Card.Title>Popular server.cfg Values</Card.Title>
+				<Card.Description>Adjust common server settings here; the editor below stays as the source of truth.</Card.Description>
+			</Card.Header>
+			<Card.Content class="space-y-4">
+				<div class="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+					<label class="grid gap-2">
+						<span class="text-xs font-medium text-muted-foreground">Server Name</span>
+						<Input value={popularCfgValues.hostname} onchange={(event) => updatePopularValue("sv_hostname", event)} placeholder="My FiveM Server" class="rounded-sm font-mono text-xs" />
+					</label>
+					<label class="grid gap-2">
+						<span class="text-xs font-medium text-muted-foreground">Max Clients</span>
+						<Input value={popularCfgValues.maxClients} onchange={(event) => updatePopularValue("sv_maxclients", event, false)} placeholder="48" class="rounded-sm font-mono text-xs" />
+					</label>
+					<label class="grid gap-2">
+						<span class="text-xs font-medium text-muted-foreground">Project Name</span>
+						<Input value={popularCfgValues.projectName} onchange={(event) => updatePopularValue("sets sv_projectName", event)} placeholder="Qbox Roleplay" class="rounded-sm font-mono text-xs" />
+					</label>
+					<label class="grid gap-2">
+						<span class="text-xs font-medium text-muted-foreground">Project Description</span>
+						<Input value={popularCfgValues.projectDescription} onchange={(event) => updatePopularValue("sets sv_projectDesc", event)} placeholder="A FiveM roleplay server" class="rounded-sm font-mono text-xs" />
+					</label>
+					<label class="grid gap-2">
+						<span class="text-xs font-medium text-muted-foreground">License Key</span>
+						<Input value={popularCfgValues.licenseKey} onchange={(event) => updatePopularValue("sv_licenseKey", event)} placeholder="cfxk_..." class="rounded-sm font-mono text-xs" />
+					</label>
+					<label class="grid gap-2">
+						<span class="text-xs font-medium text-muted-foreground">MySQL Connection String</span>
+						<Input
+							value={popularCfgValues.mysqlConnectionString || dbConnectionString}
+							onchange={(event) => updatePopularValue("set mysql_connection_string", event)}
+							placeholder="mysql://user:pass@127.0.0.1:3306/db"
+							class="rounded-sm font-mono text-xs"
+						/>
+					</label>
+				</div>
+				<div class="flex flex-wrap gap-2">
+					<Button variant="outline" onclick={() => setPopularCfgValue("set mysql_connection_string", dbConnectionString)} disabled={!dbConnectionString} title="Use the validated database connection string">
+						<ClipboardIcon />
+						Use Validated DB String
+					</Button>
+					<Button variant="outline" onclick={autofillRconConfig} title="Add missing RCON setup lines to server.cfg">
+						<ListPlusIcon />
+						Ensure RCON
+					</Button>
 				</div>
 			</Card.Content>
 		</Card.Root>
@@ -572,7 +756,7 @@
 					<div class="grid h-160 grid-cols-[3.5rem_minmax(0,1fr)] overflow-hidden rounded-sm border border-border bg-background/70 font-mono text-xs">
 						<div bind:this={gutterElement} class="overflow-hidden border-r border-border bg-muted/30 py-3 text-right text-muted-foreground select-none">
 							{#each lineNumbers as line}
-								<div class={`h-5 px-2 leading-5 ${line === rconLineInSelectedFile ? "bg-amber-400/20 text-amber-100" : line === rconlogLineInSelectedFile ? "bg-emerald-400/20 text-emerald-100" : ""}`}>{line}</div>
+								<div style={editorLineStyle} class={`px-2 ${line === rconLineInSelectedFile ? "bg-amber-400/20 text-amber-100" : line === rconlogLineInSelectedFile ? "bg-emerald-400/20 text-emerald-100" : ""}`}>{line}</div>
 							{/each}
 						</div>
 						<div class="relative h-160 overflow-hidden">
@@ -582,7 +766,7 @@
 								aria-hidden="true"
 							>
 								{#each highlightedLines as line, index}
-									<div class={`h-5 min-w-max ${index + 1 === rconLineInSelectedFile ? "bg-amber-400/15" : index + 1 === rconlogLineInSelectedFile ? "bg-emerald-400/15" : ""}`}>{@html line}</div>
+									<div style={editorLineStyle} class={`min-w-max ${index + 1 === rconLineInSelectedFile ? "bg-amber-400/15" : index + 1 === rconlogLineInSelectedFile ? "bg-emerald-400/15" : ""}`}>{@html line}</div>
 								{/each}
 							</div>
 							<textarea
@@ -593,7 +777,8 @@
 								wrap="off"
 								onkeydown={handleEditorKeydown}
 								onscroll={syncLineNumbers}
-								class="relative h-160 w-full resize-none overflow-auto whitespace-pre bg-transparent px-3 py-3 leading-5 text-transparent caret-foreground outline-none placeholder:text-muted-foreground selection:bg-primary/35 disabled:cursor-not-allowed disabled:opacity-60"
+								style="line-height: 20px;"
+								class="relative h-160 w-full resize-none overflow-auto whitespace-pre bg-transparent px-3 py-3 text-transparent caret-foreground outline-none placeholder:text-muted-foreground selection:bg-primary/35 disabled:cursor-not-allowed disabled:opacity-60"
 								placeholder="Select a .cfg file to edit..."
 								title="Server config editor"
 							></textarea>
