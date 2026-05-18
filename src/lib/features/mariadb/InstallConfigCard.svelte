@@ -129,7 +129,7 @@
 		{/if}
 
 		<p class="rounded-sm border border-border bg-background/70 px-3 py-2 text-xs text-muted-foreground">
-			If you previously uninstalled MariaDB while preserving data, choose an empty Data Directory for a new install. MariaDB's MSI rejects non-empty data directories.
+			If preserved MariaDB data is detected, the app installs fresh binaries into an empty folder and reattaches the Windows service to the existing databases.
 		</p>
 	</Card.Content>
 </Card.Root>
