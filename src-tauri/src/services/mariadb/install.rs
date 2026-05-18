@@ -1,6 +1,10 @@
-use std::process::Command;
+use std::{
+    process::Command,
+    thread,
+    time::{Duration, Instant},
+};
 
-use crate::models::mariadb::MariaDBInstallOptions;
+use crate::{models::mariadb::MariaDBInstallOptions, services::mariadb::detect::detect_mariadb};
 
 pub fn install_mariadb(options: MariaDBInstallOptions) -> Result<String, String> {
     let override_args = build_msi_overrides(options)?;
@@ -23,14 +27,45 @@ pub fn install_mariadb(options: MariaDBInstallOptions) -> Result<String, String>
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
 
     if output.status.success() {
-        Ok(if stdout.is_empty() {
+        let installer_message = if stdout.is_empty() {
             "MariaDB installation completed.".to_string()
         } else {
             stdout
+        };
+        Ok(match wait_for_install_detection(Duration::from_secs(45)) {
+            Some(detected_message) => format!("{installer_message}\n{detected_message}"),
+            None => format!("{installer_message}\nMariaDB installer exited successfully, but the app could not detect the service yet. Refresh status after Windows finishes registering the service."),
         })
     } else {
         Err(if stderr.is_empty() { stdout } else { stderr })
     }
+}
+
+fn wait_for_install_detection(timeout: Duration) -> Option<String> {
+    let started = Instant::now();
+
+    while started.elapsed() < timeout {
+        let status = detect_mariadb();
+        if status.installed {
+            return Some(format!(
+                "MariaDB detected{}{}.",
+                status
+                    .version
+                    .as_ref()
+                    .map(|version| format!(": {version}"))
+                    .unwrap_or_default(),
+                status
+                    .service_name
+                    .as_ref()
+                    .map(|service_name| format!(" ({service_name})"))
+                    .unwrap_or_default()
+            ));
+        }
+
+        thread::sleep(Duration::from_secs(2));
+    }
+
+    None
 }
 
 fn build_msi_overrides(options: MariaDBInstallOptions) -> Result<String, String> {

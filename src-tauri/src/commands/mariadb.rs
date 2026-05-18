@@ -23,8 +23,10 @@ pub fn get_mariadb_status() -> MariaDBStatus {
 }
 
 #[tauri::command]
-pub fn install_mariadb(options: MariaDBInstallOptions) -> Result<String, String> {
-    install_mariadb_service(options)
+pub async fn install_mariadb(options: MariaDBInstallOptions) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || install_mariadb_service(options))
+        .await
+        .map_err(|error| format!("MariaDB install task failed: {error}"))?
 }
 
 #[tauri::command]

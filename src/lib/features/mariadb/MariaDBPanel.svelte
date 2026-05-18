@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { onMount } from "svelte";
+	import { onMount, tick } from "svelte";
 	import BackupCard from "./BackupCard.svelte";
 	import LoaderCircleIcon from "@lucide/svelte/icons/loader-circle";
 	import ConnectionCard from "./ConnectionCard.svelte";
@@ -150,6 +150,7 @@
 		busy = true;
 		error = "";
 		message = "";
+		await tick();
 
 		try {
 			const value = await task();
@@ -173,8 +174,11 @@
 	}
 
 	async function install() {
-		await runTask(() => installMariaDB(installOptions), "MariaDB installer completed.");
-		await refreshStatus(true);
+		const result = await runTask(() => installMariaDB(installOptions), "MariaDB installer completed.");
+		if (result !== undefined) {
+			await refreshStatus(true);
+			message = status?.installed ? "MariaDB installer completed and the installation was detected." : result;
+		}
 	}
 
 	async function startService() {

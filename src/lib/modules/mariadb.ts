@@ -178,7 +178,7 @@ export function getMariaDBStatus(force = false) {
 
 export function installMariaDB(options: MariaDBInstallOptions) {
 	if (!hasTauriRuntime()) return unavailableOutsideTauri<string>();
-	return invokeMariaDB<string>("install_mariadb", { options }, "MariaDB install", () => "MariaDB installer finished.");
+	return invokeMariaDB<string>("install_mariadb", { options }, "MariaDB install", (output) => output.trim() || "MariaDB installer finished.");
 }
 
 export function startMariaDBService(serviceName?: string | null) {
