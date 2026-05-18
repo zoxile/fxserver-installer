@@ -42,6 +42,14 @@ pub struct MariaDBInstallOptions {
 
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
+pub struct MariaDBPackageInfo {
+    pub latest_version: Option<String>,
+    pub installed_package_version: Option<String>,
+    pub update_available: bool,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct MariaDBUserConfig {
     pub username: String,
     pub password: String,

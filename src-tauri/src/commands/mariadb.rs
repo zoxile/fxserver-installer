@@ -1,13 +1,16 @@
 use crate::{
     models::mariadb::{
         MariaDBBackupOptions, MariaDBBackupResult, MariaDBCredentials, MariaDBInstallOptions,
-        MariaDBQueryResult, MariaDBStatus, MariaDBUser, MariaDBUserAccess, MariaDBUserConfig,
-        MariaDBUserUpdateConfig,
+        MariaDBPackageInfo, MariaDBQueryResult, MariaDBStatus, MariaDBUser, MariaDBUserAccess,
+        MariaDBUserConfig, MariaDBUserUpdateConfig,
     },
     services::mariadb::{
         backup::create_backup,
         detect::detect_mariadb,
-        install::install_mariadb as install_mariadb_service,
+        install::{
+            get_package_info, install_mariadb as install_mariadb_service,
+            uninstall_mariadb as uninstall_mariadb_service, update_mariadb as update_mariadb_service,
+        },
         query::{execute_query, list_databases, list_tables, validate_connection},
         service::{restart_service, start_service, stop_service},
         users::{
@@ -27,6 +30,27 @@ pub async fn install_mariadb(options: MariaDBInstallOptions) -> Result<String, S
     tauri::async_runtime::spawn_blocking(move || install_mariadb_service(options))
         .await
         .map_err(|error| format!("MariaDB install task failed: {error}"))?
+}
+
+#[tauri::command]
+pub async fn get_mariadb_package_info() -> Result<MariaDBPackageInfo, String> {
+    tauri::async_runtime::spawn_blocking(get_package_info)
+        .await
+        .map_err(|error| format!("MariaDB package info task failed: {error}"))
+}
+
+#[tauri::command]
+pub async fn uninstall_mariadb() -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(uninstall_mariadb_service)
+        .await
+        .map_err(|error| format!("MariaDB uninstall task failed: {error}"))?
+}
+
+#[tauri::command]
+pub async fn update_mariadb() -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(update_mariadb_service)
+        .await
+        .map_err(|error| format!("MariaDB update task failed: {error}"))?
 }
 
 #[tauri::command]

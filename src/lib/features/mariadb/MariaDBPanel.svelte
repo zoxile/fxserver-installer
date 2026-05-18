@@ -16,6 +16,7 @@
 		executeMariaDBQuery,
 		backupMariaDB,
 		getDefaultMariaDBBackupOutputDir,
+		getMariaDBPackageInfo,
 		getMariaDBStatus,
 		getMariaDBUserAccess,
 		installMariaDB,
@@ -26,11 +27,14 @@
 		saveMariaDBUser,
 		startMariaDBService,
 		stopMariaDBService,
+		uninstallMariaDB,
+		updateMariaDB,
 		updateMariaDBUser,
 		validateMariaDBCredentials,
 		type MariaDBBackupOptions,
 		type MariaDBCredentials,
 		type MariaDBInstallOptions,
+		type MariaDBPackageInfo,
 		type MariaDBQueryResult,
 		type MariaDBStatus,
 		type MariaDBUser,
@@ -38,9 +42,11 @@
 	} from "$lib/modules/mariadb";
 
 	let status = $state<MariaDBStatus | null>(null);
+	let packageInfo = $state<MariaDBPackageInfo | null>(null);
 	let busy = $state(false);
 	let message = $state("");
 	let error = $state("");
+	let installStage = $state("");
 	let credentialsReady = $state(false);
 	let connectionError = $state("");
 	let query = $state("SELECT VERSION();");
@@ -115,6 +121,7 @@
 
 		const timer = window.setTimeout(() => {
 			void refreshStatus(false);
+			void refreshPackageInfo();
 		}, 80);
 
 		return () => window.clearTimeout(timer);
@@ -165,6 +172,13 @@
 		}
 	}
 
+	function setStage(stage: string) {
+		installStage = stage;
+		if (stage) {
+			log(stage, { scope: "mariadb.ui" });
+		}
+	}
+
 	async function refreshStatus(force = true) {
 		await runTask(
 			() => getMariaDBStatus(force),
@@ -173,12 +187,61 @@
 		);
 	}
 
+	async function refreshPackageInfo() {
+		await runTask(
+			() => getMariaDBPackageInfo(),
+			"MariaDB package details refreshed.",
+			(value) => (packageInfo = value),
+		);
+	}
+
 	async function install() {
+		setStage(`Preparing MariaDB ${packageInfo?.latestVersion ?? "installer"} package. Approve the Windows administrator prompt if it appears.`);
 		const result = await runTask(() => installMariaDB(installOptions), "MariaDB installer completed.");
 		if (result !== undefined) {
+			setStage("Installer finished. Verifying MariaDB service and package details.");
 			await refreshStatus(true);
+			await refreshPackageInfo();
 			message = status?.installed ? "MariaDB installer completed and the installation was detected." : result;
 		}
+		setStage("");
+	}
+
+	async function uninstall() {
+		if (!status?.installed) return;
+		const confirmed = window.confirm("Uninstall MariaDB? The app will preserve the MariaDB data directory and databases.");
+		if (!confirmed) {
+			log("MariaDB uninstall cancelled by user.", { level: "warn", scope: "mariadb.ui" });
+			return;
+		}
+
+		setStage("Preparing MariaDB uninstall. Windows will ask for administrator permission; press Yes to remove the service while preserving databases and data files.");
+		const result = await runTask(() => uninstallMariaDB(), "MariaDB uninstalled.");
+		if (result !== undefined) {
+			setStage("Uninstall finished. Refreshing MariaDB status and package details.");
+			credentialsReady = false;
+			users = [];
+			databases = [];
+			selectedUser = null;
+			selectedAccess = null;
+			await refreshStatus(true);
+			await refreshPackageInfo();
+			message = result;
+		}
+		setStage("");
+	}
+
+	async function update() {
+		if (!status?.installed) return;
+		setStage(`Preparing MariaDB update to ${packageInfo?.latestVersion ?? "the recommended version"}. Approve the Windows administrator prompt if it appears.`);
+		const result = await runTask(() => updateMariaDB(), "MariaDB update completed.");
+		if (result !== undefined) {
+			setStage("Update finished. Verifying MariaDB status and package details.");
+			await refreshStatus(true);
+			await refreshPackageInfo();
+			message = result;
+		}
+		setStage("");
 	}
 
 	async function startService() {
@@ -451,11 +514,11 @@
 	<div class="grid gap-4 xl:grid-cols-12">
 		{#if status && !status.installed}
 			<div class="xl:col-span-12">
-				<InstallConfigCard bind:installOptions {busy} onInstall={install} />
+				<InstallConfigCard bind:installOptions {busy} {packageInfo} {installStage} onInstall={install} />
 			</div>
 		{/if}
 		<div class="xl:col-span-6">
-			<StatusOverview {status} {busy} onRefresh={refreshStatus} onStart={startService} onStop={stopService} onRestart={restartService} />
+			<StatusOverview {status} {packageInfo} {busy} onRefresh={refreshStatus} onStart={startService} onStop={stopService} onRestart={restartService} onUpdate={update} onUninstall={uninstall} />
 		</div>
 		<div class="xl:col-span-6">
 			<ConnectionCard bind:credentials {busy} {credentialsReady} {connectionError} onApply={applyCredentials} />

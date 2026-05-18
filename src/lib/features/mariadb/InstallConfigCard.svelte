@@ -4,15 +4,17 @@
 	import * as Card from "$lib/components/ui/card/index.js";
 	import { Button } from "$lib/components/ui/button/index.js";
 	import { Input } from "$lib/components/ui/input/index.js";
-	import type { MariaDBInstallOptions } from "$lib/modules/mariadb";
+	import type { MariaDBInstallOptions, MariaDBPackageInfo } from "$lib/modules/mariadb";
 
 	type Props = {
 		busy: boolean;
+		packageInfo: MariaDBPackageInfo | null;
+		installStage: string;
 		installOptions: MariaDBInstallOptions;
 		onInstall: () => void;
 	};
 
-	let { busy, installOptions = $bindable(), onInstall }: Props = $props();
+	let { busy, packageInfo, installStage, installOptions = $bindable(), onInstall }: Props = $props();
 
 	const boolOptions = [
 		["allowRemoteRootAccess", "Remote root", "Allow the MariaDB root account to connect from remote hosts."],
@@ -34,7 +36,9 @@
 				</div>
 				<div class="min-w-0">
 					<Card.Title>Install Configuration</Card.Title>
-					<Card.Description>Silent MariaDB setup options passed to the Windows MSI installer.</Card.Description>
+					<Card.Description>
+						Installing {packageInfo?.latestVersion ? `MariaDB ${packageInfo.latestVersion}` : "the recommended MariaDB package"} from winget.
+					</Card.Description>
 				</div>
 			</div>
 			<Button onclick={onInstall} disabled={busy} title="Install MariaDB with these settings">
@@ -45,6 +49,23 @@
 	</Card.Header>
 
 	<Card.Content class="space-y-4">
+		<div class="grid gap-3 md:grid-cols-3">
+			<div class="rounded-sm border border-border bg-background px-3 py-2">
+				<p class="text-xs text-muted-foreground">Recommended Version</p>
+				<p class="mt-1 font-semibold">{packageInfo?.latestVersion || "Checking..."}</p>
+			</div>
+			<div class="rounded-sm border border-border bg-background px-3 py-2 md:col-span-2">
+				<p class="text-xs text-muted-foreground">Install Progress</p>
+				<p class="mt-1 text-sm font-medium">{installStage || "Ready to install."}</p>
+			</div>
+		</div>
+
+		{#if busy && installStage}
+			<p class="rounded-sm border border-primary/30 bg-primary/10 px-3 py-2 text-xs text-primary">
+				If Windows asks for administrator permission, press Yes to allow the MariaDB MSI to register the service.
+			</p>
+		{/if}
+
 		<div class="grid gap-3 md:grid-cols-3">
 			<label class="grid gap-1.5">
 				<span class="text-xs font-medium text-muted-foreground">Root Password</span>
@@ -106,5 +127,9 @@
 				Skip networking disables TCP/IP. The service can install and run, but this app's MariaDB connection tools expect localhost TCP access.
 			</p>
 		{/if}
+
+		<p class="rounded-sm border border-border bg-background/70 px-3 py-2 text-xs text-muted-foreground">
+			If you previously uninstalled MariaDB while preserving data, choose an empty Data Directory for a new install. MariaDB's MSI rejects non-empty data directories.
+		</p>
 	</Card.Content>
 </Card.Root>

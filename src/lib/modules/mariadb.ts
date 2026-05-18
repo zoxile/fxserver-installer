@@ -36,6 +36,12 @@ export interface MariaDBInstallOptions {
 	installDevelopmentFiles: boolean;
 }
 
+export interface MariaDBPackageInfo {
+	latestVersion: string | null;
+	installedPackageVersion: string | null;
+	updateAvailable: boolean;
+}
+
 export interface MariaDBUserConfig {
 	username: string;
 	password: string;
@@ -160,6 +166,14 @@ function browserPreviewStatus(): MariaDBStatus {
 	};
 }
 
+function browserPreviewPackageInfo(): MariaDBPackageInfo {
+	return {
+		latestVersion: null,
+		installedPackageVersion: null,
+		updateAvailable: false,
+	};
+}
+
 export function getMariaDBStatus(force = false) {
 	if (!force && cachedStatus) {
 		log("MariaDB status restored from the current app session cache.", { level: "debug", scope: "mariadb.status" });
@@ -179,6 +193,27 @@ export function getMariaDBStatus(force = false) {
 export function installMariaDB(options: MariaDBInstallOptions) {
 	if (!hasTauriRuntime()) return unavailableOutsideTauri<string>();
 	return invokeMariaDB<string>("install_mariadb", { options }, "MariaDB install", (output) => output.trim() || "MariaDB installer finished.");
+}
+
+export function getMariaDBPackageInfo() {
+	if (!hasTauriRuntime()) {
+		log("MariaDB package info requested in browser preview.", { level: "debug", scope: "mariadb.package" });
+		return Promise.resolve(browserPreviewPackageInfo());
+	}
+
+	return invokeMariaDB<MariaDBPackageInfo>("get_mariadb_package_info", {}, "MariaDB package info refresh", (info) =>
+		info.latestVersion ? `Recommended MariaDB version is ${info.latestVersion}.` : "MariaDB package info refreshed.",
+	);
+}
+
+export function uninstallMariaDB() {
+	if (!hasTauriRuntime()) return unavailableOutsideTauri<string>();
+	return invokeMariaDB<string>("uninstall_mariadb", {}, "MariaDB uninstall", (output) => output.trim() || "MariaDB uninstalled.");
+}
+
+export function updateMariaDB() {
+	if (!hasTauriRuntime()) return unavailableOutsideTauri<string>();
+	return invokeMariaDB<string>("update_mariadb", {}, "MariaDB update", (output) => output.trim() || "MariaDB update finished.");
 }
 
 export function startMariaDBService(serviceName?: string | null) {

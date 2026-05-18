@@ -4,20 +4,25 @@
 	import RotateCwIcon from "@lucide/svelte/icons/rotate-cw";
 	import SquareIcon from "@lucide/svelte/icons/square";
 	import ServerIcon from "@lucide/svelte/icons/server";
+	import Trash2Icon from "@lucide/svelte/icons/trash-2";
+	import UploadIcon from "@lucide/svelte/icons/upload";
 	import * as Card from "$lib/components/ui/card/index.js";
 	import { Button } from "$lib/components/ui/button/index.js";
-	import type { MariaDBStatus } from "$lib/modules/mariadb";
+	import type { MariaDBPackageInfo, MariaDBStatus } from "$lib/modules/mariadb";
 
 	type Props = {
 		status: MariaDBStatus | null;
+		packageInfo: MariaDBPackageInfo | null;
 		busy: boolean;
 		onRefresh: () => void;
 		onStart: () => void;
 		onStop: () => void;
 		onRestart: () => void;
+		onUpdate: () => void;
+		onUninstall: () => void;
 	};
 
-	let { status, busy, onRefresh, onStart, onStop, onRestart }: Props = $props();
+	let { status, packageInfo, busy, onRefresh, onStart, onStop, onRestart, onUpdate, onUninstall }: Props = $props();
 </script>
 
 <Card.Root class="h-full rounded-md border-border bg-card shadow-sm">
@@ -50,11 +55,19 @@
 			</div>
 			<div class="rounded-sm border border-border bg-background p-3">
 				<p class="text-xs text-muted-foreground">Version</p>
-				<p class="mt-1 truncate font-semibold">{status?.version || "Unknown"}</p>
+				<p class="mt-1 truncate font-semibold">{packageInfo?.installedPackageVersion || status?.version || "Unknown"}</p>
+			</div>
+			<div class="rounded-sm border border-border bg-background p-3">
+				<p class="text-xs text-muted-foreground">Recommended</p>
+				<p class="mt-1 truncate font-semibold">{packageInfo?.latestVersion || "Unknown"}</p>
 			</div>
 			<div class="rounded-sm border border-border bg-background p-3">
 				<p class="text-xs text-muted-foreground">Install Path</p>
 				<p class="mt-1 truncate font-semibold">{status?.installPath || "Unknown"}</p>
+			</div>
+			<div class="rounded-sm border border-border bg-background p-3">
+				<p class="text-xs text-muted-foreground">Update</p>
+				<p class="mt-1 truncate font-semibold">{packageInfo?.updateAvailable ? "Available" : status?.installed ? "Current" : "Not installed"}</p>
 			</div>
 		</div>
 
@@ -74,6 +87,14 @@
 			<Button variant="secondary" onclick={onRestart} disabled={busy || !status?.installed} title="Restart service">
 				<RotateCwIcon />
 				Restart
+			</Button>
+			<Button variant="outline" onclick={onUpdate} disabled={busy || !status?.installed || !packageInfo?.updateAvailable} title="Update MariaDB to the recommended package version">
+				<UploadIcon />
+				Update
+			</Button>
+			<Button variant="destructive" onclick={onUninstall} disabled={busy || !status?.installed} title="Uninstall MariaDB while preserving the data directory and databases">
+				<Trash2Icon />
+				Uninstall
 			</Button>
 		</div>
 	</Card.Content>

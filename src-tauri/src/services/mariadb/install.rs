@@ -6,14 +6,17 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use crate::{models::mariadb::MariaDBInstallOptions, services::mariadb::detect::detect_mariadb};
+use crate::{
+    models::mariadb::{MariaDBInstallOptions, MariaDBPackageInfo},
+    services::mariadb::detect::detect_mariadb,
+};
 
 const INSTALL_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 
 pub fn install_mariadb(options: MariaDBInstallOptions) -> Result<String, String> {
     let log_path = installer_log_path();
     let override_args = build_msi_overrides(options, &log_path)?;
-    let output = run_winget_install(&override_args, INSTALL_TIMEOUT)?;
+    let output = run_winget_install(&override_args, INSTALL_TIMEOUT, false)?;
 
     if output.success {
         let installer_message = if output.stdout.is_empty() {
@@ -41,32 +44,136 @@ pub fn install_mariadb(options: MariaDBInstallOptions) -> Result<String, String>
     }
 }
 
+pub fn get_package_info() -> MariaDBPackageInfo {
+    let latest_version = winget_latest_version();
+    let installed_package_version = registry_installed_package()
+        .and_then(|package| package.version)
+        .or_else(|| detect_mariadb().version);
+    let update_available = match (&installed_package_version, &latest_version) {
+        (Some(installed), Some(latest)) => compare_versions(installed, latest).is_lt(),
+        _ => false,
+    };
+
+    MariaDBPackageInfo {
+        latest_version,
+        installed_package_version,
+        update_available,
+    }
+}
+
+pub fn uninstall_mariadb() -> Result<String, String> {
+    let package = registry_installed_package()
+        .ok_or_else(|| "MariaDB MSI installation was not found in Windows uninstall registry.".to_string())?;
+    let product_code = package
+        .product_code
+        .ok_or_else(|| "MariaDB product code was not found in Windows uninstall registry.".to_string())?;
+    let log_path = installer_log_path();
+    let output = run_elevated_msiexec(
+        &[
+            "/x",
+            &product_code,
+            "/qn",
+            "/norestart",
+            "CLEANUPDATA=\"\"",
+            "/l*v",
+            &log_path.to_string_lossy(),
+        ],
+        INSTALL_TIMEOUT,
+    )?;
+
+    if !output.success {
+        return Err(format!(
+            "{}\nInstaller log: {}",
+            if output.stderr.is_empty() {
+                output.stdout
+            } else {
+                output.stderr
+            },
+            log_path.display()
+        ));
+    }
+
+    if wait_for_uninstall_detection(Duration::from_secs(45)) {
+        Ok(format!(
+            "MariaDB uninstalled. Data directory was preserved by passing CLEANUPDATA empty.\nInstaller log: {}",
+            log_path.display()
+        ))
+    } else {
+        Err(format!(
+            "MariaDB uninstall command exited, but MariaDB is still detected. Check the MSI log.\nInstaller log: {}",
+            log_path.display()
+        ))
+    }
+}
+
+pub fn update_mariadb() -> Result<String, String> {
+    let before = get_package_info().installed_package_version;
+    let log_path = installer_log_path();
+    let override_args = build_update_overrides(&log_path);
+    let output = run_winget_install(&override_args, INSTALL_TIMEOUT, true)?;
+
+    if !output.success {
+        return Err(if output.stderr.is_empty() {
+            output.stdout
+        } else {
+            output.stderr
+        });
+    }
+
+    let after = wait_for_package_version_change(before.as_deref(), Duration::from_secs(60))
+        .or_else(|| get_package_info().installed_package_version);
+
+    Ok(format!(
+        "{}\nDetected MariaDB version: {}\nInstaller log: {}",
+        if output.stdout.is_empty() {
+            "MariaDB update completed.".to_string()
+        } else {
+            output.stdout
+        },
+        after.unwrap_or_else(|| "Unknown".to_string()),
+        log_path.display()
+    ))
+}
+
 struct InstallOutput {
     success: bool,
     stdout: String,
     stderr: String,
 }
 
-fn run_winget_install(override_args: &str, timeout: Duration) -> Result<InstallOutput, String> {
-    let mut child = Command::new("winget")
-        .args([
-            "install",
-            "--id",
-            "MariaDB.Server",
-            "-e",
-            "--silent",
-            "--source",
-            "winget",
-            "--disable-interactivity",
-            "--accept-package-agreements",
-            "--accept-source-agreements",
-            "--override",
-            override_args,
-        ])
+fn run_winget_install(
+    override_args: &str,
+    timeout: Duration,
+    force: bool,
+) -> Result<InstallOutput, String> {
+    let mut args = vec![
+        "install",
+        "--id",
+        "MariaDB.Server",
+        "-e",
+        "--silent",
+        "--source",
+        "winget",
+        "--disable-interactivity",
+        "--accept-package-agreements",
+        "--accept-source-agreements",
+        "--override",
+        override_args,
+    ];
+    if force {
+        args.push("--force");
+    }
+
+    run_process("winget", &args, timeout)
+}
+
+fn run_process(command: &str, args: &[&str], timeout: Duration) -> Result<InstallOutput, String> {
+    let mut child = Command::new(command)
+        .args(args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|error| format!("Failed to start winget: {error}"))?;
+        .map_err(|error| format!("Failed to start {command}: {error}"))?;
 
     let started = Instant::now();
     loop {
@@ -103,6 +210,19 @@ fn run_winget_install(override_args: &str, timeout: Duration) -> Result<InstallO
     }
 }
 
+fn run_elevated_msiexec(args: &[&str], timeout: Duration) -> Result<InstallOutput, String> {
+    let argument_list = args
+        .iter()
+        .map(|arg| format!("'{}'", arg.replace('\'', "''")))
+        .collect::<Vec<_>>()
+        .join(",");
+    let command = format!(
+        "$process = Start-Process -FilePath 'msiexec.exe' -ArgumentList @({argument_list}) -Verb RunAs -Wait -PassThru; exit $process.ExitCode"
+    );
+
+    run_process("powershell", &["-NoProfile", "-Command", &command], timeout)
+}
+
 fn wait_for_install_detection(timeout: Duration) -> Option<String> {
     let started = Instant::now();
 
@@ -122,6 +242,35 @@ fn wait_for_install_detection(timeout: Duration) -> Option<String> {
                     .map(|service_name| format!(" ({service_name})"))
                     .unwrap_or_default()
             ));
+        }
+
+        thread::sleep(Duration::from_secs(2));
+    }
+
+    None
+}
+
+fn wait_for_uninstall_detection(timeout: Duration) -> bool {
+    let started = Instant::now();
+
+    while started.elapsed() < timeout {
+        if !detect_mariadb().installed {
+            return true;
+        }
+
+        thread::sleep(Duration::from_secs(2));
+    }
+
+    false
+}
+
+fn wait_for_package_version_change(previous: Option<&str>, timeout: Duration) -> Option<String> {
+    let started = Instant::now();
+
+    while started.elapsed() < timeout {
+        let current = get_package_info().installed_package_version;
+        if current.as_deref().is_some_and(|version| previous != Some(version)) {
+            return current;
         }
 
         thread::sleep(Duration::from_secs(2));
@@ -202,6 +351,17 @@ fn build_msi_overrides(
     Ok(properties.join(" "))
 }
 
+fn build_update_overrides(log_path: &std::path::Path) -> String {
+    [
+        "/qn".to_string(),
+        "/norestart".to_string(),
+        "/l*v".to_string(),
+        quote_arg(&log_path.to_string_lossy()),
+        "ADDLOCAL=DBInstance,Client,MYSQLSERVER,SharedLibraries".to_string(),
+    ]
+    .join(" ")
+}
+
 fn selected_features(options: &MariaDBInstallOptions) -> Vec<&'static str> {
     let mut features = vec!["DBInstance", "Client", "MYSQLSERVER", "SharedLibraries"];
     if options.install_heidi_sql {
@@ -226,6 +386,90 @@ fn push_property_bool(properties: &mut Vec<String>, name: &str, enabled: bool) {
     if enabled {
         properties.push(format!("{name}=1"));
     }
+}
+
+struct RegistryPackage {
+    product_code: Option<String>,
+    version: Option<String>,
+}
+
+fn registry_installed_package() -> Option<RegistryPackage> {
+    let output = Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-Command",
+            "$paths = 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*','HKLM:\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*'; Get-ItemProperty $paths -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -like 'MariaDB*' } | Sort-Object DisplayVersion -Descending | Select-Object -First 1 DisplayVersion,PSChildName | ConvertTo-Json -Compress",
+        ])
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if stdout.is_empty() {
+        return None;
+    }
+
+    Some(RegistryPackage {
+        product_code: extract_json_string(&stdout, "PSChildName"),
+        version: extract_json_string(&stdout, "DisplayVersion"),
+    })
+}
+
+fn winget_latest_version() -> Option<String> {
+    let output = Command::new("winget")
+        .args(["show", "--id", "MariaDB.Server", "-e", "--source", "winget"])
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("Version:").map(|value| value.trim().to_string()))
+        .filter(|value| !value.is_empty())
+}
+
+fn compare_versions(left: &str, right: &str) -> std::cmp::Ordering {
+    let left_parts = numeric_version_parts(left);
+    let right_parts = numeric_version_parts(right);
+    let max_len = left_parts.len().max(right_parts.len());
+
+    for index in 0..max_len {
+        let left_value = *left_parts.get(index).unwrap_or(&0);
+        let right_value = *right_parts.get(index).unwrap_or(&0);
+        match left_value.cmp(&right_value) {
+            std::cmp::Ordering::Equal => continue,
+            ordering => return ordering,
+        }
+    }
+
+    std::cmp::Ordering::Equal
+}
+
+fn numeric_version_parts(value: &str) -> Vec<u32> {
+    let version = value
+        .split_once("Distrib")
+        .map(|(_, version)| version)
+        .unwrap_or(value);
+
+    version
+        .split(|character: char| !character.is_ascii_digit())
+        .filter(|part| !part.is_empty())
+        .filter_map(|part| part.parse::<u32>().ok())
+        .collect()
+}
+
+fn extract_json_string(json: &str, key: &str) -> Option<String> {
+    let marker = format!("\"{key}\":\"");
+    let start = json.find(&marker)? + marker.len();
+    let rest = &json[start..];
+    let end = rest.find('"')?;
+    Some(rest[..end].replace("\\\"", "\""))
 }
 
 #[cfg(test)]
@@ -268,5 +512,12 @@ mod tests {
         assert!(!overrides.contains("ALLOWREMOTEROOTACCESS"));
         assert!(!overrides.contains("DEFAULTUSER"));
         assert!(!overrides.contains("REMOVE="));
+    }
+
+    #[test]
+    fn version_compare_handles_mariadb_version_strings() {
+        assert!(compare_versions("mariadb  Ver 15.1 Distrib 12.1.2-MariaDB", "12.2.2.0").is_lt());
+        assert!(compare_versions("12.2.2.0", "12.2.2.0").is_eq());
+        assert!(compare_versions("12.3.0", "12.2.2.0").is_gt());
     }
 }
