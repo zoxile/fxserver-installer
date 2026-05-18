@@ -9,7 +9,7 @@ use std::{
 
 use crate::{
     models::mariadb::{MariaDBInstallOptions, MariaDBPackageInfo},
-    services::mariadb::detect::detect_mariadb,
+    services::mariadb::detect::{detect_mariadb, find_service_name},
 };
 
 const INSTALL_TIMEOUT: Duration = Duration::from_secs(20 * 60);
@@ -78,9 +78,16 @@ pub fn get_package_info() -> MariaDBPackageInfo {
 }
 
 pub fn uninstall_mariadb() -> Result<String, String> {
-    let package = registry_installed_package().ok_or_else(|| {
-        "MariaDB MSI installation was not found in Windows uninstall registry.".to_string()
-    })?;
+    let service_name = find_service_name().unwrap_or_else(|| "MariaDB".to_string());
+    let package = match registry_installed_package() {
+        Some(package) => package,
+        None => {
+            cleanup_mariadb_service(&service_name)?;
+            return Ok(format!(
+                "MariaDB MSI package was not installed, but the {service_name} service was removed. Data files were preserved."
+            ));
+        }
+    };
     let product_code = package.product_code.ok_or_else(|| {
         "MariaDB product code was not found in Windows uninstall registry.".to_string()
     })?;
@@ -110,9 +117,11 @@ pub fn uninstall_mariadb() -> Result<String, String> {
         ));
     }
 
+    cleanup_mariadb_service(&service_name)?;
+
     if wait_for_uninstall_detection(Duration::from_secs(45)) {
         Ok(format!(
-            "MariaDB uninstalled. Data directory was preserved by passing CLEANUPDATA empty.\nInstaller log: {}",
+            "MariaDB uninstalled and the {service_name} service was removed. Data directory was preserved by passing CLEANUPDATA empty.\nInstaller log: {}",
             log_path.display()
         ))
     } else {
@@ -259,6 +268,40 @@ fn run_elevated_process(
     run_process("powershell", &["-NoProfile", "-Command", &command], timeout)
 }
 
+fn run_elevated_powershell_script(
+    script_name: &str,
+    script: &str,
+    timeout: Duration,
+) -> Result<InstallOutput, String> {
+    let script_path = env::temp_dir().join(format!(
+        "fxserver-installer-{script_name}-{}.ps1",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_secs())
+            .unwrap_or(0)
+    ));
+    fs::write(&script_path, script).map_err(|error| {
+        format!(
+            "Failed to prepare elevated PowerShell script {}: {error}",
+            script_path.display()
+        )
+    })?;
+
+    let output = run_elevated_process(
+        Path::new("powershell.exe"),
+        &[
+            "-NoProfile".to_string(),
+            "-ExecutionPolicy".to_string(),
+            "Bypass".to_string(),
+            "-File".to_string(),
+            script_path.to_string_lossy().to_string(),
+        ],
+        timeout,
+    );
+    let _ = fs::remove_file(&script_path);
+    output
+}
+
 fn wait_for_install_detection(service_name: &str, timeout: Duration) -> Option<String> {
     let started = Instant::now();
 
@@ -319,6 +362,42 @@ fn wait_for_uninstall_detection(timeout: Duration) -> bool {
     }
 
     false
+}
+
+fn cleanup_mariadb_service(service_name: &str) -> Result<(), String> {
+    let escaped_service_name = service_name.replace('\'', "''");
+    let script = format!(
+        r#"$ErrorActionPreference = 'SilentlyContinue'
+$serviceName = '{escaped_service_name}'
+$service = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
+if ($service) {{
+    if ($service.Status -ne 'Stopped') {{
+        Stop-Service -Name $serviceName -Force -ErrorAction SilentlyContinue
+        $service.WaitForStatus('Stopped', [TimeSpan]::FromSeconds(30))
+    }}
+    & sc.exe delete $serviceName | Out-Null
+}}
+exit 0
+"#
+    );
+
+    let output = run_elevated_powershell_script(
+        "mariadb-service-cleanup",
+        &script,
+        Duration::from_secs(90),
+    )?;
+    if output.success {
+        Ok(())
+    } else {
+        Err(format!(
+            "MariaDB package was removed, but the {service_name} service could not be removed: {}",
+            if output.stderr.is_empty() {
+                output.stdout
+            } else {
+                output.stderr
+            }
+        ))
+    }
 }
 
 fn wait_for_package_version_change(previous: Option<&str>, timeout: Duration) -> Option<String> {
