@@ -100,5 +100,11 @@
 				</label>
 			{/each}
 		</div>
+
+		{#if installOptions.skipNetworking}
+			<p class="rounded-sm border border-amber-400/30 bg-amber-400/10 px-3 py-2 text-xs text-amber-100">
+				Skip networking disables TCP/IP. The service can install and run, but this app's MariaDB connection tools expect localhost TCP access.
+			</p>
+		{/if}
 	</Card.Content>
 </Card.Root>
