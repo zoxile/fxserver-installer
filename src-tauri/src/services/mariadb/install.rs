@@ -1,8 +1,9 @@
 use std::{
+    env,
     io::Read,
     process::{Command, Stdio},
     thread,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use crate::{models::mariadb::MariaDBInstallOptions, services::mariadb::detect::detect_mariadb};
@@ -10,7 +11,8 @@ use crate::{models::mariadb::MariaDBInstallOptions, services::mariadb::detect::d
 const INSTALL_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 
 pub fn install_mariadb(options: MariaDBInstallOptions) -> Result<String, String> {
-    let override_args = build_msi_overrides(options)?;
+    let log_path = installer_log_path();
+    let override_args = build_msi_overrides(options, &log_path)?;
     let output = run_winget_install(&override_args, INSTALL_TIMEOUT)?;
 
     if output.success {
@@ -20,9 +22,15 @@ pub fn install_mariadb(options: MariaDBInstallOptions) -> Result<String, String>
             output.stdout
         };
         if let Some(detected_message) = wait_for_install_detection(Duration::from_secs(45)) {
-            Ok(format!("{installer_message}\n{detected_message}"))
+            Ok(format!(
+                "{installer_message}\n{detected_message}\nInstaller log: {}",
+                log_path.display()
+            ))
         } else {
-            Err(format!("{installer_message}\nWinget reported success, but MariaDB was not detected after the installer exited. Windows Installer may still be running in the background; close any stuck msiexec/MariaDB installer process and try again."))
+            Err(format!(
+                "{installer_message}\nWinget reported success, but MariaDB was not detected after the installer exited. Windows Installer may still be running in the background; close any stuck msiexec/MariaDB installer process and try again.\nInstaller log: {}",
+                log_path.display()
+            ))
         }
     } else {
         Err(if output.stderr.is_empty() {
@@ -122,7 +130,19 @@ fn wait_for_install_detection(timeout: Duration) -> Option<String> {
     None
 }
 
-fn build_msi_overrides(options: MariaDBInstallOptions) -> Result<String, String> {
+fn installer_log_path() -> std::path::PathBuf {
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0);
+
+    env::temp_dir().join(format!("fxserver-installer-mariadb-{timestamp}.log"))
+}
+
+fn build_msi_overrides(
+    options: MariaDBInstallOptions,
+    log_path: &std::path::Path,
+) -> Result<String, String> {
     if options.root_password.trim().is_empty() {
         return Err("Root password is required for a configured MariaDB install.".to_string());
     }
@@ -134,9 +154,12 @@ fn build_msi_overrides(options: MariaDBInstallOptions) -> Result<String, String>
     let mut properties = vec![
         "/qn".to_string(),
         "/norestart".to_string(),
+        "/l*v".to_string(),
+        quote_arg(&log_path.to_string_lossy()),
         property("PASSWORD", &options.root_password),
         property("SERVICENAME", &options.service_name),
         property("PORT", &options.port.to_string()),
+        format!("ADDLOCAL={}", selected_features(&options).join(",")),
     ];
 
     push_property_bool(
@@ -176,23 +199,27 @@ fn build_msi_overrides(options: MariaDBInstallOptions) -> Result<String, String>
         properties.push(property("BUFFERPOOLSIZE", &value));
     }
 
-    let mut remove_features = Vec::new();
-    if !options.install_heidi_sql {
-        remove_features.push("HeidiSQL");
-    }
-    if !options.install_development_files {
-        remove_features.push("DEVEL");
-    }
-    if !remove_features.is_empty() {
-        properties.push(property("REMOVE", &remove_features.join(",")));
-    }
-
     Ok(properties.join(" "))
 }
 
+fn selected_features(options: &MariaDBInstallOptions) -> Vec<&'static str> {
+    let mut features = vec!["DBInstance", "Client", "MYSQLSERVER", "SharedLibraries"];
+    if options.install_heidi_sql {
+        features.push("HeidiSQL");
+    }
+    if options.install_development_files {
+        features.push("DEVEL");
+    }
+    features
+}
+
 fn property(name: &str, value: &str) -> String {
+    format!("{name}={}", quote_arg(value))
+}
+
+fn quote_arg(value: &str) -> String {
     let escaped = value.replace('"', "\\\"");
-    format!("{name}=\"{escaped}\"")
+    format!("\"{escaped}\"")
 }
 
 fn push_property_bool(properties: &mut Vec<String>, name: &str, enabled: bool) {
@@ -226,16 +253,20 @@ mod tests {
 
     #[test]
     fn msi_override_keeps_install_silent() {
-        let overrides = build_msi_overrides(options()).expect("valid overrides");
+        let log_path = std::path::PathBuf::from("C:\\Temp\\mariadb-install.log");
+        let overrides = build_msi_overrides(options(), &log_path).expect("valid overrides");
 
         assert!(overrides.contains("/qn"));
         assert!(overrides.contains("/norestart"));
+        assert!(overrides.contains("/l*v"));
+        assert!(overrides.contains("\"C:\\Temp\\mariadb-install.log\""));
         assert!(overrides.contains("PASSWORD=\"secret\""));
         assert!(overrides.contains("SKIPNETWORKING=1"));
         assert!(overrides.contains("STDCONFIG=1"));
         assert!(overrides.contains("UTF8=1"));
+        assert!(overrides.contains("ADDLOCAL=DBInstance,Client,MYSQLSERVER,SharedLibraries"));
         assert!(!overrides.contains("ALLOWREMOTEROOTACCESS"));
         assert!(!overrides.contains("DEFAULTUSER"));
-        assert!(overrides.contains("REMOVE=\"HeidiSQL,DEVEL\""));
+        assert!(!overrides.contains("REMOVE="));
     }
 }
