@@ -260,24 +260,6 @@ exit $exitCode
     run_elevated_powershell_script("mariadb-uninstall", &script, timeout)
 }
 
-fn run_elevated_process(
-    executable: &Path,
-    args: &[String],
-    timeout: Duration,
-) -> Result<InstallOutput, String> {
-    let argument_list = args
-        .iter()
-        .map(|arg| format!("'{}'", arg.replace('\'', "''")))
-        .collect::<Vec<_>>()
-        .join(",");
-    let command = format!(
-        "$process = Start-Process -FilePath '{}' -ArgumentList @({argument_list}) -Verb RunAs -Wait -PassThru; exit $process.ExitCode",
-        executable.to_string_lossy().replace('\'', "''")
-    );
-
-    run_process("powershell", &["-NoProfile", "-Command", &command], timeout)
-}
-
 fn run_elevated_powershell_script(
     script_name: &str,
     script: &str,
@@ -297,14 +279,15 @@ fn run_elevated_powershell_script(
         )
     })?;
 
-    let output = run_elevated_process(
-        Path::new("powershell.exe"),
+    let script_path_string = script_path.to_string_lossy().to_string();
+    let output = run_process(
+        "powershell",
         &[
-            "-NoProfile".to_string(),
-            "-ExecutionPolicy".to_string(),
-            "Bypass".to_string(),
-            "-File".to_string(),
-            script_path.to_string_lossy().to_string(),
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            &script_path_string,
         ],
         timeout,
     );
@@ -925,9 +908,9 @@ fn write_text_allowing_elevation(path: &Path, content: &str) -> Result<(), Strin
         temp_path.to_string_lossy().replace('\'', "''"),
         path.to_string_lossy().replace('\'', "''")
     );
-    let output = run_elevated_process(
-        Path::new("powershell.exe"),
-        &["-NoProfile".to_string(), "-Command".to_string(), command],
+    let output = run_process(
+        "powershell",
+        &["-NoProfile", "-Command", &command],
         Duration::from_secs(120),
     )?;
     let _ = fs::remove_file(&temp_path);
