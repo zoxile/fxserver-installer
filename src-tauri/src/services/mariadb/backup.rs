@@ -9,7 +9,7 @@ use crate::{
     models::mariadb::{MariaDBBackupOptions, MariaDBBackupResult, MariaDBCredentials},
     services::mariadb::{
         detect::get_install_path,
-        query::{find_mariadb_client, write_defaults_file},
+        query::{apply_credentials_args, find_mariadb_client},
     },
 };
 
@@ -23,12 +23,11 @@ pub fn create_backup(
         "Could not find mariadb-dump.exe or mysqldump.exe. Install MariaDB or add its bin folder to PATH."
             .to_string()
     })?;
-    let defaults_path = write_defaults_file(&credentials)?;
     let output_path = backup_path(&options)?;
 
     let mut command = Command::new(dump_client);
+    apply_credentials_args(&mut command, &credentials);
     command
-        .arg(format!("--defaults-extra-file={}", defaults_path.display()))
         .arg("--result-file")
         .arg(&output_path)
         .arg("--hex-blob")
@@ -87,11 +86,7 @@ pub fn create_backup(
 
     let output = command
         .output()
-        .map_err(|error| format!("Failed to run MariaDB backup: {error}"));
-
-    let _ = fs::remove_file(&defaults_path);
-
-    let output = output?;
+        .map_err(|error| format!("Failed to run MariaDB backup: {error}"))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         let _ = fs::remove_file(&output_path);

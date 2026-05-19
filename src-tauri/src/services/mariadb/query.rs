@@ -1,9 +1,4 @@
-use std::{
-    env, fs,
-    path::PathBuf,
-    process::Command,
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::{path::PathBuf, process::Command};
 
 use crate::models::mariadb::{MariaDBCredentials, MariaDBQueryResult};
 use crate::services::mariadb::{detect::get_install_path, permissions::escape_identifier};
@@ -19,15 +14,10 @@ pub fn execute_query(
     let client = find_mariadb_client().ok_or_else(|| {
         "Could not find mariadb.exe. Install MariaDB or add its bin folder to PATH.".to_string()
     })?;
-    let defaults_path = write_defaults_file(&credentials)?;
 
     let mut command = Command::new(client);
-    command
-        .arg(format!("--defaults-extra-file={}", defaults_path.display()))
-        .arg("--batch")
-        .arg("--raw")
-        .arg("-e")
-        .arg(query);
+    apply_credentials_args(&mut command, &credentials);
+    command.arg("--batch").arg("--raw").arg("-e").arg(query);
 
     if let Some(database) = credentials
         .database
@@ -38,11 +28,7 @@ pub fn execute_query(
 
     let output = command
         .output()
-        .map_err(|error| format!("Failed to execute MariaDB client: {error}"));
-
-    let _ = fs::remove_file(&defaults_path);
-
-    let output = output?;
+        .map_err(|error| format!("Failed to execute MariaDB client: {error}"))?;
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
     let (columns, rows) = parse_tabular_output(&stdout);
 
@@ -91,7 +77,10 @@ pub fn list_databases(credentials: MariaDBCredentials) -> Result<Vec<String>, St
         .collect())
 }
 
-pub fn list_tables(credentials: MariaDBCredentials, database: String) -> Result<Vec<String>, String> {
+pub fn list_tables(
+    credentials: MariaDBCredentials,
+    database: String,
+) -> Result<Vec<String>, String> {
     let database = escape_identifier(&database)?;
     let result = execute_query(
         credentials,
@@ -113,20 +102,14 @@ pub fn list_tables(credentials: MariaDBCredentials, database: String) -> Result<
         .collect())
 }
 
-pub(crate) fn write_defaults_file(credentials: &MariaDBCredentials) -> Result<PathBuf, String> {
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|error| format!("System clock error: {error}"))?
-        .as_millis();
-    let path = env::temp_dir().join(format!("fxserver_mariadb_{timestamp}.cnf"));
-    let content = format!(
-        "[client]\nuser={}\npassword={}\nhost={}\nport={}\n",
-        credentials.username, credentials.password, credentials.host, credentials.port
-    );
-
-    fs::write(&path, content)
-        .map_err(|error| format!("Failed to write temporary credentials: {error}"))?;
-    Ok(path)
+pub(crate) fn apply_credentials_args(command: &mut Command, credentials: &MariaDBCredentials) {
+    command
+        .arg("--protocol=tcp")
+        .arg("--ssl=0")
+        .arg(format!("--user={}", credentials.username))
+        .arg(format!("--password={}", credentials.password))
+        .arg(format!("--host={}", credentials.host))
+        .arg(format!("--port={}", credentials.port));
 }
 
 pub(crate) fn find_mariadb_client() -> Option<String> {

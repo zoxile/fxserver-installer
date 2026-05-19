@@ -8,8 +8,11 @@ use std::{
 };
 
 use crate::{
-    models::mariadb::{MariaDBInstallOptions, MariaDBPackageInfo},
-    services::mariadb::detect::{detect_mariadb, find_service_name},
+    models::mariadb::{MariaDBCredentials, MariaDBInstallOptions, MariaDBPackageInfo},
+    services::mariadb::{
+        detect::{detect_mariadb, find_service_name},
+        query::validate_connection,
+    },
 };
 
 const INSTALL_TIMEOUT: Duration = Duration::from_secs(20 * 60);
@@ -38,8 +41,9 @@ pub fn install_mariadb(options: MariaDBInstallOptions) -> Result<String, String>
             let reattach_message = reattach_message
                 .map(|message| format!("\n{message}"))
                 .unwrap_or_default();
+            let validation_message = install_validation_message(&options, &install_plan)?;
             Ok(format!(
-                "{installer_message}{reattach_message}\n{detected_message}\nInstaller log: {}",
+                "{installer_message}{reattach_message}{validation_message}\n{detected_message}\nInstaller log: {}",
                 log_path.display()
             ))
         } else {
@@ -547,6 +551,7 @@ fn build_msi_overrides(
 
     if matches!(install_plan, InstallPlan::Fresh) {
         properties.push(property("PASSWORD", &options.root_password));
+        properties.push(property("ESCAPEDPASSWORD", &options.root_password));
         properties.push(property("SERVICENAME", &options.service_name));
         properties.push(property("PORT", &options.port.to_string()));
 
@@ -618,6 +623,59 @@ fn build_msi_overrides(
     }
 
     Ok(properties.join(" "))
+}
+
+fn install_validation_message(
+    options: &MariaDBInstallOptions,
+    install_plan: &InstallPlan,
+) -> Result<String, String> {
+    match install_plan {
+        InstallPlan::Fresh if options.skip_networking => Ok(
+            "\nFresh install completed, but TCP validation was skipped because Skip networking is enabled. Disable Skip networking if this app should connect to MariaDB through localhost.".to_string(),
+        ),
+        InstallPlan::Fresh => validate_fresh_root_password(options),
+        InstallPlan::Reattach { data_dir, .. } => Ok(format!(
+            "\nExisting MariaDB data was reattached from {}. The root password was not changed; use the password that already belongs to that data directory.",
+            data_dir.display()
+        )),
+    }
+}
+
+fn validate_fresh_root_password(options: &MariaDBInstallOptions) -> Result<String, String> {
+    let credentials = MariaDBCredentials {
+        host: "localhost".to_string(),
+        port: options.port,
+        username: "root".to_string(),
+        password: options.root_password.clone(),
+        database: None,
+    };
+    let started = Instant::now();
+    let mut last_error = String::new();
+
+    while started.elapsed() < Duration::from_secs(45) {
+        match validate_connection(credentials.clone()) {
+            Ok(()) => {
+                return Ok(format!(
+                    "\nValidated root login over localhost:{} with the installer password.",
+                    options.port
+                ));
+            }
+            Err(error) => {
+                last_error = error;
+                thread::sleep(Duration::from_secs(2));
+            }
+        }
+    }
+
+    Err(format!(
+        "MariaDB installed, but root login with the supplied password was not accepted over localhost:{}. Last error: {}",
+        options.port,
+        if last_error.trim().is_empty() {
+            "MariaDB client returned no error details.".to_string()
+        } else {
+            last_error
+        }
+    ))
 }
 
 fn build_update_overrides(log_path: &std::path::Path) -> String {
