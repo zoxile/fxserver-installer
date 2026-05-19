@@ -29,8 +29,8 @@ pub fn install_mariadb(options: MariaDBInstallOptions) -> Result<String, String>
         } else {
             output.stdout
         };
-        let reattach_message = match &install_plan {
-            InstallPlan::Fresh => None,
+        let plan_message = match &install_plan {
+            InstallPlan::Fresh => Some(initialize_fresh_database(&options)?),
             InstallPlan::Reattach {
                 data_dir,
                 install_dir,
@@ -38,12 +38,12 @@ pub fn install_mariadb(options: MariaDBInstallOptions) -> Result<String, String>
         };
 
         if let Some(detected_message) = wait_for_install_detection(Duration::from_secs(45)) {
-            let reattach_message = reattach_message
+            let plan_message = plan_message
                 .map(|message| format!("\n{message}"))
                 .unwrap_or_default();
             let validation_message = install_validation_message(&options, &install_plan)?;
             Ok(format!(
-                "{installer_message}{reattach_message}{validation_message}\n{detected_message}\nInstaller log: {}",
+                "{installer_message}{plan_message}{validation_message}\n{detected_message}\nInstaller log: {}",
                 log_path.display()
             ))
         } else {
@@ -550,22 +550,6 @@ fn build_msi_overrides(
     ];
 
     if matches!(install_plan, InstallPlan::Fresh) {
-        properties.push(property("PASSWORD", &options.root_password));
-        properties.push(property("ESCAPEDPASSWORD", &options.root_password));
-        properties.push(property("SERVICENAME", &options.service_name));
-        properties.push(property("PORT", &options.port.to_string()));
-
-        push_property_bool(
-            &mut properties,
-            "ALLOWREMOTEROOTACCESS",
-            options.allow_remote_root_access,
-        );
-        push_property_bool(
-            &mut properties,
-            "DEFAULTUSER",
-            options.create_anonymous_user,
-        );
-        push_property_bool(&mut properties, "SKIPNETWORKING", options.skip_networking);
         push_property_bool(
             &mut properties,
             "STDCONFIG",
@@ -623,6 +607,159 @@ fn build_msi_overrides(
     }
 
     Ok(properties.join(" "))
+}
+
+fn initialize_fresh_database(options: &MariaDBInstallOptions) -> Result<String, String> {
+    let install_dir = options
+        .install_dir
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            registry_installed_package()
+                .and_then(|package| package.install_location)
+                .map(PathBuf::from)
+        })
+        .unwrap_or_else(|| PathBuf::from(r"C:\Program Files\MariaDB"));
+    let install_dir = resolve_actual_install_dir(&install_dir)?;
+    let install_db_path = install_dir.join("bin").join("mariadb-install-db.exe");
+    if !install_db_path.exists() {
+        return Err(format!(
+            "MariaDB binaries installed, but mariadb-install-db.exe was not found at {}.",
+            install_db_path.display()
+        ));
+    }
+
+    let data_dir = options
+        .data_dir
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| install_dir.join("data"));
+    let config_template = write_fresh_config_template(options, &install_dir, &data_dir)?;
+    let output =
+        run_elevated_fresh_database_init(options, &install_db_path, &data_dir, &config_template)?;
+    let _ = fs::remove_file(&config_template);
+
+    if !output.success {
+        return Err(format!(
+            "MariaDB binaries installed, but database initialization failed: {}",
+            if output.stderr.is_empty() {
+                output.stdout
+            } else {
+                output.stderr
+            }
+        ));
+    }
+    if !wait_for_service_running(&options.service_name, Duration::from_secs(45)) {
+        return Err(format!(
+            "MariaDB database was initialized, but {service_name} did not reach Running state.",
+            service_name = options.service_name
+        ));
+    }
+
+    Ok(format!(
+        "Fresh database was initialized at {} with service {}.",
+        data_dir.display(),
+        options.service_name
+    ))
+}
+
+fn write_fresh_config_template(
+    options: &MariaDBInstallOptions,
+    install_dir: &Path,
+    data_dir: &Path,
+) -> Result<PathBuf, String> {
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| format!("System clock error: {error}"))?
+        .as_millis();
+    let path = env::temp_dir().join(format!("fxserver-mariadb-template-{timestamp}.ini"));
+    let content = rewrite_my_ini("", options, install_dir, data_dir);
+    fs::write(&path, content)
+        .map_err(|error| format!("Failed to write MariaDB config template: {error}"))?;
+    Ok(path)
+}
+
+fn run_elevated_fresh_database_init(
+    options: &MariaDBInstallOptions,
+    install_db_path: &Path,
+    data_dir: &Path,
+    config_template: &Path,
+) -> Result<InstallOutput, String> {
+    let escaped_install_db_path = install_db_path.to_string_lossy().replace('\'', "''");
+    let escaped_data_dir = data_dir.to_string_lossy().replace('\'', "''");
+    let escaped_config_template = config_template.to_string_lossy().replace('\'', "''");
+    let escaped_service_name = options.service_name.replace('\'', "''");
+    let escaped_password = options.root_password.replace('\'', "''");
+    let mut flags = Vec::new();
+    if options.allow_remote_root_access {
+        flags.push("'--allow-remote-root-access'".to_string());
+    }
+    if options.create_anonymous_user {
+        flags.push("'--default-user'".to_string());
+    }
+    if options.skip_networking {
+        flags.push("'--skip-networking'".to_string());
+    }
+    if let Some(page_size) = options
+        .page_size
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        flags.push(format!(
+            "'--innodb-page-size={}'",
+            page_size.replace('\'', "''")
+        ));
+    }
+    let flags = if flags.is_empty() {
+        String::new()
+    } else {
+        format!(", {}", flags.join(", "))
+    };
+    let script = format!(
+        r#"$ErrorActionPreference = 'SilentlyContinue'
+$installDbPath = '{escaped_install_db_path}'
+$dataDir = '{escaped_data_dir}'
+$serviceName = '{escaped_service_name}'
+$configTemplate = '{escaped_config_template}'
+$service = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
+if ($service) {{
+    if ($service.Status -ne 'Stopped') {{
+        Stop-Service -Name $serviceName -Force -ErrorAction SilentlyContinue
+        $service.WaitForStatus('Stopped', [TimeSpan]::FromSeconds(30))
+    }}
+    & sc.exe delete $serviceName | Out-Null
+    Start-Sleep -Seconds 2
+}}
+if ((Test-Path -LiteralPath $dataDir) -and @(Get-ChildItem -LiteralPath $dataDir -Force -ErrorAction SilentlyContinue).Count -gt 0) {{
+    Write-Error "Data directory is not empty: $dataDir"
+    exit 71
+}}
+New-Item -ItemType Directory -Path $dataDir -Force | Out-Null
+$installArgs = @('--datadir=' + $dataDir, '--service=' + $serviceName, '--password={escaped_password}', '--port={port}', '--socket=' + $serviceName, '--config=' + $configTemplate, '--silent'{flags})
+$init = Start-Process -FilePath $installDbPath -ArgumentList $installArgs -Wait -PassThru
+if ($init.ExitCode -ne 0) {{
+    exit $init.ExitCode
+}}
+$start = Start-Process -FilePath 'sc.exe' -ArgumentList @('start', $serviceName) -Wait -PassThru
+if ($start.ExitCode -ne 0) {{
+    exit $start.ExitCode
+}}
+$deadline = (Get-Date).AddSeconds(45)
+do {{
+    $service = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
+    if ($service -and $service.Status -eq 'Running') {{
+        exit 0
+    }}
+    Start-Sleep -Seconds 1
+}} while ((Get-Date) -lt $deadline)
+exit 72
+"#,
+        port = options.port
+    );
+
+    run_elevated_powershell_script("mariadb-fresh-database", &script, Duration::from_secs(180))
 }
 
 fn install_validation_message(
@@ -1013,6 +1150,15 @@ fn rewrite_my_ini(
     upsert_ini_value(&mut lines, "mysqld", "datadir", &normalized_data_dir);
     upsert_ini_value(&mut lines, "mysqld", "plugin-dir", &normalized_plugin_dir);
     upsert_ini_value(&mut lines, "mysqld", "port", &options.port.to_string());
+    if options.use_utf8 {
+        upsert_ini_value(&mut lines, "mysqld", "character-set-server", "utf8mb4");
+        upsert_ini_value(
+            &mut lines,
+            "mysqld",
+            "collation-server",
+            "utf8mb4_unicode_ci",
+        );
+    }
     if options.skip_networking {
         upsert_ini_value(&mut lines, "mysqld", "skip-networking", "ON");
         remove_ini_value(&mut lines, "mysqld", "bind-address");
@@ -1115,7 +1261,7 @@ fn selected_features(
     install_plan: &InstallPlan,
 ) -> Vec<&'static str> {
     let mut features = match install_plan {
-        InstallPlan::Fresh => vec!["DBInstance", "Client", "MYSQLSERVER", "SharedLibraries"],
+        InstallPlan::Fresh => vec!["Client", "MYSQLSERVER", "SharedLibraries"],
         InstallPlan::Reattach { .. } => vec!["Client", "MYSQLSERVER", "SharedLibraries"],
     };
     if options.install_heidi_sql {
@@ -1266,11 +1412,13 @@ mod tests {
         assert!(overrides.contains("/norestart"));
         assert!(overrides.contains("/l*v"));
         assert!(overrides.contains("\"C:\\Temp\\mariadb-install.log\""));
-        assert!(overrides.contains("PASSWORD=\"secret\""));
-        assert!(overrides.contains("SKIPNETWORKING=1"));
         assert!(overrides.contains("STDCONFIG=1"));
         assert!(overrides.contains("UTF8=1"));
-        assert!(overrides.contains("ADDLOCAL=DBInstance,Client,MYSQLSERVER,SharedLibraries"));
+        assert!(overrides.contains("ADDLOCAL=Client,MYSQLSERVER,SharedLibraries"));
+        assert!(!overrides.contains("PASSWORD="));
+        assert!(!overrides.contains("SERVICENAME="));
+        assert!(!overrides.contains("PORT="));
+        assert!(!overrides.contains("SKIPNETWORKING="));
         assert!(!overrides.contains("ALLOWREMOTEROOTACCESS"));
         assert!(!overrides.contains("DEFAULTUSER"));
         assert!(!overrides.contains("REMOVE="));
