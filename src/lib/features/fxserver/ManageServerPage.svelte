@@ -55,12 +55,15 @@
 	let message = $state("");
 	let refreshTimer: number | undefined;
 	let terminalTimer: number | undefined;
+	let uptimeTimer: number | undefined;
+	let nowSeconds = $state(Math.floor(Date.now() / 1000));
 	let terminalVisibleRange = $state({ start: 0, end: 0 });
 	let terminalScrollToIndex = $state(0);
 
 	const activeEnvCount = $derived(Object.values(envValues).filter((value) => value.trim()).length + (serverProfile.trim() ? 1 : 0));
 	const canStart = $derived(Boolean(artifactPath.trim()) && !status.running && !starting && !busy);
 	const txHostEditableFields = $derived(txHostFields.filter((field) => field.key !== "TXHOST_DATA_PATH"));
+	const displayedUptimeSeconds = $derived(status.running ? Math.max(0, nowSeconds - (startedAtSeconds(status.startedAt) ?? nowSeconds)) : (status.uptimeSeconds ?? 0));
 	const profileOptions = $derived([
 		...(fxserverSettings.hasRootLogs ? [{ value: "", label: "Root logs folder" }] : []),
 		...fxserverSettings.profiles.map((profile) => ({ value: profile, label: profile })),
@@ -80,6 +83,9 @@
 		refreshTimer = window.setInterval(() => {
 			if (status.running) void refreshStatus(false);
 		}, 2500);
+		uptimeTimer = window.setInterval(() => {
+			nowSeconds = Math.floor(Date.now() / 1000);
+		}, 1000);
 		void refreshTerminal(false);
 		terminalTimer = window.setInterval(() => {
 			void refreshTerminal(false);
@@ -89,6 +95,7 @@
 	onDestroy(() => {
 		if (refreshTimer) window.clearInterval(refreshTimer);
 		if (terminalTimer) window.clearInterval(terminalTimer);
+		if (uptimeTimer) window.clearInterval(uptimeTimer);
 	});
 
 	$effect(() => {
@@ -214,6 +221,7 @@
 
 	async function refreshStatus(showMessage = true) {
 		status = await getFxserverStatus();
+		nowSeconds = Math.floor(Date.now() / 1000);
 		if (showMessage) message = status.running ? "FXServer status refreshed." : "FXServer is not running from this app.";
 	}
 
@@ -288,10 +296,16 @@
 		return [hours ? `${hours}h` : "", minutes ? `${minutes}m` : "", `${secs}s`].filter(Boolean).join(" ");
 	}
 
+	function startedAtSeconds(value?: string | null) {
+		if (!value) return null;
+		const seconds = Number(value);
+		return Number.isFinite(seconds) ? seconds : null;
+	}
+
 	function startedAt(value?: string | null) {
 		if (!value) return "Not started";
-		const seconds = Number(value);
-		if (!Number.isFinite(seconds)) return value;
+		const seconds = startedAtSeconds(value);
+		if (seconds === null) return value;
 		return new Date(seconds * 1000).toLocaleString();
 	}
 
@@ -436,7 +450,7 @@
 						</div>
 						<div class="rounded-sm border border-border bg-background/70 p-3">
 							<p class="text-xs text-muted-foreground">Uptime</p>
-							<p class="mt-1 font-mono text-sm font-medium text-foreground">{uptime(status.uptimeSeconds)}</p>
+							<p class="mt-1 font-mono text-sm font-medium text-foreground">{uptime(displayedUptimeSeconds)}</p>
 						</div>
 					</div>
 

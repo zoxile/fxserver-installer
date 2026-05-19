@@ -34,9 +34,7 @@ pub fn install_mariadb(options: MariaDBInstallOptions) -> Result<String, String>
             } => Some(reattach_preserved_data(&options, install_dir, data_dir)?),
         };
 
-        if let Some(detected_message) =
-            wait_for_install_detection(&options.service_name, Duration::from_secs(45))
-        {
+        if let Some(detected_message) = wait_for_install_detection(Duration::from_secs(45)) {
             let reattach_message = reattach_message
                 .map(|message| format!("\n{message}"))
                 .unwrap_or_default();
@@ -95,18 +93,8 @@ pub fn uninstall_mariadb() -> Result<String, String> {
         "MariaDB product code was not found in Windows uninstall registry.".to_string()
     })?;
     let log_path = installer_log_path();
-    let output = run_elevated_msiexec(
-        &[
-            "/x",
-            &product_code,
-            "/qn",
-            "/norestart",
-            "CLEANUPDATA=\"\"",
-            "/l*v",
-            &log_path.to_string_lossy(),
-        ],
-        INSTALL_TIMEOUT,
-    )?;
+    let output =
+        run_elevated_mariadb_uninstall(&product_code, &service_name, &log_path, INSTALL_TIMEOUT)?;
 
     if !output.success {
         return Err(format!(
@@ -119,8 +107,6 @@ pub fn uninstall_mariadb() -> Result<String, String> {
             log_path.display()
         ));
     }
-
-    cleanup_mariadb_service(&service_name)?;
 
     if wait_for_uninstall_detection(Duration::from_secs(45)) {
         Ok(format!(
@@ -243,17 +229,35 @@ fn run_process(command: &str, args: &[&str], timeout: Duration) -> Result<Instal
     }
 }
 
-fn run_elevated_msiexec(args: &[&str], timeout: Duration) -> Result<InstallOutput, String> {
-    let argument_list = args
-        .iter()
-        .map(|arg| format!("'{}'", arg.replace('\'', "''")))
-        .collect::<Vec<_>>()
-        .join(",");
-    let command = format!(
-        "$process = Start-Process -FilePath 'msiexec.exe' -ArgumentList @({argument_list}) -Verb RunAs -Wait -PassThru; exit $process.ExitCode"
+fn run_elevated_mariadb_uninstall(
+    product_code: &str,
+    service_name: &str,
+    log_path: &Path,
+    timeout: Duration,
+) -> Result<InstallOutput, String> {
+    let escaped_product_code = product_code.replace('\'', "''");
+    let escaped_service_name = service_name.replace('\'', "''");
+    let escaped_log_path = log_path.to_string_lossy().replace('\'', "''");
+    let script = format!(
+        r#"$ErrorActionPreference = 'SilentlyContinue'
+$productCode = '{escaped_product_code}'
+$serviceName = '{escaped_service_name}'
+$logPath = '{escaped_log_path}'
+$process = Start-Process -FilePath 'msiexec.exe' -ArgumentList @('/x', $productCode, '/qn', '/norestart', 'CLEANUPDATA=""', '/l*v', $logPath) -Wait -PassThru
+$exitCode = $process.ExitCode
+$service = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
+if ($service) {{
+    if ($service.Status -ne 'Stopped') {{
+        Stop-Service -Name $serviceName -Force -ErrorAction SilentlyContinue
+        $service.WaitForStatus('Stopped', [TimeSpan]::FromSeconds(30))
+    }}
+    & sc.exe delete $serviceName | Out-Null
+}}
+exit $exitCode
+"#
     );
 
-    run_process("powershell", &["-NoProfile", "-Command", &command], timeout)
+    run_elevated_powershell_script("mariadb-uninstall", &script, timeout)
 }
 
 fn run_elevated_process(
@@ -308,31 +312,26 @@ fn run_elevated_powershell_script(
     output
 }
 
-fn wait_for_install_detection(service_name: &str, timeout: Duration) -> Option<String> {
+fn wait_for_install_detection(timeout: Duration) -> Option<String> {
     let started = Instant::now();
 
     while started.elapsed() < timeout {
         let status = detect_mariadb();
         if status.installed && status.service_name.is_some() {
             if !status.running {
-                let _ = run_process("sc", &["start", service_name], Duration::from_secs(30));
-                thread::sleep(Duration::from_secs(2));
-                let refreshed = detect_mariadb();
-                if !refreshed.running {
-                    return Some(format!(
-                        "MariaDB detected{}{}, but the service is not running.",
-                        refreshed
-                            .version
-                            .as_ref()
-                            .map(|version| format!(": {version}"))
-                            .unwrap_or_default(),
-                        refreshed
-                            .service_name
-                            .as_ref()
-                            .map(|service_name| format!(" ({service_name})"))
-                            .unwrap_or_default()
-                    ));
-                }
+                return Some(format!(
+                    "MariaDB detected{}{}, but the service is not running.",
+                    status
+                        .version
+                        .as_ref()
+                        .map(|version| format!(": {version}"))
+                        .unwrap_or_default(),
+                    status
+                        .service_name
+                        .as_ref()
+                        .map(|service_name| format!(" ({service_name})"))
+                        .unwrap_or_default()
+                ));
             }
 
             return Some(format!(
@@ -782,39 +781,15 @@ fn reattach_preserved_data(
     }
 
     let my_ini = prepare_preserved_my_ini(options, &install_dir, data_dir)?;
-    remove_existing_service(&options.service_name);
-    let service_output = run_elevated_process(
-        &mysqld_path,
-        &[
-            "--install".to_string(),
-            options.service_name.clone(),
-            format!("--defaults-file=\"{}\"", my_ini.display()),
-        ],
-        Duration::from_secs(120),
-    )?;
+    let service_output =
+        run_elevated_reattach_service(&mysqld_path, &options.service_name, &my_ini)?;
     if !service_output.success {
         return Err(format!(
-            "MariaDB binaries installed, but the preserved data service could not be registered: {}",
+            "MariaDB binaries installed, but the preserved data service could not be registered or started: {}",
             if service_output.stderr.is_empty() {
                 service_output.stdout
             } else {
                 service_output.stderr
-            }
-        ));
-    }
-
-    let start_output = run_elevated_process(
-        Path::new("sc.exe"),
-        &["start".to_string(), options.service_name.clone()],
-        Duration::from_secs(120),
-    )?;
-    if !start_output.success {
-        return Err(format!(
-            "MariaDB service was registered against preserved data, but it could not be started: {}",
-            if start_output.stderr.is_empty() {
-                start_output.stdout
-            } else {
-                start_output.stderr
             }
         ));
     }
@@ -852,18 +827,49 @@ fn resolve_actual_install_dir(requested_install_dir: &Path) -> Result<PathBuf, S
     Ok(requested_install_dir.to_path_buf())
 }
 
-fn remove_existing_service(service_name: &str) {
-    let _ = run_elevated_process(
-        Path::new("sc.exe"),
-        &["stop".to_string(), service_name.to_string()],
-        Duration::from_secs(60),
+fn run_elevated_reattach_service(
+    mysqld_path: &Path,
+    service_name: &str,
+    my_ini: &Path,
+) -> Result<InstallOutput, String> {
+    let escaped_mysqld_path = mysqld_path.to_string_lossy().replace('\'', "''");
+    let escaped_service_name = service_name.replace('\'', "''");
+    let escaped_my_ini = my_ini.to_string_lossy().replace('\'', "''");
+    let script = format!(
+        r#"$ErrorActionPreference = 'SilentlyContinue'
+$mysqldPath = '{escaped_mysqld_path}'
+$serviceName = '{escaped_service_name}'
+$myIni = '{escaped_my_ini}'
+$service = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
+if ($service) {{
+    if ($service.Status -ne 'Stopped') {{
+        Stop-Service -Name $serviceName -Force -ErrorAction SilentlyContinue
+        $service.WaitForStatus('Stopped', [TimeSpan]::FromSeconds(30))
+    }}
+    & sc.exe delete $serviceName | Out-Null
+    Start-Sleep -Seconds 2
+}}
+$install = Start-Process -FilePath $mysqldPath -ArgumentList @('--install', $serviceName, "--defaults-file=`"$myIni`"") -Wait -PassThru
+if ($install.ExitCode -ne 0) {{
+    exit $install.ExitCode
+}}
+$start = Start-Process -FilePath 'sc.exe' -ArgumentList @('start', $serviceName) -Wait -PassThru
+if ($start.ExitCode -ne 0) {{
+    exit $start.ExitCode
+}}
+$deadline = (Get-Date).AddSeconds(45)
+do {{
+    $service = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
+    if ($service -and $service.Status -eq 'Running') {{
+        exit 0
+    }}
+    Start-Sleep -Seconds 1
+}} while ((Get-Date) -lt $deadline)
+exit 1
+"#
     );
-    let _ = run_elevated_process(
-        Path::new("sc.exe"),
-        &["delete".to_string(), service_name.to_string()],
-        Duration::from_secs(60),
-    );
-    thread::sleep(Duration::from_secs(2));
+
+    run_elevated_powershell_script("mariadb-reattach-service", &script, Duration::from_secs(180))
 }
 
 fn wait_for_service_running(service_name: &str, timeout: Duration) -> bool {
