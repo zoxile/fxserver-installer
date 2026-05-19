@@ -86,9 +86,8 @@ pub fn uninstall_mariadb() -> Result<String, String> {
             ));
         }
     };
-    let heidisql_message = preserve_heidisql_before_uninstall(detect_heidisql(
-        package.install_location.as_deref(),
-    ))?;
+    let heidisql_message =
+        preserve_heidisql_before_uninstall(detect_heidisql(package.install_location.as_deref()))?;
     let product_code = package.product_code.ok_or_else(|| {
         "MariaDB product code was not found in Windows uninstall registry.".to_string()
     })?;
@@ -279,20 +278,25 @@ fn run_elevated_powershell_script(
         )
     })?;
 
-    let script_path_string = script_path.to_string_lossy().to_string();
-    let output = run_process(
-        "powershell",
-        &[
-            "-NoProfile",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-File",
-            &script_path_string,
-        ],
-        timeout,
-    );
+    let output = run_script_via_elevated_app(&script_path, timeout);
     let _ = fs::remove_file(&script_path);
     output
+}
+
+fn run_script_via_elevated_app(
+    script_path: &Path,
+    timeout: Duration,
+) -> Result<InstallOutput, String> {
+    let app_path = env::current_exe()
+        .map_err(|error| format!("Failed to resolve app executable for elevation: {error}"))?;
+    let app_path = app_path.to_string_lossy().replace('\'', "''");
+    let script_path = script_path.to_string_lossy().replace('\'', "''");
+    let helper_arg = crate::ELEVATED_SCRIPT_ARG.replace('\'', "''");
+    let command = format!(
+        "$process = Start-Process -FilePath '{app_path}' -ArgumentList @('{helper_arg}', '{script_path}') -Verb RunAs -WindowStyle Hidden -Wait -PassThru; exit $process.ExitCode"
+    );
+
+    run_process("powershell", &["-NoProfile", "-Command", &command], timeout)
 }
 
 fn wait_for_install_detection(timeout: Duration) -> Option<String> {
@@ -852,7 +856,11 @@ exit 1
 "#
     );
 
-    run_elevated_powershell_script("mariadb-reattach-service", &script, Duration::from_secs(180))
+    run_elevated_powershell_script(
+        "mariadb-reattach-service",
+        &script,
+        Duration::from_secs(180),
+    )
 }
 
 fn wait_for_service_running(service_name: &str, timeout: Duration) -> bool {
@@ -908,11 +916,8 @@ fn write_text_allowing_elevation(path: &Path, content: &str) -> Result<(), Strin
         temp_path.to_string_lossy().replace('\'', "''"),
         path.to_string_lossy().replace('\'', "''")
     );
-    let output = run_process(
-        "powershell",
-        &["-NoProfile", "-Command", &command],
-        Duration::from_secs(120),
-    )?;
+    let output =
+        run_elevated_powershell_script("mariadb-copy-config", &command, Duration::from_secs(120))?;
     let _ = fs::remove_file(&temp_path);
 
     if output.success {

@@ -2,6 +2,37 @@ mod commands;
 mod models;
 mod services;
 
+use std::{env, process::Command};
+
+pub(crate) const ELEVATED_SCRIPT_ARG: &str = "--fxi-elevated-script";
+
+pub fn run_elevated_helper_from_args() -> bool {
+    let mut args = env::args().skip(1);
+    let Some(first) = args.next() else {
+        return false;
+    };
+
+    if first != ELEVATED_SCRIPT_ARG {
+        return false;
+    }
+
+    let Some(script_path) = args.next() else {
+        std::process::exit(2);
+    };
+
+    let status = Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            &script_path,
+        ])
+        .status();
+
+    std::process::exit(status.ok().and_then(|status| status.code()).unwrap_or(1));
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
