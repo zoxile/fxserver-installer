@@ -4,6 +4,7 @@
 	import * as Card from "$lib/components/ui/card/index.js";
 	import { Button } from "$lib/components/ui/button/index.js";
 	import { Input } from "$lib/components/ui/input/index.js";
+	import PasswordInput from "$lib/components/ui/password-input.svelte";
 	import * as Select from "$lib/components/ui/select/index.js";
 	import * as ToggleGroup from "$lib/components/ui/toggle-group/index.js";
 
@@ -83,7 +84,7 @@
 			</label>
 			<label class="grid gap-2">
 				<span class="text-xs font-medium text-muted-foreground">Password</span>
-				<Input type="password" bind:value={userConfig.password} disabled={!credentialsReady} placeholder="User password" title="Password for this database user." />
+				<PasswordInput bind:value={userConfig.password} disabled={!credentialsReady} placeholder="User password" title="Password for this database user." />
 			</label>
 			<label class="grid gap-2">
 				<span class="text-xs font-medium text-muted-foreground">Host</span>

@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { Input } from "$lib/components/ui/input/index.js";
+	import PasswordInput from "$lib/components/ui/password-input.svelte";
 	import * as Select from "$lib/components/ui/select/index.js";
 	import type { TxHostField } from "./fxserverEnv";
 
@@ -34,10 +35,12 @@
 				{/each}
 			</Select.Content>
 		</Select.Root>
+	{:else if field.type === "password"}
+		<PasswordInput bind:value placeholder={field.placeholder} title={`Set ${field.key}`} class="rounded-sm font-mono text-xs" />
 	{:else}
 		<Input
 			bind:value
-			type={field.type === "password" ? "password" : field.type === "number" ? "number" : field.type === "url" ? "url" : "text"}
+			type={field.type === "number" ? "number" : field.type === "url" ? "url" : "text"}
 			placeholder={field.placeholder}
 			title={`Set ${field.key}`}
 			class="rounded-sm font-mono text-xs"

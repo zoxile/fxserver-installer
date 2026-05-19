@@ -4,6 +4,7 @@
 	import * as Card from "$lib/components/ui/card/index.js";
 	import { Button } from "$lib/components/ui/button/index.js";
 	import { Input } from "$lib/components/ui/input/index.js";
+	import PasswordInput from "$lib/components/ui/password-input.svelte";
 	import type { MariaDBCredentials } from "$lib/modules/mariadb";
 
 	type Props = {
@@ -46,7 +47,7 @@
 			</label>
 			<label class="grid gap-2">
 				<span class="text-xs font-medium text-muted-foreground">Admin Password</span>
-				<Input type="password" bind:value={credentials.password} placeholder="Root/admin password" title="Admin password used to connect to MariaDB." />
+				<PasswordInput bind:value={credentials.password} placeholder="Root/admin password" title="Admin password used to connect to MariaDB." />
 			</label>
 			<label class="grid gap-2 sm:col-span-2">
 				<span class="text-xs font-medium text-muted-foreground">Default Database</span>

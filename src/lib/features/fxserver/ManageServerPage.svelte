@@ -16,6 +16,7 @@
 	import { Button } from "$lib/components/ui/button/index.js";
 	import { Input } from "$lib/components/ui/input/index.js";
 	import { Notice } from "$lib/components/ui/notice/index.js";
+	import PasswordInput from "$lib/components/ui/password-input.svelte";
 	import { Progress } from "$lib/components/ui/progress/index.js";
 	import * as Select from "$lib/components/ui/select/index.js";
 	import { chooseFolder as chooseAnyFolder, chooseInstallFolder } from "$lib/core/selectFolder";
@@ -580,7 +581,7 @@
 				</label>
 				<label class="grid gap-2">
 					<span class="text-xs font-medium text-muted-foreground">Password</span>
-					<Input bind:value={rconConfig.password} type="password" placeholder="server.cfg rcon_password" title="Value configured with rcon_password in server.cfg." class="rounded-sm font-mono text-xs" />
+					<PasswordInput bind:value={rconConfig.password} placeholder="server.cfg rcon_password" title="Value configured with rcon_password in server.cfg." class="rounded-sm font-mono text-xs" />
 				</label>
 			</div>
 

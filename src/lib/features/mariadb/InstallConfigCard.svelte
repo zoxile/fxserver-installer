@@ -4,6 +4,7 @@
 	import * as Card from "$lib/components/ui/card/index.js";
 	import { Button } from "$lib/components/ui/button/index.js";
 	import { Input } from "$lib/components/ui/input/index.js";
+	import PasswordInput from "$lib/components/ui/password-input.svelte";
 	import type { MariaDBInstallOptions, MariaDBPackageInfo } from "$lib/modules/mariadb";
 
 	type Props = {
@@ -69,7 +70,7 @@
 		<div class="grid gap-3 md:grid-cols-3">
 			<label class="grid gap-1.5">
 				<span class="text-xs font-medium text-muted-foreground">Root Password</span>
-				<Input type="password" bind:value={installOptions.rootPassword} placeholder="Required root password" title="Root password used by the MariaDB installer." />
+				<PasswordInput bind:value={installOptions.rootPassword} placeholder="Required root password" title="Root password used by the MariaDB installer." />
 			</label>
 			<label class="grid gap-1.5">
 				<span class="text-xs font-medium text-muted-foreground">Service Name</span>

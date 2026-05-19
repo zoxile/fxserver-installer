@@ -8,6 +8,7 @@
 	import * as Card from "$lib/components/ui/card/index.js";
 	import { Button } from "$lib/components/ui/button/index.js";
 	import { Input } from "$lib/components/ui/input/index.js";
+	import PasswordInput from "$lib/components/ui/password-input.svelte";
 	import * as Select from "$lib/components/ui/select/index.js";
 	import type { MariaDBUser, MariaDBUserAccess } from "$lib/modules/mariadb";
 
@@ -165,7 +166,7 @@
 				<div class="grid gap-4 sm:grid-cols-2">
 					<label class="grid gap-2">
 						<span class="text-xs font-medium text-muted-foreground">Password</span>
-						<Input type="password" bind:value={editingUser.password} disabled={!credentialsReady} placeholder="New password or blank" title="New password for this MariaDB user." />
+						<PasswordInput bind:value={editingUser.password} disabled={!credentialsReady} placeholder="New password or blank" title="New password for this MariaDB user." />
 					</label>
 					<label class="grid gap-2">
 						<span class="text-xs font-medium text-muted-foreground">Database</span>

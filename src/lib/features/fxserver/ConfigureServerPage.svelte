@@ -16,6 +16,7 @@
 	import { Button } from "$lib/components/ui/button/index.js";
 	import { Input } from "$lib/components/ui/input/index.js";
 	import { Notice } from "$lib/components/ui/notice/index.js";
+	import PasswordInput from "$lib/components/ui/password-input.svelte";
 	import * as Select from "$lib/components/ui/select/index.js";
 	import { chooseFolder } from "$lib/core/selectFolder";
 	import { databaseSession, formatMariaDBConnectionString, rememberDatabaseCredentials } from "$lib/core/databaseSession.svelte";
@@ -667,7 +668,7 @@
 				</label>
 				<label class="grid gap-2">
 					<span class="text-xs font-medium text-muted-foreground">Password</span>
-					<Input type="password" bind:value={dbCredentials.password} placeholder="User password" class="rounded-sm font-mono text-xs" />
+					<PasswordInput bind:value={dbCredentials.password} placeholder="User password" class="rounded-sm font-mono text-xs" />
 				</label>
 				<label class="grid gap-2">
 					<span class="text-xs font-medium text-muted-foreground">Database</span>
