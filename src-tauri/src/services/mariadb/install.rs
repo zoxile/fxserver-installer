@@ -772,7 +772,7 @@ fn install_validation_message(
         ),
         InstallPlan::Fresh => validate_fresh_root_password(options),
         InstallPlan::Reattach { data_dir, .. } => Ok(format!(
-            "\nExisting MariaDB data was reattached from {}. The root password was not changed; use the password that already belongs to that data directory.",
+            "\nExisting MariaDB data was reattached from {}. Local root accounts were reset to the installer password.",
             data_dir.display()
         )),
     }
@@ -981,9 +981,20 @@ fn reattach_preserved_data(
             service_name = options.service_name
         ));
     }
+    let reset_output = run_elevated_reset_preserved_root_password(options, &my_ini)?;
+    if !reset_output.success {
+        return Err(format!(
+            "MariaDB preserved data was reattached, but the root password could not be reset: {}",
+            if reset_output.stderr.is_empty() {
+                reset_output.stdout
+            } else {
+                reset_output.stderr
+            }
+        ));
+    }
 
     Ok(format!(
-        "Preserved data was reattached from {} using binaries in {}.",
+        "Preserved data was reattached from {} using binaries in {}, and local root password was reset.",
         data_dir.display(),
         install_dir.display()
     ))
@@ -1056,6 +1067,92 @@ exit 1
         &script,
         Duration::from_secs(180),
     )
+}
+
+fn run_elevated_reset_preserved_root_password(
+    options: &MariaDBInstallOptions,
+    my_ini: &Path,
+) -> Result<InstallOutput, String> {
+    let escaped_service_name = options.service_name.replace('\'', "''");
+    let escaped_my_ini = my_ini.to_string_lossy().replace('\'', "''");
+    let root_password = sql_string_literal(&options.root_password);
+    let script = format!(
+        r#"$ErrorActionPreference = 'Stop'
+$serviceName = '{escaped_service_name}'
+$myIni = '{escaped_my_ini}'
+$initFile = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), "fxserver-mariadb-reset-root-$([System.Guid]::NewGuid().ToString('N')).sql")
+$originalConfig = [System.IO.File]::ReadAllText($myIni)
+$initPathForIni = $initFile.Replace('\', '/')
+$sql = @"
+CREATE USER IF NOT EXISTS 'root'@'localhost';
+GRANT ALL PRIVILEGES ON *.* TO 'root'@'localhost' WITH GRANT OPTION;
+ALTER USER 'root'@'localhost' IDENTIFIED BY {root_password};
+CREATE USER IF NOT EXISTS 'root'@'127.0.0.1';
+GRANT ALL PRIVILEGES ON *.* TO 'root'@'127.0.0.1' WITH GRANT OPTION;
+ALTER USER 'root'@'127.0.0.1' IDENTIFIED BY {root_password};
+CREATE USER IF NOT EXISTS 'root'@'::1';
+GRANT ALL PRIVILEGES ON *.* TO 'root'@'::1' WITH GRANT OPTION;
+ALTER USER 'root'@'::1' IDENTIFIED BY {root_password};
+FLUSH PRIVILEGES;
+"@
+$utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+[System.IO.File]::WriteAllText($initFile, $sql, $utf8NoBom)
+try {{
+    $service = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
+    if ($service -and $service.Status -ne 'Stopped') {{
+        Stop-Service -Name $serviceName -Force -ErrorAction SilentlyContinue
+        $service.WaitForStatus('Stopped', [TimeSpan]::FromSeconds(30))
+    }}
+    [System.IO.File]::WriteAllText($myIni, $originalConfig.TrimEnd() + "`r`n`r`n[mysqld]`r`ninit-file=$initPathForIni`r`n", $utf8NoBom)
+    $start = Start-Process -FilePath 'sc.exe' -ArgumentList @('start', $serviceName) -Wait -PassThru
+    if ($start.ExitCode -ne 0) {{
+        exit $start.ExitCode
+    }}
+    $deadline = (Get-Date).AddSeconds(45)
+    do {{
+        $service = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
+        if ($service -and $service.Status -eq 'Running') {{
+            break
+        }}
+        Start-Sleep -Seconds 1
+    }} while ((Get-Date) -lt $deadline)
+    $service = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
+    if (-not $service -or $service.Status -ne 'Running') {{
+        Write-Error "MariaDB service did not start while resetting root password."
+        exit 73
+    }}
+    Stop-Service -Name $serviceName -Force -ErrorAction SilentlyContinue
+    $service.WaitForStatus('Stopped', [TimeSpan]::FromSeconds(30))
+    [System.IO.File]::WriteAllText($myIni, $originalConfig, $utf8NoBom)
+    $restart = Start-Process -FilePath 'sc.exe' -ArgumentList @('start', $serviceName) -Wait -PassThru
+    if ($restart.ExitCode -ne 0) {{
+        exit $restart.ExitCode
+    }}
+    $deadline = (Get-Date).AddSeconds(45)
+    do {{
+        $service = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
+        if ($service -and $service.Status -eq 'Running') {{
+            exit 0
+        }}
+        Start-Sleep -Seconds 1
+    }} while ((Get-Date) -lt $deadline)
+    exit 74
+}} finally {{
+    [System.IO.File]::WriteAllText($myIni, $originalConfig, $utf8NoBom)
+    Remove-Item -LiteralPath $initFile -Force -ErrorAction SilentlyContinue
+}}
+"#
+    );
+
+    run_elevated_powershell_script(
+        "mariadb-reset-preserved-root",
+        &script,
+        Duration::from_secs(180),
+    )
+}
+
+fn sql_string_literal(value: &str) -> String {
+    format!("'{}'", value.replace('\\', "\\\\").replace('\'', "''"))
 }
 
 fn wait_for_service_running(service_name: &str, timeout: Duration) -> bool {
