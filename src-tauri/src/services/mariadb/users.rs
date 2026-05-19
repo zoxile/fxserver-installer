@@ -25,6 +25,10 @@ pub fn list_users(credentials: MariaDBCredentials) -> Result<Vec<MariaDBUser>, S
     Ok(result
         .rows
         .into_iter()
+        .filter(|row| {
+            row.first()
+                .is_none_or(|username| !username.eq_ignore_ascii_case("PUBLIC"))
+        })
         .map(|row| MariaDBUser {
             username: row.first().cloned().unwrap_or_default(),
             host: row.get(1).cloned().unwrap_or_default(),

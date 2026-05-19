@@ -792,6 +792,7 @@ fn validate_fresh_root_password(options: &MariaDBInstallOptions) -> Result<Strin
     while started.elapsed() < Duration::from_secs(45) {
         match validate_connection(credentials.clone()) {
             Ok(()) => {
+                cleanup_default_install_artifacts(credentials)?;
                 return Ok(format!(
                     "\nValidated root login over localhost:{} with the installer password.",
                     options.port
@@ -813,6 +814,15 @@ fn validate_fresh_root_password(options: &MariaDBInstallOptions) -> Result<Strin
             last_error
         }
     ))
+}
+
+fn cleanup_default_install_artifacts(credentials: MariaDBCredentials) -> Result<(), String> {
+    let cleanup_sql = "DROP DATABASE IF EXISTS test;\
+        DELETE FROM mysql.global_priv WHERE User = 'PUBLIC';\
+        FLUSH PRIVILEGES;"
+        .to_string();
+    crate::services::mariadb::query::run_admin_query(credentials, cleanup_sql)
+        .map_err(|error| format!("MariaDB installed, but default cleanup failed: {error}"))
 }
 
 fn build_update_overrides(log_path: &std::path::Path) -> String {
@@ -918,12 +928,29 @@ fn default_mariadb_data_dirs() -> Vec<PathBuf> {
     }
 
     paths.sort_by(|left, right| {
-        mariadb_data_dir_version(right)
-            .cmp(&mariadb_data_dir_version(left))
+        user_schema_count(right)
+            .cmp(&user_schema_count(left))
+            .then_with(|| mariadb_data_dir_version(right).cmp(&mariadb_data_dir_version(left)))
             .then_with(|| right.cmp(left))
     });
     paths.dedup();
     paths
+}
+
+fn user_schema_count(path: &Path) -> usize {
+    std::fs::read_dir(path)
+        .ok()
+        .into_iter()
+        .flat_map(|entries| entries.flatten())
+        .filter(|entry| entry.path().is_dir())
+        .filter_map(|entry| entry.file_name().to_str().map(str::to_ascii_lowercase))
+        .filter(|name| {
+            !matches!(
+                name.as_str(),
+                "mysql" | "performance_schema" | "sys" | "test"
+            )
+        })
+        .count()
 }
 
 fn mariadb_data_dir_version(path: &Path) -> Vec<u32> {
@@ -1080,6 +1107,7 @@ fn run_elevated_reset_preserved_root_password(
         r#"$ErrorActionPreference = 'Stop'
 $serviceName = '{escaped_service_name}'
 $myIni = '{escaped_my_ini}'
+$machineHost = [System.Net.Dns]::GetHostName().ToLowerInvariant().Replace("'", "''")
 $initFile = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), "fxserver-mariadb-reset-root-$([System.Guid]::NewGuid().ToString('N')).sql")
 $originalConfig = [System.IO.File]::ReadAllText($myIni)
 $initPathForIni = $initFile.Replace('\', '/')
@@ -1093,6 +1121,11 @@ ALTER USER 'root'@'127.0.0.1' IDENTIFIED BY {root_password};
 CREATE USER IF NOT EXISTS 'root'@'::1';
 GRANT ALL PRIVILEGES ON *.* TO 'root'@'::1' WITH GRANT OPTION;
 ALTER USER 'root'@'::1' IDENTIFIED BY {root_password};
+CREATE USER IF NOT EXISTS 'root'@'$machineHost';
+GRANT ALL PRIVILEGES ON *.* TO 'root'@'$machineHost' WITH GRANT OPTION;
+ALTER USER 'root'@'$machineHost' IDENTIFIED BY {root_password};
+DROP DATABASE IF EXISTS test;
+DELETE FROM mysql.global_priv WHERE User = 'PUBLIC';
 FLUSH PRIVILEGES;
 "@
 $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
@@ -1596,6 +1629,24 @@ mod tests {
         let version = mariadb_data_dir_version(Path::new("C:\\Program Files\\MariaDB 12.2\\data"));
 
         assert_eq!(version, vec![12, 2]);
+    }
+
+    #[test]
+    fn user_schema_count_ignores_system_databases() {
+        let root = std::env::temp_dir().join(format!(
+            "fxserver-installer-schema-count-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ));
+        for schema in ["mysql", "performance_schema", "sys", "test", "qbox_88d783"] {
+            std::fs::create_dir_all(root.join(schema)).expect("schema dir");
+        }
+
+        assert_eq!(user_schema_count(&root), 1);
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
