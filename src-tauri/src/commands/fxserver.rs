@@ -1,7 +1,7 @@
 use std::{
     fs,
-    io::{BufRead, BufReader, Write},
-    net::TcpStream,
+    io::{BufRead, BufReader},
+    net::UdpSocket,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::{Arc, Mutex},
@@ -372,7 +372,11 @@ pub fn read_server_config(request: ServerConfigRequest) -> Result<ServerConfigRe
         })?;
     let data_path = profile_config
         .get("dataPath")
-        .or_else(|| profile_config.get("server").and_then(|server| server.get("dataPath")))
+        .or_else(|| {
+            profile_config
+                .get("server")
+                .and_then(|server| server.get("dataPath"))
+        })
         .and_then(|value| value.as_str())
         .map(str::trim)
         .filter(|value| !value.is_empty())
@@ -831,6 +835,7 @@ fn read_process_resources(
 fn send_rcon_command(config: &FxserverRconConfig, command: &str) -> Result<String, String> {
     let host = config.host.trim();
     let password = config.password.trim();
+    let command = command.trim();
 
     if host.is_empty() {
         return Err("Set an RCON host before sending console commands.".to_string());
@@ -840,73 +845,80 @@ fn send_rcon_command(config: &FxserverRconConfig, command: &str) -> Result<Strin
         return Err("Set the server rcon_password before sending console commands.".to_string());
     }
 
-    let mut stream = TcpStream::connect((host, config.port)).map_err(|error| {
-        format!(
-            "Failed to connect to RCON at {host}:{}: {error}",
-            config.port
-        )
-    })?;
-    stream
-        .set_read_timeout(Some(Duration::from_secs(4)))
+    if command.is_empty() {
+        return Err("Type a command before sending RCON input.".to_string());
+    }
+
+    let socket = UdpSocket::bind("0.0.0.0:0")
+        .map_err(|error| format!("Failed to open local RCON UDP socket: {error}"))?;
+    socket
+        .set_read_timeout(Some(rcon_response_timeout()))
         .map_err(|error| format!("Failed to configure RCON read timeout: {error}"))?;
-    stream
+    socket
         .set_write_timeout(Some(Duration::from_secs(4)))
         .map_err(|error| format!("Failed to configure RCON write timeout: {error}"))?;
 
-    write_rcon_packet(&mut stream, 1, 3, password)?;
-    let mut auth = read_rcon_packet(&mut stream)?;
-    if auth.0 != -1 && auth.1 != 2 {
-        auth = read_rcon_packet(&mut stream)?;
+    let address = format!("{host}:{}", config.port);
+    let mut packet = Vec::with_capacity(password.len() + command.len() + 12);
+    packet.extend_from_slice(&[0xff, 0xff, 0xff, 0xff]);
+    packet.extend_from_slice(format!("rcon {password} {command}").as_bytes());
+    socket.send_to(&packet, &address).map_err(|error| {
+        format!(
+            "Failed to send RCON command to {host}:{}: {error}",
+            config.port
+        )
+    })?;
+
+    let mut responses = Vec::new();
+    let mut buffer = [0_u8; 4096];
+    loop {
+        match socket.recv_from(&mut buffer) {
+            Ok((length, _)) => {
+                let response = parse_quake_rcon_response(&buffer[..length]);
+                if !response.trim().is_empty() {
+                    responses.push(response);
+                }
+            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                break;
+            }
+            Err(error) => return Err(format!("Failed to read RCON response: {error}")),
+        }
     }
-    if auth.0 == -1 {
+
+    let response = responses.join("\n").trim().to_string();
+    if response.to_ascii_lowercase().contains("bad rconpassword") {
         return Err("RCON authentication failed. Check rcon_password.".to_string());
     }
 
-    write_rcon_packet(&mut stream, 2, 2, command)?;
-    let response = read_rcon_packet(&mut stream)?;
-    Ok(response.2)
+    Ok(response)
 }
 
-fn write_rcon_packet(
-    stream: &mut TcpStream,
-    id: i32,
-    packet_type: i32,
-    body: &str,
-) -> Result<(), String> {
-    let mut packet = Vec::with_capacity(body.len() + 14);
-    packet.extend_from_slice(&id.to_le_bytes());
-    packet.extend_from_slice(&packet_type.to_le_bytes());
-    packet.extend_from_slice(body.as_bytes());
-    packet.extend_from_slice(&[0, 0]);
-
-    let size = packet.len() as i32;
-    stream
-        .write_all(&size.to_le_bytes())
-        .and_then(|_| stream.write_all(&packet))
-        .and_then(|_| stream.flush())
-        .map_err(|error| format!("Failed to write RCON packet: {error}"))
+fn parse_quake_rcon_response(packet: &[u8]) -> String {
+    let payload = packet
+        .strip_prefix(&[0xff, 0xff, 0xff, 0xff])
+        .unwrap_or(packet);
+    String::from_utf8_lossy(payload)
+        .trim_start_matches("print\n")
+        .trim_start_matches("print")
+        .trim_matches(char::from(0))
+        .trim()
+        .to_string()
 }
 
-fn read_rcon_packet(stream: &mut TcpStream) -> Result<(i32, i32, String), String> {
-    let mut size_buffer = [0_u8; 4];
-    std::io::Read::read_exact(stream, &mut size_buffer)
-        .map_err(|error| format!("Failed to read RCON response size: {error}"))?;
+#[cfg(not(test))]
+fn rcon_response_timeout() -> Duration {
+    Duration::from_secs(4)
+}
 
-    let size = i32::from_le_bytes(size_buffer);
-    if !(10..=4096).contains(&size) {
-        return Err(format!("RCON returned an invalid packet size: {size}"));
-    }
-
-    let mut packet = vec![0_u8; size as usize];
-    std::io::Read::read_exact(stream, &mut packet)
-        .map_err(|error| format!("Failed to read RCON response: {error}"))?;
-
-    let id = i32::from_le_bytes(packet[0..4].try_into().unwrap_or_default());
-    let packet_type = i32::from_le_bytes(packet[4..8].try_into().unwrap_or_default());
-    let body_end = packet.len().saturating_sub(2);
-    let body = String::from_utf8_lossy(&packet[8..body_end]).to_string();
-
-    Ok((id, packet_type, body))
+#[cfg(test)]
+fn rcon_response_timeout() -> Duration {
+    Duration::from_millis(100)
 }
 
 fn number_from_json(value: Option<&serde_json::Value>) -> Option<f64> {
@@ -923,4 +935,70 @@ fn integer_from_json(value: Option<&serde_json::Value>) -> Option<u64> {
             .as_u64()
             .or_else(|| value.as_str()?.parse::<u64>().ok())
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::mpsc;
+
+    #[test]
+    fn quake_rcon_sends_udp_packet_and_reads_response() {
+        let socket = UdpSocket::bind("127.0.0.1:0").expect("mock rcon bind");
+        let port = socket.local_addr().expect("mock rcon address").port();
+        let (sender, receiver) = mpsc::channel();
+
+        thread::spawn(move || {
+            let mut buffer = [0_u8; 1024];
+            let (length, peer) = socket.recv_from(&mut buffer).expect("rcon request");
+            sender
+                .send(buffer[..length].to_vec())
+                .expect("request sent");
+            socket
+                .send_to(b"\xff\xff\xff\xffprint\ncommand ran\n", peer)
+                .expect("rcon response");
+        });
+
+        let response = send_rcon_command(
+            &FxserverRconConfig {
+                host: "127.0.0.1".to_string(),
+                port,
+                password: "secret".to_string(),
+            },
+            "say hello",
+        )
+        .expect("rcon command");
+
+        assert_eq!(
+            receiver.recv().expect("request"),
+            b"\xff\xff\xff\xffrcon secret say hello"
+        );
+        assert_eq!(response, "command ran");
+    }
+
+    #[test]
+    fn quake_rcon_reports_bad_password_response() {
+        let socket = UdpSocket::bind("127.0.0.1:0").expect("mock rcon bind");
+        let port = socket.local_addr().expect("mock rcon address").port();
+
+        thread::spawn(move || {
+            let mut buffer = [0_u8; 1024];
+            let (_, peer) = socket.recv_from(&mut buffer).expect("rcon request");
+            socket
+                .send_to(b"\xff\xff\xff\xffprint\nBad rconpassword.\n", peer)
+                .expect("rcon response");
+        });
+
+        let error = send_rcon_command(
+            &FxserverRconConfig {
+                host: "127.0.0.1".to_string(),
+                port,
+                password: "wrong".to_string(),
+            },
+            "status",
+        )
+        .expect_err("bad password");
+
+        assert!(error.contains("RCON authentication failed"));
+    }
 }
