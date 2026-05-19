@@ -88,7 +88,9 @@ pub fn uninstall_mariadb() -> Result<String, String> {
             ));
         }
     };
-    let preserve_heidisql = detect_heidisql(package.install_location.as_deref());
+    let heidisql_message = preserve_heidisql_before_uninstall(detect_heidisql(
+        package.install_location.as_deref(),
+    ))?;
     let product_code = package.product_code.ok_or_else(|| {
         "MariaDB product code was not found in Windows uninstall registry.".to_string()
     })?;
@@ -119,7 +121,6 @@ pub fn uninstall_mariadb() -> Result<String, String> {
     }
 
     cleanup_mariadb_service(&service_name)?;
-    let heidisql_message = preserve_heidisql_after_uninstall(preserve_heidisql)?;
 
     if wait_for_uninstall_detection(Duration::from_secs(45)) {
         Ok(format!(
@@ -445,7 +446,7 @@ fn registry_heidisql_installed() -> bool {
         .is_some_and(|count| count > 0)
 }
 
-fn preserve_heidisql_after_uninstall(was_present: bool) -> Result<Option<String>, String> {
+fn preserve_heidisql_before_uninstall(was_present: bool) -> Result<Option<String>, String> {
     if !was_present || registry_heidisql_installed() {
         return Ok(None);
     }
@@ -469,12 +470,12 @@ fn preserve_heidisql_after_uninstall(was_present: bool) -> Result<Option<String>
 
     if output.success || registry_heidisql_installed() {
         Ok(Some(
-            "HeidiSQL was detected before uninstall and has been preserved as a standalone installation."
+            "HeidiSQL was bundled with MariaDB and was made standalone before uninstall."
                 .to_string(),
         ))
     } else {
         Err(format!(
-            "MariaDB was removed, but HeidiSQL could not be restored: {}",
+            "HeidiSQL appears to be bundled with MariaDB and could not be made standalone, so MariaDB was not uninstalled: {}",
             if output.stderr.is_empty() {
                 output.stdout
             } else {
@@ -817,6 +818,12 @@ fn reattach_preserved_data(
             }
         ));
     }
+    if !wait_for_service_running(&options.service_name, Duration::from_secs(45)) {
+        return Err(format!(
+            "MariaDB service was registered against preserved data, but {service_name} did not reach Running state.",
+            service_name = options.service_name
+        ));
+    }
 
     Ok(format!(
         "Preserved data was reattached from {} using binaries in {}.",
@@ -857,6 +864,21 @@ fn remove_existing_service(service_name: &str) {
         Duration::from_secs(60),
     );
     thread::sleep(Duration::from_secs(2));
+}
+
+fn wait_for_service_running(service_name: &str, timeout: Duration) -> bool {
+    let started = Instant::now();
+
+    while started.elapsed() < timeout {
+        let status = detect_mariadb();
+        if status.service_name.as_deref() == Some(service_name) && status.running {
+            return true;
+        }
+
+        thread::sleep(Duration::from_secs(2));
+    }
+
+    false
 }
 
 fn prepare_preserved_my_ini(
