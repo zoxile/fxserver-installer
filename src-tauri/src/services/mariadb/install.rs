@@ -88,6 +88,7 @@ pub fn uninstall_mariadb() -> Result<String, String> {
             ));
         }
     };
+    let preserve_heidisql = detect_heidisql(package.install_location.as_deref());
     let product_code = package.product_code.ok_or_else(|| {
         "MariaDB product code was not found in Windows uninstall registry.".to_string()
     })?;
@@ -118,10 +119,14 @@ pub fn uninstall_mariadb() -> Result<String, String> {
     }
 
     cleanup_mariadb_service(&service_name)?;
+    let heidisql_message = preserve_heidisql_after_uninstall(preserve_heidisql)?;
 
     if wait_for_uninstall_detection(Duration::from_secs(45)) {
         Ok(format!(
-            "MariaDB uninstalled and the {service_name} service was removed. Data directory was preserved by passing CLEANUPDATA empty.\nInstaller log: {}",
+            "MariaDB uninstalled and the {service_name} service was removed. Data directory was preserved by passing CLEANUPDATA empty.{}\nInstaller log: {}",
+            heidisql_message
+                .map(|message| format!("\n{message}"))
+                .unwrap_or_default(),
             log_path.display()
         ))
     } else {
@@ -391,6 +396,85 @@ exit 0
     } else {
         Err(format!(
             "MariaDB package was removed, but the {service_name} service could not be removed: {}",
+            if output.stderr.is_empty() {
+                output.stdout
+            } else {
+                output.stderr
+            }
+        ))
+    }
+}
+
+fn detect_heidisql(mariadb_install_location: Option<&str>) -> bool {
+    if registry_heidisql_installed() {
+        return true;
+    }
+
+    mariadb_install_location
+        .map(|location| {
+            Path::new(location).join("heidisql.exe").exists()
+                || Path::new(location)
+                    .join("bin")
+                    .join("heidisql.exe")
+                    .exists()
+        })
+        .unwrap_or(false)
+}
+
+fn registry_heidisql_installed() -> bool {
+    let output = Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-Command",
+            "$paths = 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*','HKLM:\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*','HKCU:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*'; @(Get-ItemProperty $paths -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -like 'HeidiSQL*' }).Count",
+        ])
+        .output();
+
+    output
+        .ok()
+        .and_then(|result| {
+            if result.status.success() {
+                String::from_utf8_lossy(&result.stdout)
+                    .trim()
+                    .parse::<usize>()
+                    .ok()
+            } else {
+                None
+            }
+        })
+        .is_some_and(|count| count > 0)
+}
+
+fn preserve_heidisql_after_uninstall(was_present: bool) -> Result<Option<String>, String> {
+    if !was_present || registry_heidisql_installed() {
+        return Ok(None);
+    }
+
+    let output = run_process(
+        "winget",
+        &[
+            "install",
+            "--id",
+            "HeidiSQL.HeidiSQL",
+            "-e",
+            "--silent",
+            "--source",
+            "winget",
+            "--disable-interactivity",
+            "--accept-package-agreements",
+            "--accept-source-agreements",
+        ],
+        INSTALL_TIMEOUT,
+    )?;
+
+    if output.success || registry_heidisql_installed() {
+        Ok(Some(
+            "HeidiSQL was detected before uninstall and has been preserved as a standalone installation."
+                .to_string(),
+        ))
+    } else {
+        Err(format!(
+            "MariaDB was removed, but HeidiSQL could not be restored: {}",
             if output.stderr.is_empty() {
                 output.stdout
             } else {
@@ -687,6 +771,7 @@ fn reattach_preserved_data(
     install_dir: &Path,
     data_dir: &Path,
 ) -> Result<String, String> {
+    let install_dir = resolve_actual_install_dir(install_dir)?;
     let mysqld_path = install_dir.join("bin").join("mysqld.exe");
     if !mysqld_path.exists() {
         return Err(format!(
@@ -695,7 +780,7 @@ fn reattach_preserved_data(
         ));
     }
 
-    let my_ini = prepare_preserved_my_ini(options, install_dir, data_dir)?;
+    let my_ini = prepare_preserved_my_ini(options, &install_dir, data_dir)?;
     remove_existing_service(&options.service_name);
     let service_output = run_elevated_process(
         &mysqld_path,
@@ -738,6 +823,26 @@ fn reattach_preserved_data(
         data_dir.display(),
         install_dir.display()
     ))
+}
+
+fn resolve_actual_install_dir(requested_install_dir: &Path) -> Result<PathBuf, String> {
+    if requested_install_dir
+        .join("bin")
+        .join("mysqld.exe")
+        .exists()
+    {
+        return Ok(requested_install_dir.to_path_buf());
+    }
+
+    if let Some(install_location) = registry_installed_package()
+        .and_then(|package| package.install_location)
+        .map(PathBuf::from)
+        .filter(|path| path.join("bin").join("mysqld.exe").exists())
+    {
+        return Ok(install_location);
+    }
+
+    Ok(requested_install_dir.to_path_buf())
 }
 
 fn remove_existing_service(service_name: &str) {
@@ -836,6 +941,10 @@ fn rewrite_my_ini(
     upsert_ini_value(&mut lines, "mysqld", "port", &options.port.to_string());
     if options.skip_networking {
         upsert_ini_value(&mut lines, "mysqld", "skip-networking", "ON");
+        remove_ini_value(&mut lines, "mysqld", "bind-address");
+    } else {
+        remove_ini_value(&mut lines, "mysqld", "skip-networking");
+        upsert_ini_value(&mut lines, "mysqld", "bind-address", "127.0.0.1");
     }
 
     upsert_ini_value(&mut lines, "client", "plugin-dir", &normalized_plugin_dir);
@@ -888,6 +997,45 @@ fn upsert_ini_value(lines: &mut Vec<String>, section: &str, key: &str, value: &s
     lines.insert(next_section, format!("{key}={value}"));
 }
 
+fn remove_ini_value(lines: &mut Vec<String>, section: &str, key: &str) {
+    let Some((section_start, next_section)) = ini_section_range(lines, section) else {
+        return;
+    };
+
+    let mut index = next_section;
+    while index > section_start + 1 {
+        index -= 1;
+        let trimmed = lines[index].trim_start();
+        if trimmed
+            .split_once('=')
+            .is_some_and(|(candidate, _)| candidate.trim().eq_ignore_ascii_case(key))
+            || trimmed.eq_ignore_ascii_case(key)
+        {
+            lines.remove(index);
+        }
+    }
+}
+
+fn ini_section_range(lines: &[String], section: &str) -> Option<(usize, usize)> {
+    let section_header = format!("[{section}]");
+    let mut section_start = None;
+    let mut next_section = lines.len();
+
+    for (index, line) in lines.iter().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.eq_ignore_ascii_case(&section_header) {
+            section_start = Some(index);
+            continue;
+        }
+        if section_start.is_some() && trimmed.starts_with('[') && trimmed.ends_with(']') {
+            next_section = index;
+            break;
+        }
+    }
+
+    section_start.map(|start| (start, next_section))
+}
+
 fn selected_features(
     options: &MariaDBInstallOptions,
     install_plan: &InstallPlan,
@@ -923,6 +1071,7 @@ fn push_property_bool(properties: &mut Vec<String>, name: &str, enabled: bool) {
 struct RegistryPackage {
     product_code: Option<String>,
     version: Option<String>,
+    install_location: Option<String>,
 }
 
 fn registry_installed_package() -> Option<RegistryPackage> {
@@ -930,7 +1079,7 @@ fn registry_installed_package() -> Option<RegistryPackage> {
         .args([
             "-NoProfile",
             "-Command",
-            "$paths = 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*','HKLM:\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*'; Get-ItemProperty $paths -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -like 'MariaDB*' } | Sort-Object DisplayVersion -Descending | Select-Object -First 1 DisplayVersion,PSChildName | ConvertTo-Json -Compress",
+            "$paths = 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*','HKLM:\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*'; Get-ItemProperty $paths -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -like 'MariaDB*' } | Sort-Object DisplayVersion -Descending | Select-Object -First 1 DisplayVersion,PSChildName,InstallLocation | ConvertTo-Json -Compress",
         ])
         .output()
         .ok()?;
@@ -947,6 +1096,7 @@ fn registry_installed_package() -> Option<RegistryPackage> {
     Some(RegistryPackage {
         product_code: extract_json_string(&stdout, "PSChildName"),
         version: extract_json_string(&stdout, "DisplayVersion"),
+        install_location: extract_json_string(&stdout, "InstallLocation"),
     })
 }
 
@@ -1005,7 +1155,7 @@ fn extract_json_string(json: &str, key: &str) -> Option<String> {
     let start = json.find(&marker)? + marker.len();
     let rest = &json[start..];
     let end = rest.find('"')?;
-    Some(rest[..end].replace("\\\"", "\""))
+    Some(rest[..end].replace("\\\"", "\"").replace("\\\\", "\\"))
 }
 
 #[cfg(test)]
@@ -1106,9 +1256,37 @@ mod tests {
     }
 
     #[test]
+    fn preserved_my_ini_enables_local_tcp_when_networking_is_not_skipped() {
+        let content = "[mysqld]\r\ndatadir=C:/old/data\r\nskip-networking=ON\r\nbind-address=0.0.0.0\r\n\r\n[client]\r\nsocket=MariaDB\r\n";
+        let mut options = options();
+        options.skip_networking = false;
+        let rewritten = rewrite_my_ini(
+            content,
+            &options,
+            Path::new("C:\\Program Files\\MariaDB 12.2 Reattached"),
+            Path::new("C:\\Program Files\\MariaDB 12.2\\data"),
+        );
+
+        assert!(!rewritten.contains("skip-networking"));
+        assert!(rewritten.contains("bind-address=127.0.0.1"));
+        assert!(rewritten.contains("port=3306"));
+    }
+
+    #[test]
     fn mariadb_data_dir_version_reads_parent_directory() {
         let version = mariadb_data_dir_version(Path::new("C:\\Program Files\\MariaDB 12.2\\data"));
 
         assert_eq!(version, vec![12, 2]);
+    }
+
+    #[test]
+    fn json_string_extraction_unescapes_windows_paths() {
+        let value = extract_json_string(
+            r#"{"InstallLocation":"C:\\Program Files\\MariaDB 12.2 Reattached\\"}"#,
+            "InstallLocation",
+        )
+        .expect("install location");
+
+        assert_eq!(value, "C:\\Program Files\\MariaDB 12.2 Reattached\\");
     }
 }
