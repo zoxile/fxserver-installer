@@ -1,5 +1,4 @@
 <script lang="ts">
-	import { ALIGNMENT, VirtualList } from "svelte-virtuallists";
 	import ActivityIcon from "@lucide/svelte/icons/activity";
 	import AlertCircleIcon from "@lucide/svelte/icons/alert-circle";
 	import CheckCircle2Icon from "@lucide/svelte/icons/check-circle-2";
@@ -10,7 +9,7 @@
 	import SendIcon from "@lucide/svelte/icons/send";
 	import ServerIcon from "@lucide/svelte/icons/server";
 	import SquareIcon from "@lucide/svelte/icons/square";
-	import { onDestroy, onMount } from "svelte";
+	import { onDestroy, onMount, tick } from "svelte";
 	import { Checkbox } from "$lib/components/ui/checkbox/index.js";
 	import * as Card from "$lib/components/ui/card/index.js";
 	import { Button } from "$lib/components/ui/button/index.js";
@@ -25,6 +24,9 @@
 	import {
 		getFxserverStatus,
 		getFxserverTerminal,
+		getSavedFxserverRconPassword,
+		clearFxserverRconPassword,
+		saveFxserverRconPassword,
 		sendFxserverCommand,
 		startFxserver,
 		stopFxserver,
@@ -57,9 +59,12 @@
 	let refreshTimer: number | undefined;
 	let terminalTimer: number | undefined;
 	let uptimeTimer: number | undefined;
+	let rconPasswordSaveTimer: number | undefined;
 	let nowSeconds = $state(Math.floor(Date.now() / 1000));
-	let terminalVisibleRange = $state({ start: 0, end: 0 });
-	let terminalScrollToIndex = $state(0);
+	let terminalViewport: HTMLDivElement | null = null;
+	let terminalRefreshPending = false;
+	let rconPasswordLoaded = false;
+	let lastSavedRconPassword = "";
 
 	const activeEnvCount = $derived(Object.values(envValues).filter((value) => value.trim()).length + (serverProfile.trim() ? 1 : 0));
 	const canStart = $derived(Boolean(artifactPath.trim()) && !status.running && !starting && !busy);
@@ -72,24 +77,18 @@
 
 	let autoScrollTerminal = $state(true);
 	let lastTerminalEntryId = $state<number | null>(null);
+	const terminalBufferLimit = 1000;
 
 	onMount(() => {
-		loadInstallPath();
-		loadFxserverSettings();
-		artifactPath = getInstallPath();
-		loadSavedEnvironment();
-		storageReady = true;
-		void refreshAll();
-		void refreshTxDataProfiles();
+		void initializePage();
 		refreshTimer = window.setInterval(() => {
 			if (status.running) void refreshStatus(false);
 		}, 2500);
 		uptimeTimer = window.setInterval(() => {
 			nowSeconds = Math.floor(Date.now() / 1000);
 		}, 1000);
-		void refreshTerminal(false);
 		terminalTimer = window.setInterval(() => {
-			void refreshTerminal(false);
+			void refreshTerminal({ scrollToBottom: false });
 		}, 1000);
 	});
 
@@ -97,6 +96,7 @@
 		if (refreshTimer) window.clearInterval(refreshTimer);
 		if (terminalTimer) window.clearInterval(terminalTimer);
 		if (uptimeTimer) window.clearInterval(uptimeTimer);
+		if (rconPasswordSaveTimer) window.clearTimeout(rconPasswordSaveTimer);
 	});
 
 	$effect(() => {
@@ -104,7 +104,10 @@
 		serverProfile;
 		JSON.stringify(rconConfig);
 
-		if (storageReady) saveEnvironment();
+		if (storageReady) {
+			saveEnvironment();
+			if (rconPasswordLoaded) scheduleRconPasswordSave();
+		}
 	});
 
 	$effect(() => {
@@ -114,7 +117,7 @@
 
 		lastTerminalEntryId = lastEntry.id;
 
-		if (autoScrollTerminal) terminalScrollToIndex = terminalEntries.length - 1;
+		if (autoScrollTerminal) void scrollTerminalToBottom();
 	});
 
 	$effect(() => {
@@ -131,6 +134,18 @@
 			serverProfile = sharedProfile;
 		}
 	});
+
+	async function initializePage() {
+		loadInstallPath();
+		loadFxserverSettings();
+		artifactPath = getInstallPath();
+		loadSavedEnvironment();
+		await loadSecureRconPassword();
+		storageReady = true;
+		void refreshAll();
+		void refreshTxDataProfiles();
+		void refreshTerminal({ reset: true, scrollToBottom: false });
+	}
 
 	function loadSavedEnvironment() {
 		try {
@@ -149,6 +164,18 @@
 		}
 	}
 
+	async function loadSecureRconPassword() {
+		try {
+			const password = await getSavedFxserverRconPassword();
+			rconConfig = { ...rconConfig, password };
+			lastSavedRconPassword = password;
+		} catch (caught) {
+			error = caught instanceof Error ? caught.message : String(caught);
+		} finally {
+			rconPasswordLoaded = true;
+		}
+	}
+
 	function emptyEnvironment() {
 		return Object.fromEntries(txHostFields.map((field) => [field.key, ""]));
 	}
@@ -164,6 +191,23 @@
 		});
 		setTxDataPath((envValues.TXHOST_DATA_PATH ?? "").trim());
 		setServerProfile(serverProfile.trim());
+	}
+
+	function scheduleRconPasswordSave() {
+		if (rconConfig.password === lastSavedRconPassword) return;
+		if (rconPasswordSaveTimer) window.clearTimeout(rconPasswordSaveTimer);
+		rconPasswordSaveTimer = window.setTimeout(async () => {
+			try {
+				if (rconConfig.password) {
+					await saveFxserverRconPassword(rconConfig.password);
+				} else {
+					await clearFxserverRconPassword();
+				}
+				lastSavedRconPassword = rconConfig.password;
+			} catch (caught) {
+				error = caught instanceof Error ? caught.message : String(caught);
+			}
+		}, 400);
 	}
 
 	function updateArtifactPath(event: Event) {
@@ -226,14 +270,43 @@
 		if (showMessage) message = status.running ? "FXServer status refreshed." : "FXServer is not running from this app.";
 	}
 
-	async function refreshTerminal(scrollToBottom = true) {
+	async function refreshTerminal(options: { reset?: boolean; scrollToBottom?: boolean } = {}) {
+		if (terminalRefreshPending) return;
+		terminalRefreshPending = true;
 		try {
-			const result = await getFxserverTerminal(700);
-			terminalEntries = result.entries;
-			if (scrollToBottom && result.entries.length) terminalScrollToIndex = result.entries.length - 1;
+			const reset = options.reset ?? false;
+			const afterId = reset ? null : (terminalEntries.at(-1)?.id ?? null);
+			const result = await getFxserverTerminal(reset ? terminalBufferLimit : 250, afterId);
+			mergeTerminalEntries(result.entries, reset);
+			if (options.scrollToBottom ?? true) {
+				autoScrollTerminal = true;
+				await scrollTerminalToBottom();
+			}
 		} catch (caught) {
 			error = caught instanceof Error ? caught.message : String(caught);
+		} finally {
+			terminalRefreshPending = false;
 		}
+	}
+
+	function mergeTerminalEntries(entries: FxserverTerminalEntry[], reset: boolean) {
+		if (reset) {
+			terminalEntries = entries.slice(-terminalBufferLimit);
+			lastTerminalEntryId = terminalEntries.at(-1)?.id ?? null;
+			return;
+		}
+
+		if (!entries.length) return;
+
+		const existingIds = new Set(terminalEntries.map((entry) => entry.id));
+		const merged = [...terminalEntries, ...entries.filter((entry) => !existingIds.has(entry.id))];
+		terminalEntries = merged.slice(-terminalBufferLimit);
+	}
+
+	async function scrollTerminalToBottom() {
+		await tick();
+		if (!terminalViewport) return;
+		terminalViewport.scrollTop = Math.max(0, terminalViewport.scrollHeight - terminalViewport.clientHeight);
 	}
 
 	function launchEnvironment() {
@@ -252,7 +325,7 @@
 				environment: launchEnvironment(),
 				serverProfile: serverProfile.trim() || null,
 			});
-			await Promise.all([refreshStatus(false), refreshTerminal()]);
+			await Promise.all([refreshStatus(false), refreshTerminal({ reset: true })]);
 			message = "FXServer started with the selected TXHOST environment.";
 		} catch (caught) {
 			error = caught instanceof Error ? caught.message : String(caught);
@@ -268,7 +341,7 @@
 
 		try {
 			await stopFxserver();
-			await Promise.all([refreshStatus(false), refreshTerminal()]);
+			await Promise.all([refreshStatus(false), refreshTerminal({ reset: true })]);
 			message = "FXServer stopped.";
 		} catch (caught) {
 			error = caught instanceof Error ? caught.message : String(caught);
@@ -337,10 +410,10 @@
 		rconConfig = { ...rconConfig, port: Number.isFinite(value) ? value : 30120 };
 	}
 
-	function updateAutoScrollFromRange(start: number, end: number) {
-		terminalVisibleRange = { start, end };
-		if (terminalEntries.length <= 1) return;
-		autoScrollTerminal = end >= terminalEntries.length - 2;
+	function updateAutoScrollFromScroll() {
+		if (!terminalViewport) return;
+		const distanceFromBottom = terminalViewport.scrollHeight - terminalViewport.scrollTop - terminalViewport.clientHeight;
+		autoScrollTerminal = distanceFromBottom < 28;
 	}
 
 	async function submitTerminalCommand() {
@@ -350,7 +423,7 @@
 		try {
 			await sendFxserverCommand(command, rconConfig);
 			terminalCommand = "";
-			await refreshTerminal();
+			await refreshTerminal({ scrollToBottom: true });
 		} catch (caught) {
 			error = caught instanceof Error ? caught.message : String(caught);
 		}
@@ -526,31 +599,38 @@
 			<div class="flex items-center justify-between gap-3 rounded-sm border border-border bg-muted/30 px-3 py-2">
 				<div>
 					<div class="text-sm font-medium">Console output</div>
-					<p class="text-xs text-muted-foreground">Visible {terminalVisibleRange.start + 1}-{Math.min(terminalVisibleRange.end + 1, terminalEntries.length)} of {terminalEntries.length} lines.</p>
+					<p class="text-xs text-muted-foreground">Showing the latest {terminalEntries.length} buffered lines.</p>
 				</div>
 
-				<label
-					class="flex cursor-pointer select-none items-center gap-2 rounded-sm border border-border bg-background px-2.5 py-1.5 text-xs font-medium text-muted-foreground shadow-xs transition-colors hover:bg-transparent hover:text-foreground"
-				>
-					<Checkbox
-						bind:checked={autoScrollTerminal}
-						class="size-4 rounded-lg border-border data-[state=checked]:border-primary data-[state=checked]:bg-primary data-[state=checked]:text-primary-foreground"
-					/>
-					<span>Auto-scroll</span>
-				</label>
+				<div class="flex items-center gap-2">
+					<Button
+						variant="outline"
+						size="sm"
+						onclick={() => {
+							autoScrollTerminal = true;
+							void scrollTerminalToBottom();
+						}}
+						title="Jump to the latest console line"
+					>
+						Bottom
+					</Button>
+					<label
+						class="flex cursor-pointer select-none items-center gap-2 rounded-sm border border-border bg-background px-2.5 py-1.5 text-xs font-medium text-muted-foreground shadow-xs transition-colors hover:bg-transparent hover:text-foreground"
+					>
+						<Checkbox
+							bind:checked={autoScrollTerminal}
+							class="size-4 rounded-lg border-border data-[state=checked]:border-primary data-[state=checked]:bg-primary data-[state=checked]:text-primary-foreground"
+						/>
+						<span>Auto-scroll</span>
+					</label>
+				</div>
 			</div>
 
-			<div class="h-104 overflow-hidden rounded-sm border border-border bg-black/40 font-mono text-xs">
+			<div bind:this={terminalViewport} onscroll={updateAutoScrollFromScroll} class="h-104 overflow-auto rounded-sm border border-border bg-black/40 font-mono text-xs">
 				{#if terminalEntries.length}
-					<VirtualList
-						items={terminalEntries}
-						scrollToIndex={terminalScrollToIndex}
-						scrollToAlignment={ALIGNMENT.END}
-						onVisibleRangeUpdate={({ start, end }) => updateAutoScrollFromRange(Number(start), Number(end))}
-						style="height:100%;width:100%;overflow:auto;"
-					>
-						{#snippet vl_slot({ item })}
-							<div class="flex h-6 min-w-0 items-center gap-2 px-3 text-muted-foreground">
+					<div class="min-w-0 py-1">
+						{#each terminalEntries as item (item.id)}
+							<div class="flex min-h-6 min-w-0 items-center gap-2 px-3 text-muted-foreground">
 								<span class="w-20 shrink-0 truncate text-[11px] text-muted-foreground/80">
 									{terminalTime(item.timestamp)}
 								</span>
@@ -563,8 +643,8 @@
 									{item.line}
 								</span>
 							</div>
-						{/snippet}
-					</VirtualList>
+						{/each}
+					</div>
 				{:else}
 					<div class="flex h-full items-center justify-center p-3 text-center text-sm text-muted-foreground">Start FXServer to see console output here.</div>
 				{/if}

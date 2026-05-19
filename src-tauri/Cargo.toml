@@ -25,3 +25,4 @@ log = "0.4"
 tauri = { version = "2.11.0", features = [] }
 tauri-plugin-log = "2"
 tauri-plugin-dialog = "2"
+windows-sys = { version = "0.60", features = ["Win32_Foundation", "Win32_Security_Cryptography"] }

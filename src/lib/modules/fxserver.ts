@@ -174,7 +174,7 @@ export async function stopFxserver() {
 	}
 }
 
-export async function getFxserverTerminal(maxLines = 500) {
+export async function getFxserverTerminal(maxLines = 500, afterId: number | null = null) {
 	if (!hasTauriRuntime()) {
 		return {
 			entries: [],
@@ -182,7 +182,7 @@ export async function getFxserverTerminal(maxLines = 500) {
 	}
 
 	try {
-		return await invoke<FxserverTerminalResult>("get_fxserver_terminal", { maxLines });
+		return await invoke<FxserverTerminalResult>("get_fxserver_terminal", { maxLines, afterId });
 	} catch (error) {
 		log("FXServer terminal refresh failed.", {
 			level: "error",
@@ -191,6 +191,21 @@ export async function getFxserverTerminal(maxLines = 500) {
 		});
 		throw error;
 	}
+}
+
+export async function getSavedFxserverRconPassword() {
+	if (!hasTauriRuntime()) return "";
+	return (await invoke<string | null>("get_fxserver_rcon_password")) ?? "";
+}
+
+export async function saveFxserverRconPassword(password: string) {
+	if (!hasTauriRuntime()) return;
+	await invoke<void>("save_fxserver_rcon_password", { password });
+}
+
+export async function clearFxserverRconPassword() {
+	if (!hasTauriRuntime()) return;
+	await invoke<void>("clear_fxserver_rcon_password");
 }
 
 export async function sendFxserverCommand(command: string, rcon: FxserverRconConfig) {

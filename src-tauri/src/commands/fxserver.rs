@@ -1,5 +1,5 @@
 use std::{
-    fs,
+    env, fs,
     io::{BufRead, BufReader},
     net::UdpSocket,
     path::{Path, PathBuf},
@@ -222,6 +222,7 @@ pub fn get_fxserver_status(
 #[tauri::command]
 pub fn get_fxserver_terminal(
     max_lines: Option<usize>,
+    after_id: Option<u64>,
     manager: tauri::State<'_, FxserverManager>,
 ) -> Result<FxserverTerminalResult, String> {
     let max_lines = max_lines.unwrap_or(500).clamp(50, 5000);
@@ -229,11 +230,69 @@ pub fn get_fxserver_terminal(
         .terminal
         .lock()
         .map_err(|_| "FXServer terminal output is unavailable.".to_string())?;
-    let start = terminal.entries.len().saturating_sub(max_lines);
+    let start = if let Some(after_id) = after_id {
+        let first_new = terminal
+            .entries
+            .iter()
+            .position(|entry| entry.id > after_id)
+            .unwrap_or(terminal.entries.len());
+        let new_count = terminal.entries.len().saturating_sub(first_new);
+
+        if new_count > max_lines {
+            terminal.entries.len().saturating_sub(max_lines)
+        } else {
+            first_new
+        }
+    } else {
+        terminal.entries.len().saturating_sub(max_lines)
+    };
 
     Ok(FxserverTerminalResult {
         entries: terminal.entries[start..].to_vec(),
     })
+}
+
+#[tauri::command]
+pub fn get_fxserver_rcon_password() -> Result<Option<String>, String> {
+    let path = rcon_password_path()?;
+    if !path.exists() {
+        return Ok(None);
+    }
+
+    let encrypted_hex = fs::read_to_string(&path)
+        .map_err(|error| format!("Failed to read saved RCON password: {error}"))?;
+    let encrypted = decode_hex(encrypted_hex.trim())?;
+    let decrypted = decrypt_secret(&encrypted)?;
+    String::from_utf8(decrypted)
+        .map(Some)
+        .map_err(|_| "Saved RCON password is not valid UTF-8.".to_string())
+}
+
+#[tauri::command]
+pub fn save_fxserver_rcon_password(password: String) -> Result<(), String> {
+    if password.is_empty() {
+        return clear_fxserver_rcon_password();
+    }
+
+    let path = rcon_password_path()?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("Failed to create RCON password store: {error}"))?;
+    }
+
+    let encrypted = encrypt_secret(password.as_bytes())?;
+    fs::write(&path, encode_hex(&encrypted))
+        .map_err(|error| format!("Failed to save RCON password securely: {error}"))
+}
+
+#[tauri::command]
+pub fn clear_fxserver_rcon_password() -> Result<(), String> {
+    let path = rcon_password_path()?;
+    if path.exists() {
+        fs::remove_file(path)
+            .map_err(|error| format!("Failed to clear saved RCON password: {error}"))?;
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -935,6 +994,144 @@ fn integer_from_json(value: Option<&serde_json::Value>) -> Option<u64> {
             .as_u64()
             .or_else(|| value.as_str()?.parse::<u64>().ok())
     })
+}
+
+fn rcon_password_path() -> Result<PathBuf, String> {
+    let app_data = env::var_os("APPDATA")
+        .map(PathBuf::from)
+        .ok_or_else(|| "Windows APPDATA folder is unavailable.".to_string())?;
+    Ok(app_data
+        .join("fxserver-installer")
+        .join("secrets")
+        .join("fxserver-rcon-password.dpapi"))
+}
+
+fn encode_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        output.push(HEX[(byte >> 4) as usize] as char);
+        output.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    output
+}
+
+fn decode_hex(value: &str) -> Result<Vec<u8>, String> {
+    if value.len() % 2 != 0 {
+        return Err("Saved RCON password data is malformed.".to_string());
+    }
+
+    let mut bytes = Vec::with_capacity(value.len() / 2);
+    let raw = value.as_bytes();
+    for index in (0..raw.len()).step_by(2) {
+        let high = hex_value(raw[index])?;
+        let low = hex_value(raw[index + 1])?;
+        bytes.push((high << 4) | low);
+    }
+    Ok(bytes)
+}
+
+fn hex_value(byte: u8) -> Result<u8, String> {
+    match byte {
+        b'0'..=b'9' => Ok(byte - b'0'),
+        b'a'..=b'f' => Ok(byte - b'a' + 10),
+        b'A'..=b'F' => Ok(byte - b'A' + 10),
+        _ => Err("Saved RCON password data is malformed.".to_string()),
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn encrypt_secret(secret: &[u8]) -> Result<Vec<u8>, String> {
+    use std::ptr;
+    use std::slice;
+    use windows_sys::Win32::Foundation::LocalFree;
+    use windows_sys::Win32::Security::Cryptography::{
+        CryptProtectData, CRYPTPROTECT_UI_FORBIDDEN, CRYPT_INTEGER_BLOB,
+    };
+
+    let input = CRYPT_INTEGER_BLOB {
+        cbData: secret.len() as u32,
+        pbData: secret.as_ptr() as *mut u8,
+    };
+    let mut output = CRYPT_INTEGER_BLOB {
+        cbData: 0,
+        pbData: ptr::null_mut(),
+    };
+
+    let ok = unsafe {
+        CryptProtectData(
+            &input,
+            ptr::null(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null(),
+            CRYPTPROTECT_UI_FORBIDDEN,
+            &mut output,
+        )
+    };
+
+    if ok == 0 {
+        return Err("Windows could not protect the RCON password.".to_string());
+    }
+
+    let protected =
+        unsafe { slice::from_raw_parts(output.pbData, output.cbData as usize).to_vec() };
+    unsafe {
+        LocalFree(output.pbData as _);
+    }
+    Ok(protected)
+}
+
+#[cfg(target_os = "windows")]
+fn decrypt_secret(secret: &[u8]) -> Result<Vec<u8>, String> {
+    use std::ptr;
+    use std::slice;
+    use windows_sys::Win32::Foundation::LocalFree;
+    use windows_sys::Win32::Security::Cryptography::{
+        CryptUnprotectData, CRYPTPROTECT_UI_FORBIDDEN, CRYPT_INTEGER_BLOB,
+    };
+
+    let input = CRYPT_INTEGER_BLOB {
+        cbData: secret.len() as u32,
+        pbData: secret.as_ptr() as *mut u8,
+    };
+    let mut output = CRYPT_INTEGER_BLOB {
+        cbData: 0,
+        pbData: ptr::null_mut(),
+    };
+
+    let ok = unsafe {
+        CryptUnprotectData(
+            &input,
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null(),
+            CRYPTPROTECT_UI_FORBIDDEN,
+            &mut output,
+        )
+    };
+
+    if ok == 0 {
+        return Err("Windows could not unlock the saved RCON password.".to_string());
+    }
+
+    let unprotected =
+        unsafe { slice::from_raw_parts(output.pbData, output.cbData as usize).to_vec() };
+    unsafe {
+        LocalFree(output.pbData as _);
+    }
+    Ok(unprotected)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn encrypt_secret(_: &[u8]) -> Result<Vec<u8>, String> {
+    Err("Secure RCON password storage is only supported on Windows.".to_string())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn decrypt_secret(_: &[u8]) -> Result<Vec<u8>, String> {
+    Err("Secure RCON password storage is only supported on Windows.".to_string())
 }
 
 #[cfg(test)]
