@@ -1,6 +1,7 @@
 <script lang="ts">
 	import ActivityIcon from "@lucide/svelte/icons/activity";
 	import AlertCircleIcon from "@lucide/svelte/icons/alert-circle";
+	import BarChart3Icon from "@lucide/svelte/icons/bar-chart-3";
 	import CheckCircle2Icon from "@lucide/svelte/icons/check-circle-2";
 	import FolderOpenIcon from "@lucide/svelte/icons/folder-open";
 	import LoaderCircleIcon from "@lucide/svelte/icons/loader-circle";
@@ -9,6 +10,9 @@
 	import SendIcon from "@lucide/svelte/icons/send";
 	import ServerIcon from "@lucide/svelte/icons/server";
 	import SquareIcon from "@lucide/svelte/icons/square";
+	import { scaleUtc } from "d3-scale";
+	import { curveNatural } from "d3-shape";
+	import { AreaChart } from "layerchart";
 	import { onDestroy, onMount, tick } from "svelte";
 	import { Checkbox } from "$lib/components/ui/checkbox/index.js";
 	import * as Card from "$lib/components/ui/card/index.js";
@@ -18,6 +22,8 @@
 	import PasswordInput from "$lib/components/ui/password-input.svelte";
 	import { Progress } from "$lib/components/ui/progress/index.js";
 	import * as Select from "$lib/components/ui/select/index.js";
+	import * as Chart from "$lib/components/ui/chart/index.js";
+	import * as ToggleGroup from "$lib/components/ui/toggle-group/index.js";
 	import { chooseFolder as chooseAnyFolder, chooseInstallFolder } from "$lib/core/selectFolder";
 	import { getInstallPath, loadInstallPath, setInstallPath } from "$lib/core/paths.svelte";
 	import { getInstalledWindowsArtifactInfo, type InstalledArtifactInfo } from "$lib/modules/artifact";
@@ -37,6 +43,45 @@
 	import TxHostFieldInput from "./TxHostFieldInput.svelte";
 	import { sensitiveTxHostKeys, txHostFields, txHostGroups } from "./fxserverEnv";
 	import { fxserverSettings, loadFxserverSettings, readSavedEnvironment, refreshTxDataProfiles, setServerProfile, setTxDataPath, writeSavedEnvironment } from "./fxserverSettings.svelte";
+
+	type MetricWindow = "30s" | "5m" | "10m" | "30m" | "1h";
+	type ResourceSample = {
+		timestamp: number;
+		cpuPercent: number;
+		memoryPercent: number;
+		memoryBytes: number;
+	};
+	type ResourceExtremes = {
+		cpuHigh: number | null;
+		cpuLow: number | null;
+		memoryHigh: number | null;
+		memoryLow: number | null;
+	};
+
+	const metricWindows: { value: MetricWindow; label: string; milliseconds: number }[] = [
+		{ value: "30s", label: "30s", milliseconds: 30_000 },
+		{ value: "5m", label: "5m", milliseconds: 5 * 60_000 },
+		{ value: "10m", label: "10m", milliseconds: 10 * 60_000 },
+		{ value: "30m", label: "30m", milliseconds: 30 * 60_000 },
+		{ value: "1h", label: "1h", milliseconds: 60 * 60_000 },
+	];
+	const resourceHistoryLimitMs = 60 * 60_000;
+	const performanceChartConfig = {
+		cpu: { label: "CPU", color: "var(--chart-1)" },
+		memory: { label: "RAM", color: "var(--chart-2)" },
+	} satisfies Chart.ChartConfig;
+	const chartAxisProps = {
+		xAxis: {
+			format: (value: Date) => value.toLocaleTimeString([], { minute: "2-digit", second: "2-digit" }),
+		},
+		yAxis: { format: (value: number) => `${value}%` },
+		grid: { y: true },
+		area: {
+			curve: curveNatural,
+			fillOpacity: 0.28,
+			line: { class: "stroke-2" },
+		},
+	};
 
 	let artifactPath = $state("");
 	let artifact = $state<InstalledArtifactInfo | null>(null);
@@ -65,11 +110,28 @@
 	let terminalRefreshPending = false;
 	let rconPasswordLoaded = false;
 	let lastSavedRconPassword = "";
+	let metricWindow = $state<MetricWindow>("5m");
+	let resourceSamples = $state<ResourceSample[]>([]);
+	let resourceExtremes = $state<ResourceExtremes>({
+		cpuHigh: null,
+		cpuLow: null,
+		memoryHigh: null,
+		memoryLow: null,
+	});
 
 	const activeEnvCount = $derived(Object.values(envValues).filter((value) => value.trim()).length + (serverProfile.trim() ? 1 : 0));
 	const canStart = $derived(Boolean(artifactPath.trim()) && !status.running && !starting && !busy);
 	const txHostEditableFields = $derived(txHostFields.filter((field) => field.key !== "TXHOST_DATA_PATH"));
 	const displayedUptimeSeconds = $derived(status.running ? Math.max(0, nowSeconds - (startedAtSeconds(status.startedAt) ?? nowSeconds)) : (status.uptimeSeconds ?? 0));
+	const visibleResourceSamples = $derived(filterResourceSamples(resourceSamples, metricWindow, nowSeconds * 1000));
+	const resourceChartData = $derived(
+		visibleResourceSamples.map((sample) => ({
+			date: new Date(sample.timestamp),
+			cpu: sample.cpuPercent,
+			memory: sample.memoryPercent,
+		})),
+	);
+	const currentResourceSample = $derived(resourceSamples.at(-1) ?? null);
 	const profileOptions = $derived([
 		...(fxserverSettings.hasRootLogs ? [{ value: "", label: "Root logs folder" }] : []),
 		...fxserverSettings.profiles.map((profile) => ({ value: profile, label: profile })),
@@ -267,7 +329,37 @@
 	async function refreshStatus(showMessage = true) {
 		status = await getFxserverStatus();
 		nowSeconds = Math.floor(Date.now() / 1000);
+		recordResourceSample(status);
 		if (showMessage) message = status.running ? "FXServer status refreshed." : "FXServer is not running from this app.";
+	}
+
+	function recordResourceSample(nextStatus: FxserverStatus) {
+		const resources = nextStatus.resources;
+		if (!nextStatus.running || !resources) return;
+
+		const timestamp = Date.now();
+		const sample: ResourceSample = {
+			timestamp,
+			cpuPercent: clampPercent(resources.cpuPercent),
+			memoryPercent: clampPercent(resources.memoryPercent),
+			memoryBytes: Math.max(0, resources.memoryBytes ?? 0),
+		};
+		const cutoff = timestamp - resourceHistoryLimitMs;
+		const previous = resourceSamples.at(-1);
+		const retained = resourceSamples.filter((entry) => entry.timestamp >= cutoff);
+
+		if (previous && timestamp - previous.timestamp < 750) {
+			resourceSamples = [...retained.slice(0, -1), sample];
+		} else {
+			resourceSamples = [...retained, sample];
+		}
+
+		resourceExtremes = {
+			cpuHigh: maxNullable(resourceExtremes.cpuHigh, sample.cpuPercent),
+			cpuLow: minNullable(resourceExtremes.cpuLow, sample.cpuPercent),
+			memoryHigh: maxNullable(resourceExtremes.memoryHigh, sample.memoryPercent),
+			memoryLow: minNullable(resourceExtremes.memoryLow, sample.memoryPercent),
+		};
 	}
 
 	async function refreshTerminal(options: { reset?: boolean; scrollToBottom?: boolean } = {}) {
@@ -360,6 +452,29 @@
 			unit += 1;
 		}
 		return `${scaled.toFixed(unit === 0 ? 0 : 1)} ${units[unit]}`;
+	}
+
+	function percent(value?: number | null) {
+		return value === null || value === undefined ? "--" : `${value.toFixed(2)}%`;
+	}
+
+	function clampPercent(value?: number | null) {
+		if (!Number.isFinite(value ?? Number.NaN)) return 0;
+		return Math.max(0, Math.min(100, Number(value)));
+	}
+
+	function maxNullable(current: number | null, value: number) {
+		return current === null ? value : Math.max(current, value);
+	}
+
+	function minNullable(current: number | null, value: number) {
+		return current === null ? value : Math.min(current, value);
+	}
+
+	function filterResourceSamples(samples: ResourceSample[], windowValue: MetricWindow, now: number) {
+		const selectedWindow = metricWindows.find((entry) => entry.value === windowValue) ?? metricWindows[1];
+		const cutoff = now - selectedWindow.milliseconds;
+		return samples.filter((sample) => sample.timestamp >= cutoff);
 	}
 
 	function uptime(seconds?: number | null) {
@@ -581,6 +696,156 @@
 			</div>
 		</Card.Root>
 	</div>
+
+	<Card.Root class="group relative overflow-hidden rounded-sm border-border bg-card shadow-sm transition-transform duration-300 hover:-translate-y-0.5">
+		<div
+			class="pointer-events-none absolute inset-x-4 top-0 h-px bg-linear-to-r from-transparent via-primary/70 to-transparent opacity-0 transition-opacity duration-300 group-hover:opacity-100"
+		></div>
+		<Card.Header class="border-b border-border pb-4">
+			<div class="flex flex-col justify-between gap-3 xl:flex-row xl:items-start">
+				<div class="flex items-start gap-3">
+					<div class="flex size-9 shrink-0 items-center justify-center rounded-sm border border-violet-400/30 bg-violet-400/10 text-violet-200">
+						<BarChart3Icon class="size-4" />
+					</div>
+					<div>
+						<Card.Title>Performance History</Card.Title>
+						<Card.Description>CPU and RAM samples from the FXServer process started by this app.</Card.Description>
+					</div>
+				</div>
+				<ToggleGroup.Root
+					type="single"
+					value={metricWindow}
+					onValueChange={(value) => {
+						if (typeof value === "string" && value) metricWindow = value as MetricWindow;
+					}}
+					class="flex-wrap justify-start xl:justify-end"
+				>
+					{#each metricWindows as window}
+						<ToggleGroup.Item value={window.value} title={`Show the last ${window.label}`}>
+							{window.label}
+						</ToggleGroup.Item>
+					{/each}
+				</ToggleGroup.Root>
+			</div>
+		</Card.Header>
+		<Card.Content class="grid gap-4 pt-5 xl:grid-cols-2">
+			<div class="rounded-sm border border-border bg-background/70 p-4">
+				<div class="mb-4 flex items-start justify-between gap-3">
+					<div>
+						<p class="text-sm font-semibold text-foreground">CPU Usage</p>
+						<p class="mt-1 text-xs text-muted-foreground">Current process CPU over the selected window.</p>
+					</div>
+					<div class="text-right">
+						<p class="font-mono text-2xl font-semibold text-sky-100">{percent(currentResourceSample?.cpuPercent)}</p>
+						<p class="text-xs text-muted-foreground">current</p>
+					</div>
+				</div>
+
+				<div class="relative h-52 overflow-hidden rounded-sm border border-sky-400/15 bg-black/30 p-2">
+					<Chart.Container config={performanceChartConfig} class="h-full w-full">
+						<AreaChart
+							data={resourceChartData}
+							x="date"
+							xScale={scaleUtc()}
+							yDomain={[0, 100]}
+							yPadding={[0, 8]}
+							series={[
+								{
+									key: "cpu",
+									label: "CPU",
+									color: "var(--color-cpu)",
+								},
+							]}
+							props={chartAxisProps}
+						>
+							<Chart.Tooltip
+								slot="tooltip"
+								indicator="dot"
+								labelFormatter={(value) => (value instanceof Date ? value.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }) : "")}
+								valueFormatter={(value) => (typeof value === "number" ? `${value.toFixed(2)}%` : String(value ?? ""))}
+							/>
+						</AreaChart>
+					</Chart.Container>
+					{#if visibleResourceSamples.length < 2}
+						<div class="absolute inset-0 flex items-center justify-center p-4 text-center text-sm text-muted-foreground">Start FXServer to collect CPU samples.</div>
+					{/if}
+				</div>
+
+				<div class="mt-3 grid grid-cols-3 gap-2 text-xs">
+					<div class="rounded-sm border border-border bg-card/60 p-2">
+						<p class="text-muted-foreground">All-time high</p>
+						<p class="mt-1 font-mono text-foreground">{percent(resourceExtremes.cpuHigh)}</p>
+					</div>
+					<div class="rounded-sm border border-border bg-card/60 p-2">
+						<p class="text-muted-foreground">All-time low</p>
+						<p class="mt-1 font-mono text-foreground">{percent(resourceExtremes.cpuLow)}</p>
+					</div>
+					<div class="rounded-sm border border-border bg-card/60 p-2">
+						<p class="text-muted-foreground">Samples</p>
+						<p class="mt-1 font-mono text-foreground">{visibleResourceSamples.length}</p>
+					</div>
+				</div>
+			</div>
+
+			<div class="rounded-sm border border-border bg-background/70 p-4">
+				<div class="mb-4 flex items-start justify-between gap-3">
+					<div>
+						<p class="text-sm font-semibold text-foreground">RAM Usage</p>
+						<p class="mt-1 text-xs text-muted-foreground">Memory percentage and current process allocation.</p>
+					</div>
+					<div class="text-right">
+						<p class="font-mono text-2xl font-semibold text-emerald-100">{percent(currentResourceSample?.memoryPercent)}</p>
+						<p class="text-xs text-muted-foreground">{bytes(currentResourceSample?.memoryBytes)}</p>
+					</div>
+				</div>
+
+				<div class="relative h-52 overflow-hidden rounded-sm border border-emerald-400/15 bg-black/30 p-2">
+					<Chart.Container config={performanceChartConfig} class="h-full w-full">
+						<AreaChart
+							data={resourceChartData}
+							x="date"
+							xScale={scaleUtc()}
+							yDomain={[0, 100]}
+							yPadding={[0, 8]}
+							series={[
+								{
+									key: "memory",
+									label: "RAM",
+									color: "var(--color-memory)",
+								},
+							]}
+							props={chartAxisProps}
+						>
+							<Chart.Tooltip
+								slot="tooltip"
+								indicator="dot"
+								labelFormatter={(value) => (value instanceof Date ? value.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }) : "")}
+								valueFormatter={(value) => (typeof value === "number" ? `${value.toFixed(2)}%` : String(value ?? ""))}
+							/>
+						</AreaChart>
+					</Chart.Container>
+					{#if visibleResourceSamples.length < 2}
+						<div class="absolute inset-0 flex items-center justify-center p-4 text-center text-sm text-muted-foreground">Start FXServer to collect RAM samples.</div>
+					{/if}
+				</div>
+
+				<div class="mt-3 grid grid-cols-3 gap-2 text-xs">
+					<div class="rounded-sm border border-border bg-card/60 p-2">
+						<p class="text-muted-foreground">All-time high</p>
+						<p class="mt-1 font-mono text-foreground">{percent(resourceExtremes.memoryHigh)}</p>
+					</div>
+					<div class="rounded-sm border border-border bg-card/60 p-2">
+						<p class="text-muted-foreground">All-time low</p>
+						<p class="mt-1 font-mono text-foreground">{percent(resourceExtremes.memoryLow)}</p>
+					</div>
+					<div class="rounded-sm border border-border bg-card/60 p-2">
+						<p class="text-muted-foreground">Samples</p>
+						<p class="mt-1 font-mono text-foreground">{visibleResourceSamples.length}</p>
+					</div>
+				</div>
+			</div>
+		</Card.Content>
+	</Card.Root>
 
 	<Card.Root class="group relative overflow-hidden rounded-sm border-border bg-card shadow-sm transition-transform duration-300 hover:-translate-y-0.5">
 		<div

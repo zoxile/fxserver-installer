@@ -16,6 +16,8 @@
     "@lucide/svelte": "^1.14.0",
     "@sveltejs/vite-plugin-svelte": "^7.0.0",
     "@tsconfig/svelte": "^5.0.8",
+    "@types/d3-scale": "^4.0.9",
+    "@types/d3-shape": "^3.1.8",
     "@types/node": "^24.12.2",
     "autoprefixer": "^10.5.0",
     "bits-ui": "^2.18.1",
@@ -37,6 +39,9 @@
     "@tailwindcss/vite": "^4.2.4",
     "@tauri-apps/api": "^2.11.0",
     "@tauri-apps/cli": "^2.11.0",
-    "@tauri-apps/plugin-dialog": "^2.7.1"
+    "@tauri-apps/plugin-dialog": "^2.7.1",
+    "d3-scale": "^4.0.2",
+    "d3-shape": "^3.2.0",
+    "layerchart": "^1.0.13"
   }
 }
