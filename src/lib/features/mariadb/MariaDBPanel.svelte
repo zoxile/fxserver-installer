@@ -9,6 +9,7 @@
 	import QueryConsole from "./QueryConsole.svelte";
 	import StatusOverview from "./StatusOverview.svelte";
 	import UserManagementCard from "./UserManagementCard.svelte";
+	import { Notice } from "$lib/components/ui/notice/index.js";
 	import { databaseSession, rememberDatabaseCredentials } from "$lib/core/databaseSession.svelte";
 	import { log } from "$lib/core/logger.svelte";
 	import {
@@ -47,6 +48,7 @@
 	let message = $state("");
 	let error = $state("");
 	let installStage = $state("");
+	let backupWarningDismissed = $state(false);
 	let credentialsReady = $state(false);
 	let connectionError = $state("");
 	let query = $state("SELECT VERSION();");
@@ -509,6 +511,16 @@
 
 	{#if message || error}
 		<MariaDBNotice {message} {error} onDismiss={() => ((message = ""), (error = ""))} />
+	{/if}
+
+	{#if !backupWarningDismissed}
+		<Notice
+			tone="warn"
+			title="Back up before changing MariaDB"
+			message="Before installing, updating, or uninstalling MariaDB through the app, create a fresh backup of any databases you care about. The app is designed to preserve data, but a backup is still the safest recovery point."
+			onDismiss={() => (backupWarningDismissed = true)}
+			class="px-4 py-3 text-sm"
+		/>
 	{/if}
 
 	<div class="grid gap-4 xl:grid-cols-12">

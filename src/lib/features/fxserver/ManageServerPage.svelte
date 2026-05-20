@@ -1,8 +1,5 @@
 <script lang="ts">
-	import ActivityIcon from "@lucide/svelte/icons/activity";
-	import AlertCircleIcon from "@lucide/svelte/icons/alert-circle";
 	import BarChart3Icon from "@lucide/svelte/icons/bar-chart-3";
-	import CheckCircle2Icon from "@lucide/svelte/icons/check-circle-2";
 	import FolderOpenIcon from "@lucide/svelte/icons/folder-open";
 	import LoaderCircleIcon from "@lucide/svelte/icons/loader-circle";
 	import PlayIcon from "@lucide/svelte/icons/play";
@@ -10,7 +7,7 @@
 	import SendIcon from "@lucide/svelte/icons/send";
 	import ServerIcon from "@lucide/svelte/icons/server";
 	import SquareIcon from "@lucide/svelte/icons/square";
-	import { scaleUtc } from "d3-scale";
+	import { scaleTime } from "d3-scale";
 	import { curveNatural } from "d3-shape";
 	import { AreaChart } from "layerchart";
 	import { onDestroy, onMount, tick } from "svelte";
@@ -20,7 +17,6 @@
 	import { Input } from "$lib/components/ui/input/index.js";
 	import { Notice } from "$lib/components/ui/notice/index.js";
 	import PasswordInput from "$lib/components/ui/password-input.svelte";
-	import { Progress } from "$lib/components/ui/progress/index.js";
 	import * as Select from "$lib/components/ui/select/index.js";
 	import * as Chart from "$lib/components/ui/chart/index.js";
 	import * as ToggleGroup from "$lib/components/ui/toggle-group/index.js";
@@ -70,16 +66,24 @@
 		cpu: { label: "CPU", color: "var(--chart-1)" },
 		memory: { label: "RAM", color: "var(--chart-2)" },
 	} satisfies Chart.ChartConfig;
+
+	const timeFormatter = new Intl.DateTimeFormat(undefined, {
+		hour: "2-digit",
+		minute: "2-digit",
+		second: "2-digit",
+		hour12: false,
+	});
+
 	const chartAxisProps = {
 		xAxis: {
-			format: (value: Date) => value.toLocaleTimeString([], { minute: "2-digit", second: "2-digit" }),
+			format: (date: Date) => timeFormatter.format(date),
 		},
-		yAxis: { format: (value: number) => `${value}%` },
-		grid: { y: true },
+		grid: { x: false, y: true, class: "stroke-border/60" },
 		area: {
 			curve: curveNatural,
 			fillOpacity: 0.28,
 			line: { class: "stroke-2" },
+			tweened: false,
 		},
 	};
 
@@ -111,6 +115,7 @@
 	let rconPasswordLoaded = false;
 	let lastSavedRconPassword = "";
 	let metricWindow = $state<MetricWindow>("5m");
+	let resourceWindowNowMs = $state(Date.now());
 	let resourceSamples = $state<ResourceSample[]>([]);
 	let resourceExtremes = $state<ResourceExtremes>({
 		cpuHigh: null,
@@ -123,7 +128,7 @@
 	const canStart = $derived(Boolean(artifactPath.trim()) && !status.running && !starting && !busy);
 	const txHostEditableFields = $derived(txHostFields.filter((field) => field.key !== "TXHOST_DATA_PATH"));
 	const displayedUptimeSeconds = $derived(status.running ? Math.max(0, nowSeconds - (startedAtSeconds(status.startedAt) ?? nowSeconds)) : (status.uptimeSeconds ?? 0));
-	const visibleResourceSamples = $derived(filterResourceSamples(resourceSamples, metricWindow, nowSeconds * 1000));
+	const visibleResourceSamples = $derived(filterResourceSamples(resourceSamples, metricWindow, resourceWindowNowMs));
 	const resourceChartData = $derived(
 		visibleResourceSamples.map((sample) => ({
 			date: new Date(sample.timestamp),
@@ -150,7 +155,7 @@
 			nowSeconds = Math.floor(Date.now() / 1000);
 		}, 1000);
 		terminalTimer = window.setInterval(() => {
-			void refreshTerminal({ scrollToBottom: false });
+			if (status.running || terminalEntries.length) void refreshTerminal({ scrollToBottom: false });
 		}, 1000);
 	});
 
@@ -255,21 +260,36 @@
 		setServerProfile(serverProfile.trim());
 	}
 
-	function scheduleRconPasswordSave() {
+	function scheduleRconPasswordSave(delayMs = 400) {
 		if (rconConfig.password === lastSavedRconPassword) return;
 		if (rconPasswordSaveTimer) window.clearTimeout(rconPasswordSaveTimer);
 		rconPasswordSaveTimer = window.setTimeout(async () => {
-			try {
-				if (rconConfig.password) {
-					await saveFxserverRconPassword(rconConfig.password);
-				} else {
-					await clearFxserverRconPassword();
-				}
-				lastSavedRconPassword = rconConfig.password;
-			} catch (caught) {
-				error = caught instanceof Error ? caught.message : String(caught);
+			await persistRconPassword();
+		}, delayMs);
+	}
+
+	async function persistRconPassword() {
+		if (!rconPasswordLoaded || rconConfig.password === lastSavedRconPassword) return;
+		if (rconPasswordSaveTimer) {
+			window.clearTimeout(rconPasswordSaveTimer);
+			rconPasswordSaveTimer = undefined;
+		}
+
+		try {
+			if (rconConfig.password) {
+				await saveFxserverRconPassword(rconConfig.password);
+			} else {
+				await clearFxserverRconPassword();
 			}
-		}, 400);
+			lastSavedRconPassword = rconConfig.password;
+		} catch (caught) {
+			error = caught instanceof Error ? caught.message : String(caught);
+		}
+	}
+
+	function updateRconPassword(event: Event) {
+		rconConfig = { ...rconConfig, password: (event.currentTarget as HTMLInputElement).value };
+		scheduleRconPasswordSave();
 	}
 
 	function updateArtifactPath(event: Event) {
@@ -347,6 +367,7 @@
 		const cutoff = timestamp - resourceHistoryLimitMs;
 		const previous = resourceSamples.at(-1);
 		const retained = resourceSamples.filter((entry) => entry.timestamp >= cutoff);
+		resourceWindowNowMs = timestamp;
 
 		if (previous && timestamp - previous.timestamp < 750) {
 			resourceSamples = [...retained.slice(0, -1), sample];
@@ -360,6 +381,12 @@
 			memoryHigh: maxNullable(resourceExtremes.memoryHigh, sample.memoryPercent),
 			memoryLow: minNullable(resourceExtremes.memoryLow, sample.memoryPercent),
 		};
+	}
+
+	function handleMetricWindowChange(value: string | string[]) {
+		if (typeof value !== "string" || !value) return;
+		metricWindow = value as MetricWindow;
+		resourceWindowNowMs = Date.now();
 	}
 
 	async function refreshTerminal(options: { reset?: boolean; scrollToBottom?: boolean } = {}) {
@@ -512,13 +539,13 @@
 		return (
 			{
 				stdout: "border-sky-400/30 bg-sky-400/10 text-sky-200",
-			stderr: "border-red-400/30 bg-red-400/10 text-red-200",
-			system: "border-emerald-400/30 bg-emerald-400/10 text-emerald-200",
-			command: "border-amber-400/30 bg-amber-400/10 text-amber-200",
-			rcon: "border-violet-400/30 bg-violet-400/10 text-violet-200",
-		}[stream] ?? "border-border bg-background text-muted-foreground"
-	);
-}
+				stderr: "border-red-400/30 bg-red-400/10 text-red-200",
+				system: "border-emerald-400/30 bg-emerald-400/10 text-emerald-200",
+				command: "border-amber-400/30 bg-amber-400/10 text-amber-200",
+				rcon: "border-violet-400/30 bg-violet-400/10 text-violet-200",
+			}[stream] ?? "border-border bg-background text-muted-foreground"
+		);
+	}
 
 	function updateRconPort(event: Event) {
 		const value = Number.parseInt((event.currentTarget as HTMLInputElement).value, 10);
@@ -536,6 +563,7 @@
 		if (!command) return;
 
 		try {
+			await persistRconPassword();
 			await sendFxserverCommand(command, rconConfig);
 			terminalCommand = "";
 			await refreshTerminal({ scrollToBottom: true });
@@ -563,11 +591,11 @@
 	{#if error}
 		<Notice tone="error" message={error} onDismiss={() => (error = "")} class="px-4 py-3 text-sm" />
 	{:else if message}
-		<Notice tone="success" message={message} onDismiss={() => (message = "")} class="px-4 py-3 text-sm" />
+		<Notice tone="success" {message} onDismiss={() => (message = "")} class="px-4 py-3 text-sm" />
 	{/if}
 
-	<div class="grid gap-4 xl:grid-cols-12">
-		<Card.Root class="group relative overflow-hidden rounded-sm border-border bg-card shadow-sm transition-transform duration-300 hover:-translate-y-0.5 xl:col-span-7">
+	<div class="grid gap-4">
+		<Card.Root class="group relative overflow-hidden rounded-sm border-border bg-card shadow-sm transition-transform duration-300 hover:-translate-y-0.5">
 			<div
 				class="pointer-events-none absolute inset-x-4 top-0 h-px bg-linear-to-r from-transparent via-primary/70 to-transparent opacity-0 transition-opacity duration-300 group-hover:opacity-100"
 			></div>
@@ -612,89 +640,6 @@
 				</div>
 			</Card.Content>
 		</Card.Root>
-
-		<Card.Root class="group relative flex overflow-hidden rounded-sm border-border bg-card shadow-sm transition-transform duration-300 hover:-translate-y-0.5 xl:col-span-5">
-			<div
-				class="pointer-events-none absolute inset-x-4 top-0 h-px bg-linear-to-r from-transparent via-primary/70 to-transparent opacity-0 transition-opacity duration-300 group-hover:opacity-100"
-			></div>
-			<div class="flex w-full flex-col">
-				<Card.Header class="border-b border-border pb-4">
-					<div class="flex items-center justify-between gap-3">
-						<div>
-							<Card.Title>Process Status</Card.Title>
-							<Card.Description>{status.running ? `Running as PID ${status.pid}` : "Not started from this app."}</Card.Description>
-						</div>
-						<div
-							class={`rounded-sm border px-2 py-1 text-xs font-semibold ${status.running ? "border-emerald-400/30 bg-emerald-400/10 text-emerald-200" : "border-red-400/30 bg-red-400/10 text-red-200"}`}
-						>
-							{status.running ? "RUNNING" : "STOPPED"}
-						</div>
-					</div>
-				</Card.Header>
-				<Card.Content class="flex flex-1 flex-col gap-4 pt-5">
-					<div class="grid gap-3 sm:grid-cols-2">
-						<div class="rounded-sm border border-border bg-background/70 p-3">
-							<p class="text-xs text-muted-foreground">Started</p>
-							<p class="mt-1 text-sm font-medium text-foreground">{startedAt(status.startedAt)}</p>
-						</div>
-						<div class="rounded-sm border border-border bg-background/70 p-3">
-							<p class="text-xs text-muted-foreground">Uptime</p>
-							<p class="mt-1 font-mono text-sm font-medium text-foreground">{uptime(displayedUptimeSeconds)}</p>
-						</div>
-					</div>
-
-					<div class="space-y-4 rounded-sm border border-border bg-background/70 p-3">
-						<div>
-							<div class="mb-2 flex justify-between text-xs">
-								<span class="text-muted-foreground">CPU</span>
-								<span class="font-mono text-foreground">{(status.resources?.cpuPercent ?? 0).toFixed(2)}%</span>
-							</div>
-							<Progress value={status.resources?.cpuPercent ?? 0} class="h-2 rounded-xs" indicatorClass="bg-sky-300" />
-						</div>
-						<div>
-							<div class="mb-2 flex justify-between text-xs">
-								<span class="text-muted-foreground">Memory</span>
-								<span class="font-mono text-foreground">{bytes(status.resources?.memoryBytes)} / {bytes(status.resources?.totalMemoryBytes)}</span>
-							</div>
-							<Progress value={status.resources?.memoryPercent ?? 0} class="h-2 rounded-xs" indicatorClass="bg-emerald-300" />
-						</div>
-						<div class="grid grid-cols-2 gap-3 text-xs">
-							<div class="rounded-sm border border-border bg-card/60 p-2">
-								<p class="text-muted-foreground">Threads</p>
-								<p class="mt-1 font-mono text-foreground">{status.resources?.threadCount ?? 0}</p>
-							</div>
-							<div class="rounded-sm border border-border bg-card/60 p-2">
-								<p class="text-muted-foreground">Handles</p>
-								<p class="mt-1 font-mono text-foreground">{status.resources?.handleCount ?? 0}</p>
-							</div>
-						</div>
-					</div>
-
-					<div class="mt-auto grid gap-2 sm:grid-cols-3">
-						<Button onclick={startServer} disabled={!canStart} title="Start FXServer.exe with the configured TXHOST variables">
-							{#if starting}
-								<LoaderCircleIcon class="animate-spin" />
-							{:else}
-								<PlayIcon />
-							{/if}
-							Start
-						</Button>
-						<Button variant="destructive" onclick={stopServer} disabled={!status.running || stopping} title="Stop the FXServer process started by this app">
-							{#if stopping}
-								<LoaderCircleIcon class="animate-spin" />
-							{:else}
-								<SquareIcon />
-							{/if}
-							Stop
-						</Button>
-						<Button variant="outline" onclick={() => refreshStatus()} disabled={busy} title="Refresh FXServer process usage">
-							<ActivityIcon />
-							Status
-						</Button>
-					</div>
-				</Card.Content>
-			</div>
-		</Card.Root>
 	</div>
 
 	<Card.Root class="group relative overflow-hidden rounded-sm border-border bg-card shadow-sm transition-transform duration-300 hover:-translate-y-0.5">
@@ -708,18 +653,65 @@
 						<BarChart3Icon class="size-4" />
 					</div>
 					<div>
-						<Card.Title>Performance History</Card.Title>
-						<Card.Description>CPU and RAM samples from the FXServer process started by this app.</Card.Description>
+						<Card.Title>Performance</Card.Title>
+						<Card.Description>{status.running ? `Running as PID ${status.pid}` : "FXServer is not running from this app."}</Card.Description>
 					</div>
 				</div>
-				<ToggleGroup.Root
-					type="single"
-					value={metricWindow}
-					onValueChange={(value) => {
-						if (typeof value === "string" && value) metricWindow = value as MetricWindow;
-					}}
-					class="flex-wrap justify-start xl:justify-end"
-				>
+				<div class="flex flex-wrap items-center gap-2">
+					<div
+						class={`rounded-sm border px-2 py-1 text-xs font-semibold ${status.running ? "border-emerald-400/30 bg-emerald-400/10 text-emerald-200" : "border-red-400/30 bg-red-400/10 text-red-200"}`}
+					>
+						{status.running ? "RUNNING" : "STOPPED"}
+					</div>
+					<Button onclick={startServer} disabled={!canStart} title="Start FXServer.exe with the configured TXHOST variables">
+						{#if starting}
+							<LoaderCircleIcon class="animate-spin" />
+						{:else}
+							<PlayIcon />
+						{/if}
+						Start
+					</Button>
+					<Button variant="destructive" onclick={stopServer} disabled={!status.running || stopping} title="Stop the FXServer process started by this app">
+						{#if stopping}
+							<LoaderCircleIcon class="animate-spin" />
+						{:else}
+							<SquareIcon />
+						{/if}
+						Stop
+					</Button>
+					<Button variant="outline" onclick={() => refreshStatus()} disabled={busy} title="Refresh FXServer process usage">
+						<RefreshCwIcon />
+						Status
+					</Button>
+				</div>
+			</div>
+		</Card.Header>
+		<Card.Content class="space-y-4 pt-5">
+			<div class="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+				<div class="rounded-sm border border-border bg-background/70 p-3">
+					<p class="text-xs text-muted-foreground">Started</p>
+					<p class="mt-1 text-sm font-medium text-foreground">{startedAt(status.startedAt)}</p>
+				</div>
+				<div class="rounded-sm border border-border bg-background/70 p-3">
+					<p class="text-xs text-muted-foreground">Uptime</p>
+					<p class="mt-1 font-mono text-sm font-medium text-foreground">{uptime(displayedUptimeSeconds)}</p>
+				</div>
+				<div class="rounded-sm border border-border bg-background/70 p-3">
+					<p class="text-xs text-muted-foreground">Threads</p>
+					<p class="mt-1 font-mono text-sm font-medium text-foreground">{status.resources?.threadCount ?? 0}</p>
+				</div>
+				<div class="rounded-sm border border-border bg-background/70 p-3">
+					<p class="text-xs text-muted-foreground">Handles</p>
+					<p class="mt-1 font-mono text-sm font-medium text-foreground">{status.resources?.handleCount ?? 0}</p>
+				</div>
+			</div>
+
+			<div class="flex flex-col justify-between gap-3 rounded-sm border border-border bg-muted/20 px-3 py-2 md:flex-row md:items-center">
+				<div>
+					<p class="text-sm font-medium text-foreground">Chart range</p>
+					<p class="text-xs text-muted-foreground">Samples are kept in memory for the last hour.</p>
+				</div>
+				<ToggleGroup.Root type="single" value={metricWindow} onValueChange={handleMetricWindowChange} class="flex-wrap justify-start md:justify-end">
 					{#each metricWindows as window}
 						<ToggleGroup.Item value={window.value} title={`Show the last ${window.label}`}>
 							{window.label}
@@ -727,8 +719,7 @@
 					{/each}
 				</ToggleGroup.Root>
 			</div>
-		</Card.Header>
-		<Card.Content class="grid gap-4 pt-5 xl:grid-cols-2">
+
 			<div class="rounded-sm border border-border bg-background/70 p-4">
 				<div class="mb-4 flex items-start justify-between gap-3">
 					<div>
@@ -742,13 +733,14 @@
 				</div>
 
 				<div class="relative h-52 overflow-hidden rounded-sm border border-sky-400/15 bg-black/30 p-2">
-					<Chart.Container config={performanceChartConfig} class="h-full w-full">
+					<Chart.Container config={performanceChartConfig} class="h-full w-full overflow-visible">
 						<AreaChart
 							data={resourceChartData}
 							x="date"
-							xScale={scaleUtc()}
+							xScale={scaleTime()}
 							yDomain={[0, 100]}
-							yPadding={[0, 8]}
+							axis="x"
+							padding={{ left: 0, right: 2, top: 2, bottom: 24 }}
 							series={[
 								{
 									key: "cpu",
@@ -761,7 +753,9 @@
 							<Chart.Tooltip
 								slot="tooltip"
 								indicator="dot"
-								labelFormatter={(value) => (value instanceof Date ? value.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }) : "")}
+								dataKey="cpu"
+								label="CPU"
+								labelFormatter={() => "CPU Usage"}
 								valueFormatter={(value) => (typeof value === "number" ? `${value.toFixed(2)}%` : String(value ?? ""))}
 							/>
 						</AreaChart>
@@ -800,13 +794,14 @@
 				</div>
 
 				<div class="relative h-52 overflow-hidden rounded-sm border border-emerald-400/15 bg-black/30 p-2">
-					<Chart.Container config={performanceChartConfig} class="h-full w-full">
+					<Chart.Container config={performanceChartConfig} class="h-full w-full overflow-visible">
 						<AreaChart
 							data={resourceChartData}
 							x="date"
-							xScale={scaleUtc()}
+							xScale={scaleTime()}
 							yDomain={[0, 100]}
-							yPadding={[0, 8]}
+							axis="x"
+							padding={{ left: 0, right: 2, top: 2, bottom: 24 }}
 							series={[
 								{
 									key: "memory",
@@ -819,7 +814,9 @@
 							<Chart.Tooltip
 								slot="tooltip"
 								indicator="dot"
-								labelFormatter={(value) => (value instanceof Date ? value.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }) : "")}
+								dataKey="memory"
+								label="RAM"
+								labelFormatter={() => "RAM Usage"}
 								valueFormatter={(value) => (typeof value === "number" ? `${value.toFixed(2)}%` : String(value ?? ""))}
 							/>
 						</AreaChart>
@@ -926,7 +923,14 @@
 				</label>
 				<label class="grid gap-2">
 					<span class="text-xs font-medium text-muted-foreground">Password</span>
-					<PasswordInput bind:value={rconConfig.password} placeholder="server.cfg rcon_password" title="Value configured with rcon_password in server.cfg." class="rounded-sm font-mono text-xs" />
+					<PasswordInput
+						value={rconConfig.password}
+						oninput={updateRconPassword}
+						onblur={() => void persistRconPassword()}
+						placeholder="server.cfg rcon_password"
+						title="Value configured with rcon_password in server.cfg."
+						class="rounded-sm font-mono text-xs"
+					/>
 				</label>
 			</div>
 
