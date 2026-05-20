@@ -1,3 +1,29 @@
+<script module lang="ts">
+	import type { FxserverTerminalEntry as CachedTerminalEntry } from "$lib/modules/fxserver";
+
+	type CachedResourceSample = {
+		timestamp: number;
+		cpuPercent: number;
+		memoryPercent: number;
+		memoryBytes: number;
+	};
+	type CachedResourceExtremes = {
+		cpuHigh: number | null;
+		cpuLow: number | null;
+		memoryHigh: number | null;
+		memoryLow: number | null;
+	};
+
+	let cachedTerminalEntries: CachedTerminalEntry[] = [];
+	let cachedResourceSamples: CachedResourceSample[] = [];
+	let cachedResourceExtremes: CachedResourceExtremes = {
+		cpuHigh: null,
+		cpuLow: null,
+		memoryHigh: null,
+		memoryLow: null,
+	};
+</script>
+
 <script lang="ts">
 	import BarChart3Icon from "@lucide/svelte/icons/bar-chart-3";
 	import FolderOpenIcon from "@lucide/svelte/icons/folder-open";
@@ -91,7 +117,7 @@
 	let artifactPath = $state("");
 	let artifact = $state<InstalledArtifactInfo | null>(null);
 	let status = $state<FxserverStatus>({ running: false });
-	let terminalEntries = $state<FxserverTerminalEntry[]>([]);
+	let terminalEntries = $state<FxserverTerminalEntry[]>([...cachedTerminalEntries]);
 	let terminalCommand = $state("");
 	let rconConfig = $state<FxserverRconConfig>({
 		host: "127.0.0.1",
@@ -113,17 +139,15 @@
 	let nowSeconds = $state(Math.floor(Date.now() / 1000));
 	let terminalViewport: HTMLDivElement | null = null;
 	let terminalRefreshPending = false;
+	let pendingTerminalEntries: FxserverTerminalEntry[] = [];
+	let terminalFlushTimer: number | undefined;
+	let terminalScrollFrame: number | undefined;
 	let rconPasswordLoaded = false;
 	let lastSavedRconPassword = "";
 	let metricWindow = $state<MetricWindow>("5m");
 	let resourceWindowNowMs = $state(Date.now());
-	let resourceSamples = $state<ResourceSample[]>([]);
-	let resourceExtremes = $state<ResourceExtremes>({
-		cpuHigh: null,
-		cpuLow: null,
-		memoryHigh: null,
-		memoryLow: null,
-	});
+	let resourceSamples = $state<ResourceSample[]>([...cachedResourceSamples]);
+	let resourceExtremes = $state<ResourceExtremes>({ ...cachedResourceExtremes });
 
 	const activeEnvCount = $derived(Object.values(envValues).filter((value) => value.trim()).length + (serverProfile.trim() ? 1 : 0));
 	const canStart = $derived(Boolean(artifactPath.trim()) && !status.running && !starting && !busy);
@@ -138,6 +162,8 @@
 		})),
 	);
 	const currentResourceSample = $derived(resourceSamples.at(-1) ?? null);
+	const terminalRenderLimit = 250;
+	const visibleTerminalEntries = $derived(terminalEntries.slice(-terminalRenderLimit));
 	const profileOptions = $derived([
 		...(fxserverSettings.hasRootLogs ? [{ value: "", label: "Root logs folder" }] : []),
 		...fxserverSettings.profiles.map((profile) => ({ value: profile, label: profile })),
@@ -145,7 +171,7 @@
 
 	let autoScrollTerminal = $state(true);
 	let lastTerminalEntryId = $state<number | null>(null);
-	const terminalBufferLimit = 500;
+	const terminalBufferLimit = 1000;
 
 	onMount(() => {
 		void initializePage();
@@ -165,6 +191,9 @@
 		if (terminalTimer) window.clearInterval(terminalTimer);
 		if (uptimeTimer) window.clearInterval(uptimeTimer);
 		if (rconPasswordSaveTimer) window.clearTimeout(rconPasswordSaveTimer);
+		if (terminalFlushTimer) window.clearTimeout(terminalFlushTimer);
+		if (terminalScrollFrame) window.cancelAnimationFrame(terminalScrollFrame);
+		flushTerminalEntries();
 	});
 
 	$effect(() => {
@@ -212,7 +241,7 @@
 		storageReady = true;
 		void refreshAll();
 		void refreshTxDataProfiles();
-		void refreshTerminal({ reset: true, scrollToBottom: false });
+		if (!terminalEntries.length) void refreshTerminal({ reset: true, scrollToBottom: false });
 	}
 
 	function loadSavedEnvironment() {
@@ -375,6 +404,7 @@
 		} else {
 			resourceSamples = [...retained, sample];
 		}
+		cachedResourceSamples = resourceSamples;
 
 		resourceExtremes = {
 			cpuHigh: maxNullable(resourceExtremes.cpuHigh, sample.cpuPercent),
@@ -382,6 +412,7 @@
 			memoryHigh: maxNullable(resourceExtremes.memoryHigh, sample.memoryPercent),
 			memoryLow: minNullable(resourceExtremes.memoryLow, sample.memoryPercent),
 		};
+		cachedResourceExtremes = { ...resourceExtremes };
 	}
 
 	function handleMetricWindowChange(value: string | string[]) {
@@ -395,12 +426,16 @@
 		terminalRefreshPending = true;
 		try {
 			const reset = options.reset ?? false;
-			const afterId = reset ? null : (terminalEntries.at(-1)?.id ?? null);
-			const result = await getFxserverTerminal(reset ? terminalBufferLimit : 160, afterId);
+			const afterId = reset ? null : latestTerminalEntryId();
+			const result = await getFxserverTerminal(reset ? terminalBufferLimit : 200, afterId);
 			mergeTerminalEntries(result.entries, reset);
 			if (options.scrollToBottom ?? true) {
 				autoScrollTerminal = true;
-				await scrollTerminalToBottom();
+				if (terminalFlushTimer) {
+					window.setTimeout(() => void scrollTerminalToBottom(), 220);
+				} else {
+					await scrollTerminalToBottom();
+				}
 			}
 		} catch (caught) {
 			error = caught instanceof Error ? caught.message : String(caught);
@@ -411,22 +446,58 @@
 
 	function mergeTerminalEntries(entries: FxserverTerminalEntry[], reset: boolean) {
 		if (reset) {
-			terminalEntries = entries.slice(-terminalBufferLimit);
-			lastTerminalEntryId = terminalEntries.at(-1)?.id ?? null;
+			pendingTerminalEntries = [];
+			applyTerminalEntries(entries.slice(-terminalBufferLimit), true);
 			return;
 		}
 
 		if (!entries.length) return;
 
-		const existingIds = new Set(terminalEntries.map((entry) => entry.id));
-		const merged = [...terminalEntries, ...entries.filter((entry) => !existingIds.has(entry.id))];
-		terminalEntries = merged.slice(-terminalBufferLimit);
+		const existingIds = new Set([...cachedTerminalEntries, ...pendingTerminalEntries].map((entry) => entry.id));
+		const uniqueEntries = entries.filter((entry) => !existingIds.has(entry.id));
+		if (!uniqueEntries.length) return;
+
+		pendingTerminalEntries = [...pendingTerminalEntries, ...uniqueEntries].slice(-terminalBufferLimit);
+		scheduleTerminalFlush();
+	}
+
+	function latestTerminalEntryId() {
+		return pendingTerminalEntries.at(-1)?.id ?? cachedTerminalEntries.at(-1)?.id ?? terminalEntries.at(-1)?.id ?? null;
+	}
+
+	function scheduleTerminalFlush() {
+		if (terminalFlushTimer) return;
+		terminalFlushTimer = window.setTimeout(() => {
+			terminalFlushTimer = undefined;
+			flushTerminalEntries();
+		}, 180);
+	}
+
+	function flushTerminalEntries() {
+		if (!pendingTerminalEntries.length) return;
+
+		const merged = [...cachedTerminalEntries, ...pendingTerminalEntries].slice(-terminalBufferLimit);
+		pendingTerminalEntries = [];
+		applyTerminalEntries(merged);
+	}
+
+	function applyTerminalEntries(entries: FxserverTerminalEntry[], suppressAutoScroll = false) {
+		terminalEntries = entries;
+		cachedTerminalEntries = entries;
+		if (suppressAutoScroll) {
+			lastTerminalEntryId = terminalEntries.at(-1)?.id ?? null;
+		}
 	}
 
 	async function scrollTerminalToBottom() {
 		await tick();
 		if (!terminalViewport) return;
-		terminalViewport.scrollTop = Math.max(0, terminalViewport.scrollHeight - terminalViewport.clientHeight);
+		if (terminalScrollFrame) window.cancelAnimationFrame(terminalScrollFrame);
+		terminalScrollFrame = window.requestAnimationFrame(() => {
+			if (!terminalViewport) return;
+			terminalViewport.scrollTop = Math.max(0, terminalViewport.scrollHeight - terminalViewport.clientHeight);
+			terminalScrollFrame = undefined;
+		});
 	}
 
 	function launchEnvironment() {
@@ -658,36 +729,38 @@
 						<Card.Description>{status.running ? `Running as PID ${status.pid}` : "FXServer is not running from this app."}</Card.Description>
 					</div>
 				</div>
-				<div class="flex flex-wrap items-center gap-2">
-					<div
-						class={`rounded-sm border px-2 py-1 text-xs font-semibold ${status.running ? "border-emerald-400/30 bg-emerald-400/10 text-emerald-200" : "border-red-400/30 bg-red-400/10 text-red-200"}`}
-					>
-						{status.running ? "RUNNING" : "STOPPED"}
-					</div>
-					<Button onclick={startServer} disabled={!canStart} title="Start FXServer.exe with the configured TXHOST variables">
-						{#if starting}
-							<LoaderCircleIcon class="animate-spin" />
-						{:else}
-							<PlayIcon />
-						{/if}
-						Start
-					</Button>
-					<Button variant="destructive" onclick={stopServer} disabled={!status.running || stopping} title="Stop the FXServer process started by this app">
-						{#if stopping}
-							<LoaderCircleIcon class="animate-spin" />
-						{:else}
-							<SquareIcon />
-						{/if}
-						Stop
-					</Button>
-					<Button variant="outline" onclick={() => refreshStatus()} disabled={busy} title="Refresh FXServer process usage">
-						<RefreshCwIcon />
-						Status
-					</Button>
+				<div
+					class={`inline-flex w-fit items-center gap-2 rounded-sm border px-2 py-1 text-xs font-semibold ${status.running ? "border-emerald-400/30 bg-emerald-400/10 text-emerald-200" : "border-red-400/30 bg-red-400/10 text-red-200"}`}
+				>
+					<span class={`size-2 rounded-full ${status.running ? "animate-pulse bg-emerald-400 shadow-[0_0_10px_rgba(52,211,153,0.7)]" : "bg-red-400"}`}></span>
+					{status.running ? "RUNNING" : "STOPPED"}
 				</div>
 			</div>
 		</Card.Header>
 		<Card.Content class="space-y-4 pt-5">
+			<div class="flex flex-wrap items-center gap-2">
+				<Button onclick={startServer} disabled={!canStart} title="Start FXServer.exe with the configured TXHOST variables">
+					{#if starting}
+						<LoaderCircleIcon class="animate-spin" />
+					{:else}
+						<PlayIcon />
+					{/if}
+					Start
+				</Button>
+				<Button variant="destructive" onclick={stopServer} disabled={!status.running || stopping} title="Stop the FXServer process started by this app">
+					{#if stopping}
+						<LoaderCircleIcon class="animate-spin" />
+					{:else}
+						<SquareIcon />
+					{/if}
+					Stop
+				</Button>
+				<Button variant="outline" onclick={() => refreshStatus()} disabled={busy} title="Refresh FXServer process usage">
+					<RefreshCwIcon />
+					Status
+				</Button>
+			</div>
+
 			<div class="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
 				<div class="rounded-sm border border-border bg-background/70 p-3">
 					<p class="text-xs text-muted-foreground">Started</p>
@@ -855,14 +928,16 @@
 					<Card.Title>Server Console</Card.Title>
 					<Card.Description>Live output from the hidden FXServer process, with command input sent through RCON.</Card.Description>
 				</div>
-				<div class="rounded-sm border border-border bg-background px-2 py-1 text-xs font-semibold text-muted-foreground">{terminalEntries.length} lines</div>
+				<div class="rounded-sm border border-border bg-background px-2 py-1 text-xs font-semibold text-muted-foreground">
+					{visibleTerminalEntries.length} shown / {terminalEntries.length} buffered
+				</div>
 			</div>
 		</Card.Header>
 		<Card.Content class="space-y-3">
 			<div class="flex items-center justify-between gap-3 rounded-sm border border-border bg-muted/30 px-3 py-2">
 				<div>
 					<div class="text-sm font-medium">Console output</div>
-					<p class="text-xs text-muted-foreground">Showing the latest {terminalEntries.length} buffered lines.</p>
+					<p class="text-xs text-muted-foreground">Showing the latest {visibleTerminalEntries.length} lines while keeping {terminalEntries.length} buffered.</p>
 				</div>
 
 				<div class="flex items-center gap-2">
@@ -890,9 +965,9 @@
 			</div>
 
 			<div bind:this={terminalViewport} onscroll={updateAutoScrollFromScroll} class="h-104 overflow-auto rounded-sm border border-border bg-black/40 font-mono text-xs">
-				{#if terminalEntries.length}
+				{#if visibleTerminalEntries.length}
 					<div class="min-w-0 py-1">
-						{#each terminalEntries as item (item.id)}
+						{#each visibleTerminalEntries as item (item.id)}
 							<div class="flex min-h-6 min-w-0 items-center gap-2 px-3 text-muted-foreground">
 								<span class="w-20 shrink-0 truncate text-[11px] text-muted-foreground/80">
 									{terminalTime(item.timestamp)}
