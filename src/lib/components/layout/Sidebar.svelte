@@ -58,11 +58,9 @@
 
 	$effect(() => {
 		if (!activeParentId) return;
-		if (openSections.has(activeParentId)) return;
 
-		const next = new Set(openSections);
-		next.add(activeParentId);
-		openSections = next;
+		if (openSections.size === 1 && openSections.has(activeParentId)) return;
+		openSections = new Set([activeParentId]);
 	});
 
 	function isSectionActive(item: (typeof navigation)[number]) {
