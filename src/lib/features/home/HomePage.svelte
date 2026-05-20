@@ -3,11 +3,13 @@
 	import CheckCircle2Icon from "@lucide/svelte/icons/check-circle-2";
 	import DatabaseIcon from "@lucide/svelte/icons/database";
 	import ExternalLinkIcon from "@lucide/svelte/icons/external-link";
-	import FileJsonIcon from "@lucide/svelte/icons/file-json";
+	import FileTextIcon from "@lucide/svelte/icons/file-text";
 	import GaugeIcon from "@lucide/svelte/icons/gauge";
 	import GitBranchIcon from "@lucide/svelte/icons/git-branch";
+	import LogsIcon from "@lucide/svelte/icons/logs";
 	import PackageIcon from "@lucide/svelte/icons/package";
 	import ServerCogIcon from "@lucide/svelte/icons/server-cog";
+	import TerminalIcon from "@lucide/svelte/icons/terminal";
 	import WrenchIcon from "@lucide/svelte/icons/wrench";
 	import * as Card from "$lib/components/ui/card/index.js";
 	import { Button } from "$lib/components/ui/button/index.js";
@@ -86,65 +88,79 @@
 	<div class="bento-grid grid gap-4">
 		<HomeBentoCard
 			title="MariaDB"
-			description="Install MariaDB, detect the local service, control status, manage users, assign grants, and run SQL from one place."
+			description="Install, update, or uninstall MariaDB while preserving data, with visible installer stages, service controls, user grants, SQL tools, and database backups."
 			icon={DatabaseIcon}
 			size="hero"
 			className="md:[grid-area:db]"
 			kicker="Database layer"
-			highlights={["Installation config", "Service controls", "User grants", "Query console", "Connection profile", "Version detection"]}
+			highlights={["Install and update details", "Preserve databases", "Backup warning", "Service controls", "User grants", "SQL console"]}
 			actionLabel="Open MariaDB"
 			onclick={() => onNavigate("mariadb")}
 		/>
 		<HomeBentoCard
 			title="Artifacts"
-			description="Download recommended FXServer artifacts and inspect build metadata."
+			description="Download the recommended FXServer artifact, inspect version metadata, and keep the server runtime pointed at the right folder."
 			icon={ArchiveIcon}
 			size="feature"
 			className="md:[grid-area:artifacts]"
 			kicker="Runtime builds"
-			highlights={["Installer", "Version metadata"]}
+			highlights={["Installer", "Version metadata", "Known build notes"]}
 			actionLabel="Install Artifact"
 			onclick={() => onNavigate("artifact-install")}
 		/>
 		<HomeBentoCard
 			title="FXServer"
-			description="Start FXServer with TXHOST variables and watch its process usage."
+			description="Start FXServer with TXHOST variables, send RCON commands, save the RCON password securely, and track CPU, RAM, uptime, threads, and handles."
 			icon={ServerCogIcon}
 			size="wide"
 			className="md:[grid-area:server]"
 			kicker="Server core"
+			highlights={["Live console", "Secure RCON password", "Performance charts", "Process details"]}
 			actionLabel="Open Server"
 			onclick={() => onNavigate("server-manage")}
 		/>
 		<HomeBentoCard
-			title="Configurator"
-			description="Build and tune server configuration files."
+			title="Configure Server"
+			description="Choose a txAdmin profile, edit colored .cfg files, validate database connection strings, and use focused helpers for RCON and permissions."
 			icon={WrenchIcon}
 			size="compact"
 			className="md:[grid-area:config]"
 			kicker="Configuration"
+			highlights={["Colored cfg editor", "Popular server.cfg values", "Permission helpers"]}
 			actionLabel="Configure"
-			onclick={() => onNavigate("configurator")}
+			onclick={() => onNavigate("server-configure")}
 		/>
 		<HomeBentoCard
-			title="Profiler"
-			description="Review profiler captures and inspect runtime health."
-			icon={GaugeIcon}
+			title="Logs"
+			description="Inspect application logs, txData server logs, and FiveM client logs with filters, level colors, and live refresh."
+			icon={LogsIcon}
 			size="compact"
-			className="md:[grid-area:profiler]"
-			kicker="Runtime"
-			actionLabel="View Profiler"
-			onclick={() => onNavigate("profiler")}
+			className="md:[grid-area:logs]"
+			kicker="Diagnostics"
+			highlights={["App logs", "FXServer logs", "Client logs"]}
+			actionLabel="Open Client Logs"
+			onclick={() => onNavigate("client-logs")}
 		/>
 		<HomeBentoCard
-			title="JSON Formatter"
-			description="Format and validate resource data."
-			icon={FileJsonIcon}
+			title="Tools"
+			description="Format JSON, resolve JOOAT hashes, review profiler captures, and keep resource data tidy without leaving the workspace."
+			icon={TerminalIcon}
 			size="compact"
-			className="md:[grid-area:json]"
+			className="md:[grid-area:tools]"
 			kicker="Utility"
+			highlights={["JSON formatter", "JOOAT resolver", "Profiler"]}
 			actionLabel="Open Formatter"
 			onclick={() => onNavigate("json-formatter")}
+		/>
+		<HomeBentoCard
+			title="Server Logs"
+			description="Jump straight into txAdmin and FXServer log files when the server needs a closer look."
+			icon={FileTextIcon}
+			size="compact"
+			className="md:[grid-area:serverlogs]"
+			kicker="Server output"
+			actionLabel="Open Logs"
+			onclick={() => onNavigate("server-logs")}
 		/>
 	</div>
 </section>
@@ -158,7 +174,7 @@
 				"db db db artifacts artifacts artifacts"
 				"db db db artifacts artifacts artifacts"
 				"db db db server server server"
-				"profiler profiler config config json json";
+				"logs logs config config tools serverlogs";
 		}
 	}
 </style>

@@ -119,14 +119,23 @@
 	});
 
 	onMount(() => {
-		void initializeBackupOutputDir();
+		const backupTimer = window.setTimeout(() => {
+			void initializeBackupOutputDir();
+		}, 250);
 
-		const timer = window.setTimeout(() => {
+		const statusTimer = window.setTimeout(() => {
 			void refreshStatus(false);
-			void refreshPackageInfo();
-		}, 80);
+		}, 120);
 
-		return () => window.clearTimeout(timer);
+		const packageTimer = window.setTimeout(() => {
+			void refreshPackageInfo();
+		}, 1600);
+
+		return () => {
+			window.clearTimeout(backupTimer);
+			window.clearTimeout(statusTimer);
+			window.clearTimeout(packageTimer);
+		};
 	});
 
 	$effect(() => {

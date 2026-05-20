@@ -77,8 +77,9 @@
 	const chartAxisProps = {
 		xAxis: {
 			format: (date: Date) => timeFormatter.format(date),
+			tickLabelProps: { fill: "var(--muted-foreground)" },
 		},
-		grid: { x: false, y: true, class: "stroke-border/60" },
+		grid: { x: true, y: true, class: "stroke-border/65" },
 		area: {
 			curve: curveNatural,
 			fillOpacity: 0.28,
@@ -144,7 +145,7 @@
 
 	let autoScrollTerminal = $state(true);
 	let lastTerminalEntryId = $state<number | null>(null);
-	const terminalBufferLimit = 1000;
+	const terminalBufferLimit = 500;
 
 	onMount(() => {
 		void initializePage();
@@ -395,7 +396,7 @@
 		try {
 			const reset = options.reset ?? false;
 			const afterId = reset ? null : (terminalEntries.at(-1)?.id ?? null);
-			const result = await getFxserverTerminal(reset ? terminalBufferLimit : 250, afterId);
+			const result = await getFxserverTerminal(reset ? terminalBufferLimit : 160, afterId);
 			mergeTerminalEntries(result.entries, reset);
 			if (options.scrollToBottom ?? true) {
 				autoScrollTerminal = true;

@@ -71,7 +71,16 @@
 			behavior: "smooth",
 		});
 	}
+
+	function handleGlobalKeydown(event: KeyboardEvent) {
+		if (event.key !== "F5") return;
+
+		event.preventDefault();
+		event.stopPropagation();
+	}
 </script>
+
+<svelte:window onkeydown={handleGlobalKeydown} />
 
 <Titlebar />
 
