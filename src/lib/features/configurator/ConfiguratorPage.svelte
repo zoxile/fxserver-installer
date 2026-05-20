@@ -412,8 +412,8 @@
 		<Notice tone={notice.type} message={notice.message} onDismiss={() => (notice = null)} class="text-sm" />
 	{/if}
 
-	<div class="grid items-stretch gap-4 xl:grid-cols-12">
-		<Card.Root class="group relative flex max-h-184 flex-col overflow-hidden rounded-sm border-border bg-card shadow-sm transition-transform duration-300 hover:-translate-y-0.5 xl:col-span-9">
+	<div class="grid items-stretch gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(10rem,12rem)]">
+		<Card.Root class="group relative flex max-h-184 flex-col overflow-hidden rounded-sm border-border bg-card shadow-sm transition-transform duration-300 hover:-translate-y-0.5">
 			<div
 				class="pointer-events-none absolute inset-x-4 top-0 h-px bg-linear-to-r from-transparent via-primary/70 to-transparent opacity-0 transition-opacity duration-300 group-hover:opacity-100"
 			></div>
@@ -474,7 +474,7 @@
 			</Card.Content>
 		</Card.Root>
 
-		<div class="h-full xl:col-span-3">
+		<div class="h-full">
 			<div class="grid h-full gap-3 sm:grid-cols-3 xl:grid-cols-1 xl:grid-rows-3">
 				{#each [{ label: "Parsed Settings", value: String(settings.length), description: "typed fields" }, { label: "Changed", value: String(changedCount), description: "since last parse" }, { label: "Warnings", value: String(warnings.length), description: "needs review" }] as stat}
 					<Card.Root class="group relative h-full overflow-hidden rounded-sm border-border bg-card shadow-sm transition-transform duration-300 hover:-translate-y-0.5">
