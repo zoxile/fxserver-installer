@@ -41,7 +41,6 @@
 
 		if (effectiveCollapsed) {
 			showExpandedContent = false;
-			openSections = new Set();
 			return;
 		}
 
@@ -58,7 +57,7 @@
 	});
 
 	$effect(() => {
-		if (!activeParentId || effectiveCollapsed) return;
+		if (!activeParentId) return;
 		if (openSections.has(activeParentId)) return;
 
 		const next = new Set(openSections);
@@ -71,11 +70,9 @@
 	}
 
 	function toggleSection(sectionId: string) {
-		const next = new Set(openSections);
+		const next = new Set<string>();
 
-		if (next.has(sectionId)) {
-			next.delete(sectionId);
-		} else {
+		if (!openSections.has(sectionId)) {
 			next.add(sectionId);
 		}
 
@@ -132,15 +129,15 @@
 					onclick={() => (parentIsDirectPage ? onNavigate(item.id as PageId) : toggleSection(item.id))}
 				/>
 
-				{#if item.children && showExpandedContent}
+				{#if item.children}
 					<div
 						class={[
-							"grid will-change-[grid-template-rows,opacity] transition-[grid-template-rows,opacity] duration-200 ease-out",
+							"grid overflow-hidden will-change-[grid-template-rows,opacity] transition-[grid-template-rows,opacity] duration-200 ease-out",
 							sectionOpen ? "grid-rows-[1fr] opacity-100" : "grid-rows-[0fr] opacity-0",
 						]}
 					>
-						<div class="overflow-hidden">
-							<div class="ml-4 border-l border-sidebar-border py-1 pl-3">
+						<div class="min-h-0 overflow-hidden">
+							<div class={[effectiveCollapsed ? "py-1" : "ml-4 border-l border-sidebar-border py-1 pl-3"]}>
 								{#each item.children as child}
 									{#if child.icon}
 										<SidebarNavButton
@@ -148,8 +145,8 @@
 											label={child.label}
 											size="child"
 											active={activePage === child.id}
-											collapsed={false}
-											labelVisible={true}
+											collapsed={effectiveCollapsed}
+											labelVisible={showExpandedContent && !effectiveCollapsed}
 											onclick={() => onNavigate(child.id)}
 										/>
 									{/if}

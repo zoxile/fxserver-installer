@@ -27,8 +27,8 @@
 <button
 	class={[
 		"group flex w-full items-center rounded-sm text-left font-medium leading-none transition-[background-color,color,padding,gap] duration-300 ease-out",
-		size === "default" ? "h-10 px-3 text-sm" : "h-8 px-2 text-xs",
-		collapsed ? "justify-center gap-0 px-0" : "justify-start gap-3",
+		size === "default" ? "h-10 text-sm" : "h-8 text-xs",
+		collapsed ? (size === "default" ? "gap-0 px-4" : "justify-center gap-0 px-0") : size === "default" ? "gap-3 px-2" : "gap-3 px-2",
 		active
 			? size === "default"
 				? "bg-sidebar-primary text-sidebar-primary-foreground shadow-sm"
