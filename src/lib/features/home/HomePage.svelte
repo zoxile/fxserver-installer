@@ -3,7 +3,6 @@
 	import CheckCircle2Icon from "@lucide/svelte/icons/check-circle-2";
 	import DatabaseIcon from "@lucide/svelte/icons/database";
 	import ExternalLinkIcon from "@lucide/svelte/icons/external-link";
-	import FileTextIcon from "@lucide/svelte/icons/file-text";
 	import GaugeIcon from "@lucide/svelte/icons/gauge";
 	import GitBranchIcon from "@lucide/svelte/icons/git-branch";
 	import LogsIcon from "@lucide/svelte/icons/logs";
@@ -93,7 +92,17 @@
 			size="hero"
 			className="md:[grid-area:db]"
 			kicker="Database layer"
-			highlights={["Install and update details", "Preserve databases", "Backup warning", "Service controls", "User grants", "SQL console"]}
+			highlights={[
+				"Install and update details",
+				"Preserve databases",
+				"Backup warning",
+				"Service controls",
+				"User grants",
+				"Query helpers",
+				"SQL console",
+				"Database backups",
+				"Version detection",
+			]}
 			actionLabel="Open MariaDB"
 			onclick={() => onNavigate("mariadb")}
 		/>
@@ -134,33 +143,32 @@
 			title="Logs"
 			description="Inspect application logs, txData server logs, and FiveM client logs with filters, level colors, and live refresh."
 			icon={LogsIcon}
-			size="compact"
+			size="wide"
 			className="md:[grid-area:logs]"
 			kicker="Diagnostics"
 			highlights={["App logs", "FXServer logs", "Client logs"]}
-			actionLabel="Open Client Logs"
+			actions={[
+				{ label: "App Logs", onclick: () => onNavigate("logs") },
+				{ label: "Server Logs", onclick: () => onNavigate("server-logs") },
+				{ label: "Client Logs", onclick: () => onNavigate("client-logs") },
+			]}
 			onclick={() => onNavigate("client-logs")}
 		/>
 		<HomeBentoCard
 			title="Tools"
 			description="Format JSON, resolve JOOAT hashes, review profiler captures, and keep resource data tidy without leaving the workspace."
 			icon={TerminalIcon}
-			size="compact"
+			size="feature"
 			className="md:[grid-area:tools]"
 			kicker="Utility"
-			highlights={["JSON formatter", "JOOAT resolver", "Profiler"]}
-			actionLabel="Open Formatter"
+			highlights={["JSON formatter", "JOOAT resolver", "Profiler", "Lua configurator"]}
+			actions={[
+				{ label: "JSON", onclick: () => onNavigate("json-formatter") },
+				{ label: "JOOAT", onclick: () => onNavigate("jooat") },
+				{ label: "Profiler", onclick: () => onNavigate("profiler") },
+				{ label: "Configurator", onclick: () => onNavigate("configurator") },
+			]}
 			onclick={() => onNavigate("json-formatter")}
-		/>
-		<HomeBentoCard
-			title="Server Logs"
-			description="Jump straight into txAdmin and FXServer log files when the server needs a closer look."
-			icon={FileTextIcon}
-			size="compact"
-			className="md:[grid-area:serverlogs]"
-			kicker="Server output"
-			actionLabel="Open Logs"
-			onclick={() => onNavigate("server-logs")}
 		/>
 	</div>
 </section>
@@ -169,12 +177,13 @@
 	@media (min-width: 768px) {
 		.bento-grid {
 			grid-template-columns: repeat(6, minmax(0, 1fr));
-			grid-template-rows: repeat(4, minmax(118px, auto));
+			grid-template-rows: repeat(5, minmax(118px, auto));
 			grid-template-areas:
 				"db db db artifacts artifacts artifacts"
 				"db db db artifacts artifacts artifacts"
 				"db db db server server server"
-				"logs logs config config tools serverlogs";
+				"logs logs logs tools tools tools"
+				"config config config tools tools tools";
 		}
 	}
 </style>

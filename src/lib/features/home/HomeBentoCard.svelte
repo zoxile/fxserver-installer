@@ -12,6 +12,7 @@
 		highlights?: string[];
 		className?: string;
 		actionLabel?: string;
+		actions?: { label: string; onclick: () => void }[];
 		onclick: () => void;
 	};
 
@@ -24,6 +25,7 @@
 		highlights = [],
 		className = "",
 		actionLabel = "Open",
+		actions = [],
 		onclick,
 	}: Props = $props();
 </script>
@@ -70,8 +72,18 @@
 			</div>
 		{/if}
 
-		<Button variant="outline" {onclick} title={`${actionLabel} ${title}`} class="mt-auto h-8 w-fit shrink-0 rounded-sm px-3 text-xs">
-			{actionLabel}
-		</Button>
+		<div class="mt-auto flex flex-wrap gap-2">
+			{#if actions.length}
+				{#each actions as action}
+					<Button variant="outline" onclick={action.onclick} title={`${action.label} ${title}`} class="h-8 w-fit shrink-0 rounded-sm px-3 text-xs">
+						{action.label}
+					</Button>
+				{/each}
+			{:else}
+				<Button variant="outline" {onclick} title={`${actionLabel} ${title}`} class="h-8 w-fit shrink-0 rounded-sm px-3 text-xs">
+					{actionLabel}
+				</Button>
+			{/if}
+		</div>
 	</Card.Content>
 </Card.Root>
