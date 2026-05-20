@@ -1,4 +1,4 @@
-use std::process::Command;
+use std::{fs, path::Path, process::Command};
 
 #[tauri::command]
 pub fn open_external_url(url: String) -> Result<(), String> {
@@ -13,6 +13,27 @@ pub fn open_external_url(url: String) -> Result<(), String> {
     }
 
     open_url(trimmed)
+}
+
+#[tauri::command]
+pub fn read_text_file(path: String, max_bytes: Option<u64>) -> Result<String, String> {
+    let path = Path::new(path.trim());
+
+    if !path.exists() {
+        return Err("Selected file does not exist.".to_string());
+    }
+
+    if !path.is_file() {
+        return Err("Selected path is not a file.".to_string());
+    }
+
+    let metadata = fs::metadata(path).map_err(|error| format!("Failed to inspect selected file: {error}"))?;
+    let limit = max_bytes.unwrap_or(10 * 1024 * 1024);
+    if metadata.len() > limit {
+        return Err(format!("Selected file is too large. Maximum supported size is {} MB.", limit / 1024 / 1024));
+    }
+
+    fs::read_to_string(path).map_err(|error| format!("Failed to read selected file as UTF-8 text: {error}"))
 }
 
 #[cfg(target_os = "windows")]

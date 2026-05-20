@@ -6,20 +6,28 @@ import HashIcon from "@lucide/svelte/icons/hash";
 import HomeIcon from "@lucide/svelte/icons/home";
 import InfoIcon from "@lucide/svelte/icons/info";
 import PackagePlusIcon from "@lucide/svelte/icons/package-plus";
+import RocketIcon from "@lucide/svelte/icons/rocket";
 import ScrollTextIcon from "@lucide/svelte/icons/scroll-text";
+import SearchIcon from "@lucide/svelte/icons/search";
 import ServerCogIcon from "@lucide/svelte/icons/server-cog";
+import ShieldIcon from "@lucide/svelte/icons/shield";
+import TablePropertiesIcon from "@lucide/svelte/icons/table-properties";
 import TerminalIcon from "@lucide/svelte/icons/terminal";
 import WrenchIcon from "@lucide/svelte/icons/wrench";
 import type { Component } from "svelte";
 
 export type PageId =
 	| "home"
+	| "onboarding"
 	| "mariadb"
+	| "sql-runner"
 	| "artifact-install"
 	| "artifact-info"
 	| "server-manage"
+	| "resource-manager"
 	| "server-configure"
 	| "server-logs"
+	| "command-palette"
 	| "configurator"
 	| "profiler"
 	| "jooat"
@@ -47,9 +55,26 @@ export const navigation: NavigationItem[] = [
 		icon: HomeIcon,
 	},
 	{
-		id: "mariadb",
+		id: "onboarding",
+		label: "First Run Wizard",
+		icon: RocketIcon,
+	},
+	{
+		id: "database",
 		label: "MariaDB",
 		icon: DatabaseIcon,
+		children: [
+			{
+				id: "mariadb",
+				label: "Manage MariaDB",
+				icon: DatabaseIcon,
+			},
+			{
+				id: "sql-runner",
+				label: "Queries & Files",
+				icon: TablePropertiesIcon,
+			},
+		],
 	},
 	{
 		id: "artifacts",
@@ -79,6 +104,11 @@ export const navigation: NavigationItem[] = [
 				icon: TerminalIcon,
 			},
 			{
+				id: "resource-manager",
+				label: "Resource Manager",
+				icon: ShieldIcon,
+			},
+			{
 				id: "server-configure",
 				label: "Configure Server",
 				icon: FolderCogIcon,
@@ -95,6 +125,11 @@ export const navigation: NavigationItem[] = [
 		label: "Tools & Utils",
 		icon: FolderCogIcon,
 		children: [
+			{
+				id: "command-palette",
+				label: "Command Palette",
+				icon: SearchIcon,
+			},
 			{
 				id: "configurator",
 				label: "Configurator",

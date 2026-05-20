@@ -1,12 +1,10 @@
 <script lang="ts">
 	import { onMount, tick } from "svelte";
-	import BackupCard from "./BackupCard.svelte";
 	import LoaderCircleIcon from "@lucide/svelte/icons/loader-circle";
 	import ConnectionCard from "./ConnectionCard.svelte";
 	import ExistingUsersCard from "./ExistingUsersCard.svelte";
 	import InstallConfigCard from "./InstallConfigCard.svelte";
 	import MariaDBNotice from "./MariaDBNotice.svelte";
-	import QueryConsole from "./QueryConsole.svelte";
 	import StatusOverview from "./StatusOverview.svelte";
 	import UserManagementCard from "./UserManagementCard.svelte";
 	import { Notice } from "$lib/components/ui/notice/index.js";
@@ -14,15 +12,11 @@
 	import { log } from "$lib/core/logger.svelte";
 	import {
 		deleteMariaDBUser,
-		executeMariaDBQuery,
-		backupMariaDB,
-		getDefaultMariaDBBackupOutputDir,
 		getMariaDBPackageInfo,
 		getMariaDBStatus,
 		getMariaDBUserAccess,
 		installMariaDB,
 		listMariaDBDatabases,
-		listMariaDBTables,
 		listMariaDBUsers,
 		restartMariaDBService,
 		saveMariaDBUser,
@@ -32,11 +26,9 @@
 		updateMariaDB,
 		updateMariaDBUser,
 		validateMariaDBCredentials,
-		type MariaDBBackupOptions,
 		type MariaDBCredentials,
 		type MariaDBInstallOptions,
 		type MariaDBPackageInfo,
-		type MariaDBQueryResult,
 		type MariaDBStatus,
 		type MariaDBUser,
 		type MariaDBUserAccess,
@@ -51,32 +43,7 @@
 	let backupWarningDismissed = $state(false);
 	let credentialsReady = $state(false);
 	let connectionError = $state("");
-	let query = $state("SELECT VERSION();");
-	let queryResult = $state<MariaDBQueryResult | null>(null);
-	let queryDatabase = $state("__global__");
 	let databases = $state<string[]>([]);
-	let backupTables = $state<string[]>([]);
-	let backupMode = $state<"database" | "tables" | "all">("database");
-	let backupDatabaseName = $state("");
-	let selectedBackupTable = $state("");
-	let loadedBackupTablesFor = $state("");
-	let loadingBackupTablesFor = $state("");
-	let backupTableRequestId = 0;
-	let backupOptions = $state<MariaDBBackupOptions>({
-		outputDir: "",
-		fileName: "",
-		database: "",
-		tables: [],
-		allDatabases: false,
-		schemaOnly: false,
-		dataOnly: false,
-		includeRoutines: true,
-		includeTriggers: true,
-		includeEvents: false,
-		singleTransaction: true,
-		addDropStatements: false,
-		whereClause: "",
-	});
 	let users = $state<MariaDBUser[]>([]);
 	let selectedUser = $state<MariaDBUser | null>(null);
 	let selectedAccess = $state<MariaDBUserAccess | null>(null);
@@ -119,10 +86,6 @@
 	});
 
 	onMount(() => {
-		const backupTimer = window.setTimeout(() => {
-			void initializeBackupOutputDir();
-		}, 250);
-
 		const statusTimer = window.setTimeout(() => {
 			void refreshStatus(false);
 		}, 120);
@@ -132,37 +95,10 @@
 		}, 1600);
 
 		return () => {
-			window.clearTimeout(backupTimer);
 			window.clearTimeout(statusTimer);
 			window.clearTimeout(packageTimer);
 		};
 	});
-
-	$effect(() => {
-		const database = backupDatabaseName.trim();
-		const canLoadTables = credentialsReady && backupMode === "tables" && database;
-
-		if (!canLoadTables) {
-			backupTables = [];
-			selectedBackupTable = "";
-			loadedBackupTablesFor = "";
-			loadingBackupTablesFor = "";
-			return;
-		}
-
-		if (loadedBackupTablesFor === database || loadingBackupTablesFor === database) return;
-
-		void refreshBackupTables(database);
-	});
-
-	async function initializeBackupOutputDir() {
-		if (backupOptions.outputDir.trim()) return;
-
-		const outputDir = await getDefaultMariaDBBackupOutputDir();
-		if (outputDir && !backupOptions.outputDir.trim()) {
-			backupOptions.outputDir = outputDir;
-		}
-	}
 
 	async function runTask<T>(task: () => Promise<T>, success: string, after?: (value: T) => void) {
 		busy = true;
@@ -185,9 +121,7 @@
 
 	function setStage(stage: string) {
 		installStage = stage;
-		if (stage) {
-			log(stage, { scope: "mariadb.ui" });
-		}
+		if (stage) log(stage, { scope: "mariadb.ui" });
 	}
 
 	async function refreshStatus(force = true) {
@@ -256,27 +190,15 @@
 	}
 
 	async function startService() {
-		await runTask(
-			() => startMariaDBService(status?.serviceName),
-			"MariaDB service started.",
-			(value) => (status = value),
-		);
+		await runTask(() => startMariaDBService(status?.serviceName), "MariaDB service started.", (value) => (status = value));
 	}
 
 	async function stopService() {
-		await runTask(
-			() => stopMariaDBService(status?.serviceName),
-			"MariaDB service stopped.",
-			(value) => (status = value),
-		);
+		await runTask(() => stopMariaDBService(status?.serviceName), "MariaDB service stopped.", (value) => (status = value));
 	}
 
 	async function restartService() {
-		await runTask(
-			() => restartMariaDBService(status?.serviceName),
-			"MariaDB service restarted.",
-			(value) => (status = value),
-		);
+		await runTask(() => restartMariaDBService(status?.serviceName), "MariaDB service restarted.", (value) => (status = value));
 	}
 
 	async function saveUser() {
@@ -327,7 +249,6 @@
 			return;
 		}
 
-		log(`MariaDB user selected for editing: ${user.username}@${user.host}.`, { scope: "mariadb.ui" });
 		selectedUser = user;
 		selectedAccess = null;
 		editingUser = {
@@ -341,8 +262,7 @@
 	}
 
 	async function refreshUserAccess(user = selectedUser) {
-		if (!credentialsReady) return;
-		if (!user) return;
+		if (!credentialsReady || !user) return;
 		await runTask(
 			() => getMariaDBUserAccess(credentials, user.username, user.host),
 			"MariaDB user access refreshed.",
@@ -354,9 +274,6 @@
 		credentialsReady = false;
 		connectionError = "";
 		databases = [];
-		backupTables = [];
-		loadedBackupTablesFor = "";
-		loadingBackupTablesFor = "";
 		selectedAccess = null;
 		log("MariaDB admin credentials changed; refreshing status and users.", { scope: "mariadb.ui", detail: `${credentials.username}@${credentials.host}:${credentials.port}` });
 		await refreshStatus(true);
@@ -373,12 +290,6 @@
 			credentialsReady = true;
 			rememberDatabaseCredentials(credentials);
 			message = "Admin credentials applied.";
-			if (credentials.database && loadedDatabases.includes(credentials.database)) {
-				backupDatabaseName ||= credentials.database;
-				queryDatabase = credentials.database;
-			} else if (!backupDatabaseName && loadedDatabases.length) {
-				backupDatabaseName = loadedDatabases[0];
-			}
 			await refreshUserAccess();
 		} catch (caught) {
 			connectionError = caught instanceof Error ? caught.message : String(caught);
@@ -386,32 +297,6 @@
 			log("MariaDB credentials rejected.", { level: "error", scope: "mariadb.ui", detail: connectionError });
 		} finally {
 			busy = false;
-		}
-	}
-
-	async function refreshBackupTables(database: string) {
-		const requestId = ++backupTableRequestId;
-		loadingBackupTablesFor = database;
-
-		try {
-			const tables = await listMariaDBTables(credentials, database);
-			if (requestId !== backupTableRequestId || backupDatabaseName.trim() !== database) return;
-
-			backupTables = tables;
-			backupOptions.tables = backupOptions.tables.filter((table) => tables.includes(table));
-			if (selectedBackupTable && !tables.includes(selectedBackupTable)) {
-				selectedBackupTable = "";
-			}
-			loadedBackupTablesFor = database;
-		} catch (caught) {
-			const detail = caught instanceof Error ? caught.message : String(caught);
-			log("MariaDB table list refresh failed.", { level: "error", scope: "mariadb.ui", detail });
-			backupTables = [];
-			loadedBackupTablesFor = "";
-		} finally {
-			if (requestId === backupTableRequestId && loadingBackupTablesFor === database) {
-				loadingBackupTablesFor = "";
-			}
 		}
 	}
 
@@ -451,64 +336,14 @@
 		await runTask(() => deleteMariaDBUser(credentials, user.username, user.host), "Database user deleted.");
 		await refreshUsers();
 	}
-
-	async function executeQuery() {
-		if (!credentialsReady) {
-			error = "Apply valid admin credentials before running MariaDB queries.";
-			log("MariaDB query execution blocked until credentials are applied.", { level: "warn", scope: "mariadb.ui" });
-			return;
-		}
-
-		await runTask(
-			() =>
-				executeMariaDBQuery(
-					{
-						...credentials,
-						database: queryDatabase === "__global__" ? null : queryDatabase,
-					},
-					query,
-				),
-			"Query executed.",
-			(value) => (queryResult = value),
-		);
-	}
-
-	async function backupDatabase() {
-		if (!credentialsReady) {
-			error = "Apply valid admin credentials before creating MariaDB backups.";
-			log("MariaDB backup action blocked until credentials are applied.", { level: "warn", scope: "mariadb.ui" });
-			return;
-		}
-
-		if (backupMode === "tables" && backupOptions.tables.length === 0) {
-			error = "Choose at least one table to back up.";
-			return;
-		}
-
-		await runTask(
-			() =>
-				backupMariaDB(credentials, {
-					...backupOptions,
-					allDatabases: backupMode === "all",
-					database: backupMode === "all" ? null : backupDatabaseName.trim() || credentials.database || null,
-					tables: backupMode === "tables" ? backupOptions.tables : [],
-					fileName: backupOptions.fileName?.trim() || null,
-					whereClause: backupOptions.whereClause?.trim() || null,
-				}),
-			"MariaDB backup created.",
-			(value) => {
-				message = `Backup created: ${value.path}`;
-			},
-		);
-	}
 </script>
 
 <section class="space-y-6">
 	<div class="flex flex-col justify-between gap-4 lg:flex-row lg:items-end">
 		<div>
 			<p class="text-xs font-semibold tracking-wide text-muted-foreground uppercase">MariaDB</p>
-			<h1 class="mt-2 text-3xl font-semibold tracking-normal text-foreground">Database Management</h1>
-			<p class="mt-2 max-w-2xl text-sm text-muted-foreground">Install MariaDB, inspect the local Windows service, manage database users, and run SQL.</p>
+			<h1 class="mt-2 text-3xl font-semibold tracking-normal text-foreground">Manage MariaDB</h1>
+			<p class="mt-2 max-w-2xl text-sm text-muted-foreground">Install MariaDB, inspect the local Windows service, and manage database users.</p>
 		</div>
 		<div class="inline-flex items-center gap-2 rounded-sm border border-border bg-card px-3 py-2 text-xs text-muted-foreground">
 			{#if busy}
@@ -526,7 +361,7 @@
 		<Notice
 			tone="warn"
 			title="Back up before changing MariaDB"
-			message="Before installing, updating, or uninstalling MariaDB through the app, create a fresh backup of any databases you care about. The app is designed to preserve data, but a backup is still the safest recovery point."
+			message="Before installing, updating, or uninstalling MariaDB through the app, create a fresh backup of any databases you care about. Use Queries & Files for backups."
 			onDismiss={() => (backupWarningDismissed = true)}
 			class="px-4 py-3 text-sm"
 		/>
@@ -561,22 +396,6 @@
 				onSave={saveExistingUser}
 				onDelete={removeExistingUser}
 			/>
-		</div>
-		<div class="xl:col-span-12">
-			<BackupCard
-				bind:backupOptions
-				bind:backupMode
-				bind:backupDatabase={backupDatabaseName}
-				bind:selectedTable={selectedBackupTable}
-				{busy}
-				canBackup={credentialsReady}
-				{databases}
-				tables={backupTables}
-				onBackup={backupDatabase}
-			/>
-		</div>
-		<div class="xl:col-span-12">
-			<QueryConsole bind:query bind:selectedDatabase={queryDatabase} {busy} canExecute={credentialsReady} {databases} result={queryResult} onExecute={executeQuery} />
 		</div>
 	</div>
 </section>

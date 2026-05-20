@@ -64,6 +64,7 @@ pub fn run() {
             commands::logs::clear_app_logs,
             commands::logs::read_client_logs,
             commands::system::open_external_url,
+            commands::system::read_text_file,
             commands::mariadb::get_mariadb_status,
             commands::mariadb::get_mariadb_package_info,
             commands::mariadb::install_mariadb,

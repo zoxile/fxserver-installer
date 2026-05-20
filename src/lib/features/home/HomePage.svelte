@@ -7,6 +7,7 @@
 	import GitBranchIcon from "@lucide/svelte/icons/git-branch";
 	import LogsIcon from "@lucide/svelte/icons/logs";
 	import PackageIcon from "@lucide/svelte/icons/package";
+	import RocketIcon from "@lucide/svelte/icons/rocket";
 	import ServerCogIcon from "@lucide/svelte/icons/server-cog";
 	import TerminalIcon from "@lucide/svelte/icons/terminal";
 	import WrenchIcon from "@lucide/svelte/icons/wrench";
@@ -103,8 +104,22 @@
 				"Database backups",
 				"Version detection",
 			]}
-			actionLabel="Open MariaDB"
+			actions={[
+				{ label: "Manage", onclick: () => onNavigate("mariadb") },
+				{ label: "Queries & Files", onclick: () => onNavigate("sql-runner") },
+			]}
 			onclick={() => onNavigate("mariadb")}
+		/>
+		<HomeBentoCard
+			title="First Run"
+			description="Walk through the setup flow from MariaDB to artifact install, profile selection, database string, RCON, and first server start."
+			icon={RocketIcon}
+			size="compact"
+			className="md:[grid-area:onboarding]"
+			kicker="Setup"
+			highlights={["Guided checklist", "Direct actions"]}
+			actionLabel="Open Wizard"
+			onclick={() => onNavigate("onboarding")}
 		/>
 		<HomeBentoCard
 			title="Artifacts"
@@ -124,8 +139,11 @@
 			size="wide"
 			className="md:[grid-area:server]"
 			kicker="Server core"
-			highlights={["Live console", "Secure RCON password", "Performance charts", "Process details"]}
-			actionLabel="Open Server"
+			highlights={["Live console", "Resource controls", "Secure RCON password", "Performance charts"]}
+			actions={[
+				{ label: "Manage", onclick: () => onNavigate("server-manage") },
+				{ label: "Resources", onclick: () => onNavigate("resource-manager") },
+			]}
 			onclick={() => onNavigate("server-manage")}
 		/>
 		<HomeBentoCard
@@ -161,8 +179,9 @@
 			size="feature"
 			className="md:[grid-area:tools]"
 			kicker="Utility"
-			highlights={["JSON formatter", "JOOAT resolver", "Profiler", "Lua configurator"]}
+			highlights={["Command palette", "JSON formatter", "JOOAT resolver", "Profiler", "Lua configurator"]}
 			actions={[
+				{ label: "Palette", onclick: () => onNavigate("command-palette") },
 				{ label: "JSON", onclick: () => onNavigate("json-formatter") },
 				{ label: "JOOAT", onclick: () => onNavigate("jooat") },
 				{ label: "Profiler", onclick: () => onNavigate("profiler") },
@@ -179,7 +198,7 @@
 			grid-template-columns: repeat(6, minmax(0, 1fr));
 			grid-template-rows: repeat(5, minmax(118px, auto));
 			grid-template-areas:
-				"db db db artifacts artifacts artifacts"
+				"db db db artifacts artifacts onboarding"
 				"db db db artifacts artifacts artifacts"
 				"db db db server server server"
 				"logs logs logs tools tools tools"

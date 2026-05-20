@@ -5,15 +5,20 @@
 	import ArtifactInfoPage from "$lib/features/artifacts/ArtifactInfoPage.svelte";
 	import ArtifactInstallPage from "$lib/features/artifacts/ArtifactInstallPage.svelte";
 	import ClientLogsPage from "$lib/features/client-logs/ClientLogsPage.svelte";
+	import CommandPalette from "$lib/features/command-palette/CommandPalette.svelte";
+	import CommandPalettePage from "$lib/features/command-palette/CommandPalettePage.svelte";
 	import ConfigureServerPage from "$lib/features/fxserver/ConfigureServerPage.svelte";
 	import ConfiguratorPage from "$lib/features/configurator/ConfiguratorPage.svelte";
 	import FxserverLogsPage from "$lib/features/fxserver/FxserverLogsPage.svelte";
 	import HomePage from "$lib/features/home/HomePage.svelte";
 	import ManageServerPage from "$lib/features/fxserver/ManageServerPage.svelte";
+	import OnboardingPage from "$lib/features/onboarding/OnboardingPage.svelte";
+	import ResourceManagerPage from "$lib/features/fxserver/ResourceManagerPage.svelte";
 	import JooatResolverPage from "$lib/features/jooat/JooatResolverPage.svelte";
 	import JsonFormatterPage from "$lib/features/json/JsonFormatterPage.svelte";
 	import LogViewerPage from "$lib/features/app-logs/LogViewerPage.svelte";
 	import MariaDBPanel from "$lib/features/mariadb/MariaDBPanel.svelte";
+	import SqlRunnerPage from "$lib/features/mariadb/SqlRunnerPage.svelte";
 	import PlaceholderPage from "$lib/features/placeholder/PlaceholderPage.svelte";
 	import ProfilerPage from "$lib/features/profiler/ProfilerPage.svelte";
 	import ArrowDownIcon from "@lucide/svelte/icons/arrow-down";
@@ -21,20 +26,42 @@
 	import type { PageId } from "$lib/navigation";
 	import { getPageLabel } from "$lib/navigation";
 	import { initializeLogger, log } from "$lib/core/logger.svelte";
+	import { commandPaletteSettings, loadCommandPaletteSettings } from "$lib/core/commandPalette.svelte";
 	import { onMount } from "svelte";
 
 	let scrollContainer: HTMLElement;
 	let isNearBottom = $state(false);
 	let sidebarCollapsed = $state(false);
 	let activePage = $state<PageId>("home");
+	let commandPaletteOpen = $state(false);
 	let navigationFrame = 0;
 
 	const placeholders: Record<
-		Exclude<PageId, "home" | "mariadb" | "artifact-install" | "artifact-info" | "server-manage" | "server-configure" | "server-logs" | "json-formatter" | "profiler" | "jooat" | "logs" | "client-logs" | "configurator">,
+		Exclude<
+			PageId,
+			| "home"
+			| "onboarding"
+			| "mariadb"
+			| "sql-runner"
+			| "artifact-install"
+			| "artifact-info"
+			| "server-manage"
+			| "resource-manager"
+			| "server-configure"
+			| "server-logs"
+			| "command-palette"
+			| "json-formatter"
+			| "profiler"
+			| "jooat"
+			| "logs"
+			| "client-logs"
+			| "configurator"
+		>,
 		string
 	> = {};
 
 	onMount(() => {
+		loadCommandPaletteSettings();
 		void (async () => {
 			await initializeLogger();
 			log("Application shell mounted.", { level: "debug", scope: "app" });
@@ -73,6 +100,14 @@
 	}
 
 	function handleGlobalKeydown(event: KeyboardEvent) {
+		if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
+			if (commandPaletteSettings.enabled) {
+				event.preventDefault();
+				commandPaletteOpen = true;
+			}
+			return;
+		}
+
 		if (event.key !== "F5") return;
 
 		event.preventDefault();
@@ -83,6 +118,7 @@
 <svelte:window onkeydown={handleGlobalKeydown} />
 
 <Titlebar />
+<CommandPalette open={commandPaletteOpen} onClose={() => (commandPaletteOpen = false)} onNavigate={navigate} />
 
 <main class="dark h-screen overflow-hidden bg-background text-foreground">
 	<div class="flex h-screen">
@@ -99,14 +135,20 @@
 			<div class="mx-auto max-w-7xl px-4 pt-6 pb-12 sm:px-6 lg:px-8">
 				{#if activePage === "home"}
 					<HomePage onNavigate={navigate} />
+				{:else if activePage === "onboarding"}
+					<OnboardingPage onNavigate={navigate} />
 				{:else if activePage === "mariadb"}
 					<MariaDBPanel />
+				{:else if activePage === "sql-runner"}
+					<SqlRunnerPage />
 				{:else if activePage === "artifact-install"}
 					<ArtifactInstallPage />
 				{:else if activePage === "artifact-info"}
 					<ArtifactInfoPage />
 				{:else if activePage === "server-manage"}
 					<ManageServerPage />
+				{:else if activePage === "resource-manager"}
+					<ResourceManagerPage />
 				{:else if activePage === "server-configure"}
 					<ConfigureServerPage />
 				{:else if activePage === "server-logs"}
@@ -121,6 +163,8 @@
 					<LogViewerPage />
 				{:else if activePage === "client-logs"}
 					<ClientLogsPage />
+				{:else if activePage === "command-palette"}
+					<CommandPalettePage />
 				{:else if activePage === "configurator"}
 					<ConfiguratorPage />
 				{:else}
