@@ -13,6 +13,7 @@
 	import WrenchIcon from "@lucide/svelte/icons/wrench";
 	import * as Card from "$lib/components/ui/card/index.js";
 	import { Button } from "$lib/components/ui/button/index.js";
+	import { Kbd } from "$lib/components/ui/kbd/index.js";
 	import { openExternalUrl } from "$lib/core/openExternal";
 	import HomeArtifactStatusCard from "./HomeArtifactStatusCard.svelte";
 	import HomeBentoCard from "./HomeBentoCard.svelte";
@@ -40,6 +41,11 @@
 			<p class="text-xs font-semibold tracking-wide text-muted-foreground uppercase">Home</p>
 			<h1 class="mt-2 max-w-3xl text-3xl font-semibold tracking-normal text-foreground">FXServer setup, arranged into one quiet workspace.</h1>
 			<p class="mt-3 max-w-2xl text-sm leading-6 text-muted-foreground">Move through database setup, artifact preparation, server configuration, and utility tools without losing the thread.</p>
+			<div class="mt-4 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+				<span>Open command palette</span>
+				<Kbd>Ctrl</Kbd>
+				<Kbd>K</Kbd>
+			</div>
 		</div>
 
 		<Card.Root class="rounded-md border-border bg-card shadow-sm">
