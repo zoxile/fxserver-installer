@@ -3,6 +3,7 @@
 	import PanelLeftCloseIcon from "@lucide/svelte/icons/panel-left-close";
 	import PanelLeftOpenIcon from "@lucide/svelte/icons/panel-left-open";
 	import SidebarNavButton from "./SidebarNavButton.svelte";
+	import { Kbd } from "$lib/components/ui/kbd/index.js";
 	import type { PageId } from "$lib/navigation";
 	import { navigation } from "$lib/navigation";
 
@@ -157,5 +158,27 @@
 				{/if}
 			{/each}
 		</nav>
+
+		<div class={["mt-4 shrink-0 border-t border-sidebar-border pt-3", effectiveCollapsed ? "flex justify-center" : "px-2"]} title="Open command palette with Ctrl + K">
+			{#if effectiveCollapsed}
+				<div class="grid justify-items-center gap-1">
+					<Kbd class="h-5 px-1 text-[9px]">Ctrl</Kbd>
+					<Kbd class="h-5 px-1 text-[9px]">K</Kbd>
+				</div>
+			{:else}
+				<div
+					class={[
+						"flex items-center justify-between gap-3 rounded-sm border border-sidebar-border bg-sidebar-accent/35 px-3 py-2 text-xs text-muted-foreground transition-opacity duration-200",
+						showExpandedContent ? "opacity-100" : "opacity-0",
+					]}
+				>
+					<span class="truncate">Command Palette</span>
+					<span class="flex shrink-0 items-center gap-1">
+						<Kbd>Ctrl</Kbd>
+						<Kbd>K</Kbd>
+					</span>
+				</div>
+			{/if}
+		</div>
 	</div>
 </aside>
