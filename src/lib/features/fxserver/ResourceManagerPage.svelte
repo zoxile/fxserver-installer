@@ -2,6 +2,7 @@
 	import DownloadIcon from "@lucide/svelte/icons/download";
 	import ExternalLinkIcon from "@lucide/svelte/icons/external-link";
 	import GitBranchIcon from "@lucide/svelte/icons/git-branch";
+	import LoaderCircleIcon from "@lucide/svelte/icons/loader-circle";
 	import PlayIcon from "@lucide/svelte/icons/play";
 	import RefreshCwIcon from "@lucide/svelte/icons/refresh-cw";
 	import RotateCcwIcon from "@lucide/svelte/icons/rotate-cw";
@@ -28,7 +29,7 @@
 	} from "$lib/modules/fxserver";
 	import { fxserverSettings, loadFxserverSettings, readSavedEnvironment } from "./fxserverSettings.svelte";
 
-	type UpdateStatus = "unchecked" | "checking" | "up-to-date" | "update-available" | "no-repository" | "error";
+	type UpdateStatus = "unchecked" | "checking" | "up-to-date" | "update-available" | "no-repository" | "cfx-default" | "error";
 
 	type ResourceView = FxserverResourceInfo & {
 		updateStatus: UpdateStatus;
@@ -38,6 +39,18 @@
 		latestManifestUrl: string;
 		repositoryWebUrl: string;
 		updating: boolean;
+	};
+
+	type GithubRepository = {
+		owner: string;
+		repo: string;
+	};
+
+	type LatestManifest = {
+		version: string;
+		defaultBranch: string;
+		manifestUrl: string;
+		webUrl: string;
 	};
 
 	let rcon = $state<FxserverRconConfig>({ host: "127.0.0.1", port: 30120, password: "" });
@@ -51,8 +64,12 @@
 	let message = $state("");
 	let error = $state("");
 	let recentCommands = $state<string[]>([]);
+	let showUpdateBackupNotice = $state(true);
 	let contextMenuResource = $state<ResourceView | null>(null);
 	let contextMenuPosition = $state({ x: 0, y: 0 });
+
+	const latestManifestCache = new Map<string, Promise<LatestManifest>>();
+	const repositoryMetadataCache = new Map<string, Promise<{ defaultBranch: string; webUrl: string }>>();
 
 	const filteredResources = $derived(
 		resources.filter((resource) => {
@@ -71,7 +88,7 @@
 			return true;
 		}),
 	);
-	const resourcesWithRepositories = $derived(resources.filter((resource) => Boolean(resource.repository)).length);
+	const updateManagedCount = $derived(resources.filter((resource) => canCheckResourceUpdates(resource)).length);
 	const updateCount = $derived(resources.filter((resource) => resource.updateStatus === "update-available").length);
 
 	onMount(() => {
@@ -110,15 +127,17 @@
 			scanResult = result;
 			resources = result.resources.map((resource) => {
 				const existing = previous.get(resource.path);
+				const existingStatus = existing?.updateStatus === "cfx-default" ? "unchecked" : existing?.updateStatus;
+				const isDefaultResource = isCfxDefaultResource(resource);
 				return {
 					...resource,
-					updateStatus: resource.repository ? (existing?.updateStatus ?? "unchecked") : "no-repository",
-					updateError: existing?.updateError ?? "",
-					latestVersion: existing?.latestVersion ?? "",
-					defaultBranch: existing?.defaultBranch ?? "",
-					latestManifestUrl: existing?.latestManifestUrl ?? "",
+					updateStatus: getInitialUpdateStatus(resource, existingStatus),
+					updateError: isDefaultResource ? "" : (existing?.updateError ?? ""),
+					latestVersion: isDefaultResource ? "" : (existing?.latestVersion ?? ""),
+					defaultBranch: isDefaultResource ? "" : (existing?.defaultBranch ?? ""),
+					latestManifestUrl: isDefaultResource ? "" : (existing?.latestManifestUrl ?? ""),
 					repositoryWebUrl: existing?.repositoryWebUrl ?? normalizeRepositoryWebUrl(resource.repository ?? ""),
-					updating: existing?.updating ?? false,
+					updating: isDefaultResource ? false : (existing?.updating ?? false),
 				};
 			});
 			if (showMessage) message = `Scanned ${resources.length} resource${resources.length === 1 ? "" : "s"}.`;
@@ -135,9 +154,10 @@
 		error = "";
 		message = "";
 		try {
-			const candidates = resources.filter((resource) => resource.repository);
-			await runLimited(candidates, 4, checkResourceUpdate);
-			message = "Resource update checks completed.";
+			const candidates = resources.filter((resource) => canCheckResourceUpdates(resource));
+			await runLimited(candidates, 2, checkResourceUpdate);
+			const failed = resources.filter((resource) => resource.updateStatus === "error").length;
+			message = failed ? `Resource update checks completed with ${failed} failed check${failed === 1 ? "" : "s"}.` : "Resource update checks completed.";
 		} finally {
 			checkingAll = false;
 		}
@@ -146,6 +166,17 @@
 	async function checkResourceUpdate(resource: ResourceView) {
 		if (!resource.repository) {
 			patchResource(resource.path, { updateStatus: "no-repository", updateError: "No repository entry in fxmanifest." });
+			return;
+		}
+		if (isCfxDefaultResource(resource)) {
+			patchResource(resource.path, {
+				updateStatus: "cfx-default",
+				updateError: "",
+				latestVersion: "",
+				defaultBranch: "",
+				latestManifestUrl: "",
+				repositoryWebUrl: normalizeRepositoryWebUrl(resource.repository),
+			});
 			return;
 		}
 
@@ -171,7 +202,11 @@
 	}
 
 	async function updateResource(resource: ResourceView, force = false) {
-		if (!resource.repository) return;
+		const repository = resource.repository;
+		if (!repository || isCfxDefaultResource(resource)) {
+			if (isCfxDefaultResource(resource)) message = `${resource.name} is a CFX default resource and is updated with FXServer artifacts.`;
+			return;
+		}
 		let target = resource;
 
 		if (!target.defaultBranch) {
@@ -184,7 +219,7 @@
 			return;
 		}
 
-		const actionLabel = force ? "Reinstall" : "Update";
+		const actionLabel = force ? "Re-install" : "Update";
 		const confirmed = window.confirm(`${actionLabel} ${resource.name} from ${target.repositoryWebUrl || resource.repository}? Existing files with the same names will be overwritten.`);
 		if (!confirmed) return;
 
@@ -194,10 +229,10 @@
 		try {
 			await updateGithubResource({
 				resourcePath: resource.path,
-				repository: resource.repository,
+				repository,
 				branch: target.defaultBranch,
 			});
-			message = force ? `${resource.name} reinstalled from GitHub.` : `${resource.name} updated from GitHub.`;
+			message = force ? `${resource.name} re-installed from GitHub.` : `${resource.name} updated from GitHub.`;
 			await scanResources(false);
 			const refreshed = resources.find((entry) => entry.path === resource.path);
 			if (refreshed) await checkResourceUpdate(refreshed);
@@ -229,14 +264,18 @@
 		await runResourceCommand(action, resource);
 	}
 
-	async function runContextUpdate(resource: ResourceView, force = false) {
+	async function runContextGithubAction(resource: ResourceView) {
 		closeResourceContextMenu();
-		await updateResource(resource, force);
+		await runGithubAction(resource);
 	}
 
 	async function runContextCheck(resource: ResourceView) {
 		closeResourceContextMenu();
 		await checkResourceUpdate(resource);
+	}
+
+	async function runGithubAction(resource: ResourceView) {
+		await updateResource(resource, getLiveUpdateStatus(resource) === "up-to-date");
 	}
 
 	async function runResourceCommand(action: "start" | "stop" | "restart" | "ensure" | "refresh", resource: ResourceView) {
@@ -266,37 +305,133 @@
 		resources = resources.map((resource) => (resource.path === path ? { ...resource, ...patch } : resource));
 	}
 
-	async function fetchLatestManifest(resource: ResourceView) {
+	async function fetchLatestManifest(resource: ResourceView): Promise<LatestManifest> {
 		const parsed = parseGithubRepository(resource.repository ?? "");
 		if (!parsed) throw new Error("Repository is not a supported GitHub URL.");
 
-		const repoResponse = await fetch(`https://api.github.com/repos/${parsed.owner}/${parsed.repo}`, {
-			headers: { Accept: "application/vnd.github+json" },
-		});
-		if (!repoResponse.ok) throw new Error(`GitHub returned ${repoResponse.status} while loading repository metadata.`);
-
-		const repoData = (await repoResponse.json()) as { default_branch?: string; html_url?: string };
-		const defaultBranch = repoData.default_branch || "main";
 		const manifestNames = [...new Set([resource.manifestName, "fxmanifest.lua", "__resource.lua"])];
+		const cacheKey = `${parsed.owner.toLowerCase()}/${parsed.repo.toLowerCase()}:${resource.defaultBranch || ""}:${manifestNames.join("|")}`;
+		const cached = latestManifestCache.get(cacheKey);
+		if (cached) return cached;
 
-		for (const manifestName of manifestNames) {
-			const manifestUrl = `https://raw.githubusercontent.com/${parsed.owner}/${parsed.repo}/${encodeURIComponent(defaultBranch)}/${manifestName}`;
-			const manifestResponse = await fetch(manifestUrl);
-			if (!manifestResponse.ok) continue;
+		const request = fetchLatestManifestUncached(resource, parsed, manifestNames).catch((error: unknown) => {
+			latestManifestCache.delete(cacheKey);
+			throw error;
+		});
+		latestManifestCache.set(cacheKey, request);
+		return request;
+	}
 
-			const manifest = await manifestResponse.text();
+	async function fetchLatestManifestUncached(resource: ResourceView, repository: GithubRepository, manifestNames: string[]): Promise<LatestManifest> {
+		const webUrl = `https://github.com/${repository.owner}/${repository.repo}`;
+		const triedBranches = new Set<string>();
+
+		for (const branch of getRawManifestBranches(resource.defaultBranch)) {
+			triedBranches.add(branch.toLowerCase());
+			const rawManifest = await fetchRawManifest(repository, branch, manifestNames);
+			if (!rawManifest) continue;
+
+			let defaultBranch = branch;
+			let metadataWebUrl = webUrl;
+			if (branch === "HEAD") {
+				try {
+					const metadata = await fetchRepositoryMetadata(repository);
+					defaultBranch = metadata.defaultBranch || branch;
+					metadataWebUrl = metadata.webUrl || webUrl;
+				} catch {
+					// Raw HEAD still gives a reliable version check; updating can use GitHub's HEAD archive fallback.
+				}
+			}
+
 			return {
-				version: parseManifestValue(manifest, "version") ?? "",
+				version: parseManifestValue(rawManifest.content, "version") ?? "",
 				defaultBranch,
-				manifestUrl,
-				webUrl: repoData.html_url || `https://github.com/${parsed.owner}/${parsed.repo}`,
+				manifestUrl: rawManifest.manifestUrl,
+				webUrl: metadataWebUrl,
 			};
+		}
+
+		const metadata = await fetchRepositoryMetadata(repository);
+		if (!triedBranches.has(metadata.defaultBranch.toLowerCase())) {
+			const rawManifest = await fetchRawManifest(repository, metadata.defaultBranch, manifestNames);
+			if (rawManifest) {
+				return {
+					version: parseManifestValue(rawManifest.content, "version") ?? "",
+					defaultBranch: metadata.defaultBranch,
+					manifestUrl: rawManifest.manifestUrl,
+					webUrl: metadata.webUrl || webUrl,
+				};
+			}
 		}
 
 		throw new Error("No fxmanifest.lua or __resource.lua was found in the repository root.");
 	}
 
-	function parseGithubRepository(repository: string) {
+	async function fetchRawManifest(repository: GithubRepository, branch: string, manifestNames: string[]) {
+		for (const manifestName of manifestNames) {
+			const manifestUrl = `https://raw.githubusercontent.com/${repository.owner}/${repository.repo}/${encodeGithubRef(branch)}/${manifestName}`;
+			const manifestResponse = await fetch(manifestUrl, { cache: "no-store" });
+			if (manifestResponse.status === 403) throw new Error("GitHub blocked the raw manifest request, likely because of temporary rate limiting. Try again later.");
+			if (!manifestResponse.ok) continue;
+
+			return {
+				content: await manifestResponse.text(),
+				manifestUrl,
+			};
+		}
+
+		return null;
+	}
+
+	async function fetchRepositoryMetadata(repository: GithubRepository) {
+		const cacheKey = `${repository.owner.toLowerCase()}/${repository.repo.toLowerCase()}`;
+		const cached = repositoryMetadataCache.get(cacheKey);
+		if (cached) return cached;
+
+		const request = fetchRepositoryMetadataUncached(repository).catch((error: unknown) => {
+			repositoryMetadataCache.delete(cacheKey);
+			throw error;
+		});
+		repositoryMetadataCache.set(cacheKey, request);
+		return request;
+	}
+
+	async function fetchRepositoryMetadataUncached(repository: GithubRepository) {
+		const response = await fetch(`https://api.github.com/repos/${repository.owner}/${repository.repo}`, {
+			cache: "no-store",
+			headers: { Accept: "application/vnd.github+json" },
+		});
+		if (!response.ok) throw new Error(githubMetadataError(response));
+
+		const data = (await response.json()) as { default_branch?: string; html_url?: string };
+		return {
+			defaultBranch: data.default_branch || "main",
+			webUrl: data.html_url || `https://github.com/${repository.owner}/${repository.repo}`,
+		};
+	}
+
+	function getRawManifestBranches(currentBranch: string) {
+		return [...new Set([currentBranch, "main", "master", "HEAD"].map((branch) => branch.trim()).filter(Boolean))];
+	}
+
+	function encodeGithubRef(branch: string) {
+		return branch
+			.split("/")
+			.map((part) => encodeURIComponent(part))
+			.join("/");
+	}
+
+	function githubMetadataError(response: Response) {
+		if (response.status === 403) {
+			const resetSeconds = Number.parseInt(response.headers.get("x-ratelimit-reset") ?? "", 10);
+			const resetText = Number.isFinite(resetSeconds) ? ` Rate limit resets around ${new Date(resetSeconds * 1000).toLocaleTimeString()}.` : "";
+			return `GitHub API rate-limited repository metadata.${resetText}`;
+		}
+		if (response.status === 404) return "GitHub repository was not found or is private.";
+		return `GitHub returned ${response.status} while loading repository metadata.`;
+	}
+
+	function parseGithubRepository(repository: string): GithubRepository | null {
 		const cleaned = repository.trim().replace(/\.git$/, "").replace(/\/$/, "");
 		const sshMatch = cleaned.match(/^git@github\.com:([^/]+)\/(.+)$/i);
 		const urlMatch = cleaned.match(/github\.com\/([^/]+)\/([^/#?]+)/i);
@@ -329,6 +464,45 @@
 		return version.trim().replace(/^v/i, "");
 	}
 
+	function getInitialUpdateStatus(resource: FxserverResourceInfo, existingStatus?: UpdateStatus) {
+		if (!resource.repository) return "no-repository";
+		if (isCfxDefaultResource(resource)) return "cfx-default";
+		return existingStatus ?? "unchecked";
+	}
+
+	function canCheckResourceUpdates(resource: Pick<FxserverResourceInfo, "path" | "repository">) {
+		return Boolean(resource.repository) && !isCfxDefaultResource(resource);
+	}
+
+	function isCfxDefaultResource(resource: Pick<FxserverResourceInfo, "path" | "repository">) {
+		const pathParts = resource.path.replace(/\\/g, "/").toLowerCase().split("/");
+		if (pathParts.includes("[cfx-default]")) return true;
+
+		const parsed = parseGithubRepository(resource.repository ?? "");
+		return parsed?.owner.toLowerCase() === "citizenfx";
+	}
+
+	function getLiveUpdateStatus(resource: ResourceView) {
+		return resources.find((entry) => entry.path === resource.path)?.updateStatus ?? resource.updateStatus;
+	}
+
+	function isCheckingResource(resource: ResourceView) {
+		return getLiveUpdateStatus(resource) === "checking";
+	}
+
+	function canRunGithubAction(resource: ResourceView) {
+		const status = getLiveUpdateStatus(resource);
+		return canCheckResourceUpdates(resource) && !isUpdatingResource(resource) && (status === "update-available" || status === "up-to-date");
+	}
+
+	function githubActionLabel(resource: ResourceView) {
+		return getLiveUpdateStatus(resource) === "up-to-date" ? "Re-install" : "Update";
+	}
+
+	function githubActionTitle(resource: ResourceView) {
+		return getLiveUpdateStatus(resource) === "up-to-date" ? "Re-install this resource from GitHub" : "Update this resource from GitHub";
+	}
+
 	function updateBadgeClass(status: UpdateStatus) {
 		return (
 			{
@@ -336,6 +510,7 @@
 				"update-available": "border-amber-400/30 bg-amber-400/10 text-amber-100",
 				checking: "border-sky-400/30 bg-sky-400/10 text-sky-200",
 				"no-repository": "border-border bg-muted/30 text-muted-foreground",
+				"cfx-default": "border-indigo-400/25 bg-indigo-400/10 text-indigo-100",
 				error: "border-red-400/30 bg-red-400/10 text-red-100",
 				unchecked: "border-border bg-background/70 text-muted-foreground",
 			} satisfies Record<UpdateStatus, string>
@@ -347,12 +522,17 @@
 		if (resource.updateStatus === "update-available") return "Update available";
 		if (resource.updateStatus === "checking") return "Checking";
 		if (resource.updateStatus === "no-repository") return "Repository not found";
+		if (resource.updateStatus === "cfx-default") return "CFX default";
 		if (resource.updateStatus === "error") return "Check failed";
 		return "Not checked";
 	}
 
 	function isCommandBusy(action: string, resource: ResourceView) {
 		return busyCommand === `${action}:${resource.path}`;
+	}
+
+	function isUpdatingResource(resource: ResourceView) {
+		return Boolean(resources.find((entry) => entry.path === resource.path)?.updating ?? resource.updating);
 	}
 
 	function displayResourcePath(path: string) {
@@ -401,6 +581,14 @@
 
 	{#if message}<Notice tone="success" {message} onDismiss={() => (message = "")} />{/if}
 	{#if error}<Notice tone="error" message={error} onDismiss={() => (error = "")} />{/if}
+	{#if showUpdateBackupNotice}
+		<Notice
+			tone="warn"
+			title="Back up resource configs"
+			message="Update and re-install actions can replace existing files. Back up older configuration files before running them."
+			onDismiss={() => (showUpdateBackupNotice = false)}
+		/>
+	{/if}
 
 	<div class="grid gap-4 xl:grid-cols-[minmax(0,1.1fr)_minmax(0,0.9fr)]">
 		<Card.Root class="rounded-md border-border bg-card shadow-sm">
@@ -422,8 +610,8 @@
 						<p class="mt-1 truncate font-mono text-sm text-foreground">{fxserverSettings.profile || "Not selected"}</p>
 					</div>
 					<div class="rounded-sm border border-border bg-background/70 p-3">
-						<p class="text-xs text-muted-foreground">With Repository</p>
-						<p class="mt-1 font-mono text-sm text-foreground">{resourcesWithRepositories}</p>
+						<p class="text-xs text-muted-foreground">Update Managed</p>
+						<p class="mt-1 font-mono text-sm text-foreground">{updateManagedCount}</p>
 					</div>
 					<div class="rounded-sm border border-border bg-background/70 p-3">
 						<p class="text-xs text-muted-foreground">Updates</p>
@@ -438,8 +626,12 @@
 						<RefreshCwIcon class={scanning ? "animate-spin" : undefined} />
 						Scan
 					</Button>
-					<Button variant="outline" onclick={checkAllUpdates} disabled={checkingAll || !resourcesWithRepositories} title="Check all resources with a repository entry">
-						<GitBranchIcon class={checkingAll ? "animate-spin" : undefined} />
+					<Button variant="outline" onclick={checkAllUpdates} disabled={checkingAll || !updateManagedCount} title="Check all non-CFX resources with a repository entry">
+						{#if checkingAll}
+							<LoaderCircleIcon class="animate-spin" />
+						{:else}
+							<GitBranchIcon />
+						{/if}
 						Check Updates
 					</Button>
 				</div>
@@ -478,7 +670,7 @@
 			<div class="flex flex-col justify-between gap-3 lg:flex-row lg:items-center">
 				<div>
 					<Card.Title>Resources</Card.Title>
-					<Card.Description>Resources without a `repository` entry can still be controlled, but update checks are marked as not found.</Card.Description>
+					<Card.Description>Resources without a `repository` entry and CFX defaults can still be controlled, but update checks are skipped.</Card.Description>
 				</div>
 				<div class="flex flex-wrap gap-2">
 					<Button variant={filter === "all" ? "default" : "outline"} size="sm" onclick={() => (filter = "all")}>All</Button>
@@ -569,14 +761,21 @@
 								<div class="min-w-0">
 									<p class="mb-2 text-[10px] font-semibold tracking-wide text-muted-foreground uppercase xl:text-right">Update Controls</p>
 									<div class="flex flex-wrap gap-2 xl:justify-end">
-										<Button size="xs" variant="outline" onclick={() => checkResourceUpdate(resource)} disabled={!resource.repository || resource.updateStatus === "checking"} title="Check this resource against GitHub">
-											<GitBranchIcon class={resource.updateStatus === "checking" ? "animate-spin" : undefined} />Check
+										<Button size="xs" variant="outline" onclick={() => checkResourceUpdate(resource)} disabled={!canCheckResourceUpdates(resource) || isCheckingResource(resource)} title="Check this resource against GitHub">
+											{#if isCheckingResource(resource)}
+												<LoaderCircleIcon class="animate-spin" />
+											{:else}
+												<GitBranchIcon />
+											{/if}
+											Check
 										</Button>
-										<Button size="xs" variant="outline" onclick={() => updateResource(resource)} disabled={!resource.repository || resource.updating || resource.updateStatus !== "update-available"} title="Update this resource from GitHub">
-											<DownloadIcon class={resource.updating ? "animate-spin" : undefined} />Update
-										</Button>
-										<Button size="xs" variant="outline" onclick={() => updateResource(resource, true)} disabled={!resource.repository || resource.updating} title="Force reinstall this resource from GitHub">
-											<DownloadIcon class={resource.updating ? "animate-spin" : undefined} />Reinstall
+										<Button size="xs" variant="outline" onclick={() => runGithubAction(resource)} disabled={!canRunGithubAction(resource)} title={githubActionTitle(resource)}>
+											{#if isUpdatingResource(resource)}
+												<LoaderCircleIcon class="animate-spin" />
+											{:else}
+												<DownloadIcon />
+											{/if}
+											{githubActionLabel(resource)}
 										</Button>
 									</div>
 								</div>
@@ -628,15 +827,22 @@
 				</div>
 				<div>
 					<p class="mb-2 text-[10px] font-semibold tracking-wide text-muted-foreground uppercase">Update Controls</p>
-					<div class="grid grid-cols-3 gap-2">
-						<Button size="lg" variant="outline" onclick={() => runContextCheck(contextMenuResource!)} disabled={!contextMenuResource.repository || contextMenuResource.updateStatus === "checking"} title="Check this resource against GitHub">
-							<GitBranchIcon />Check
+					<div class="grid grid-cols-2 gap-2">
+						<Button size="lg" variant="outline" onclick={() => runContextCheck(contextMenuResource!)} disabled={!canCheckResourceUpdates(contextMenuResource) || isCheckingResource(contextMenuResource)} title="Check this resource against GitHub">
+							{#if isCheckingResource(contextMenuResource)}
+								<LoaderCircleIcon class="animate-spin" />
+							{:else}
+								<GitBranchIcon />
+							{/if}
+							Check
 						</Button>
-						<Button size="lg" variant="outline" onclick={() => runContextUpdate(contextMenuResource!)} disabled={!contextMenuResource.repository || contextMenuResource.updating || contextMenuResource.updateStatus !== "update-available"} title="Update this resource from GitHub">
-							<DownloadIcon />Update
-						</Button>
-						<Button size="lg" variant="outline" onclick={() => runContextUpdate(contextMenuResource!, true)} disabled={!contextMenuResource.repository || contextMenuResource.updating} title="Force reinstall this resource from GitHub">
-							<DownloadIcon />Reinstall
+						<Button size="lg" variant="outline" onclick={() => runContextGithubAction(contextMenuResource!)} disabled={!canRunGithubAction(contextMenuResource)} title={githubActionTitle(contextMenuResource)}>
+							{#if isUpdatingResource(contextMenuResource)}
+								<LoaderCircleIcon class="animate-spin" />
+							{:else}
+								<DownloadIcon />
+							{/if}
+							{githubActionLabel(contextMenuResource)}
 						</Button>
 					</div>
 				</div>

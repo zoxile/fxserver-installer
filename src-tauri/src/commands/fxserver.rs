@@ -713,10 +713,22 @@ fn update_github_resource_blocking(
         return Err("The selected folder does not look like a FiveM resource.".to_string());
     }
 
+    if is_cfx_default_resource_path(&resource_path) {
+        return Err("CFX default resources are updated with FXServer artifacts.".to_string());
+    }
+
     let (owner, repo) = github_owner_repo(&request.repository)
         .ok_or_else(|| "Only GitHub repository URLs can be updated automatically.".to_string())?;
+    if owner.eq_ignore_ascii_case("citizenfx") {
+        return Err("CitizenFX resources are updated with FXServer artifacts.".to_string());
+    }
+
     let branch = validate_github_branch(&request.branch)?;
-    let zip_url = format!("https://github.com/{owner}/{repo}/archive/refs/heads/{branch}.zip");
+    let zip_url = if branch.eq_ignore_ascii_case("HEAD") {
+        format!("https://github.com/{owner}/{repo}/archive/HEAD.zip")
+    } else {
+        format!("https://github.com/{owner}/{repo}/archive/refs/heads/{branch}.zip")
+    };
 
     run_resource_update_script(&zip_url, &resource_path)?;
 
@@ -725,6 +737,15 @@ fn update_github_resource_blocking(
         repository: format!("https://github.com/{owner}/{repo}"),
         branch,
         updated_at: system_time_to_label(SystemTime::now()),
+    })
+}
+
+fn is_cfx_default_resource_path(path: &Path) -> bool {
+    path.components().any(|component| {
+        component
+            .as_os_str()
+            .to_string_lossy()
+            .eq_ignore_ascii_case("[cfx-default]")
     })
 }
 
