@@ -144,15 +144,15 @@
 
 	<Card.Root class="rounded-md border-border bg-card shadow-sm">
 		<Card.Header class="border-b border-border pb-4">
-			<div class="flex items-center gap-3">
+			<div class="flex flex-wrap items-center gap-3">
 				<div class="flex size-9 items-center justify-center rounded-sm bg-muted text-muted-foreground ring-1 ring-border">
 					<RocketIcon class="size-4" />
 				</div>
-				<div>
+				<div class="min-w-0 flex-1">
 					<Card.Title>Setup Flow</Card.Title>
 					<Card.Description>Detected steps are checked automatically. You can still mark the rest complete as you go.</Card.Description>
 				</div>
-				<Button variant="outline" size="sm" onclick={refreshAutoCompletion} disabled={checking} title="Refresh setup detection">
+				<Button class="ml-auto" variant="outline" size="sm" onclick={refreshAutoCompletion} disabled={checking} title="Refresh setup detection">
 					<RefreshCwIcon class={checking ? "animate-spin" : undefined} />
 					Refresh
 				</Button>

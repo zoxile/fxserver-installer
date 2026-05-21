@@ -719,18 +719,18 @@
 			class="pointer-events-none absolute inset-x-4 top-0 h-px bg-linear-to-r from-transparent via-primary/70 to-transparent opacity-0 transition-opacity duration-300 group-hover:opacity-100"
 		></div>
 		<Card.Header class="border-b border-border pb-4">
-			<div class="flex flex-col justify-between gap-3 xl:flex-row xl:items-start">
-				<div class="flex items-start gap-3">
+			<div class="flex items-start justify-between gap-3">
+				<div class="flex min-w-0 items-start gap-3">
 					<div class="flex size-9 shrink-0 items-center justify-center rounded-sm border border-violet-400/30 bg-violet-400/10 text-violet-200">
 						<BarChart3Icon class="size-4" />
 					</div>
-					<div>
+					<div class="min-w-0">
 						<Card.Title>Performance</Card.Title>
 						<Card.Description>{status.running ? `Running as PID ${status.pid}` : "FXServer is not running from this app."}</Card.Description>
 					</div>
 				</div>
 				<div
-					class={`inline-flex w-fit items-center gap-2 rounded-sm border px-2 py-1 text-xs font-semibold ${status.running ? "border-emerald-400/30 bg-emerald-400/10 text-emerald-200" : "border-red-400/30 bg-red-400/10 text-red-200"}`}
+					class={`inline-flex w-fit shrink-0 items-center gap-2 rounded-sm border px-2 py-1 text-xs font-semibold ${status.running ? "border-emerald-400/30 bg-emerald-400/10 text-emerald-200" : "border-red-400/30 bg-red-400/10 text-red-200"}`}
 				>
 					<span class={`size-2 rounded-full ${status.running ? "animate-pulse bg-emerald-400 shadow-[0_0_10px_rgba(52,211,153,0.7)]" : "bg-red-400"}`}></span>
 					{status.running ? "RUNNING" : "STOPPED"}

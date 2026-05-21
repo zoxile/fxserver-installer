@@ -42,12 +42,12 @@
 			<p class="mt-3 max-w-2xl text-sm leading-6 text-muted-foreground">Move through database setup, artifact preparation, server configuration, and utility tools without losing the thread.</p>
 		</div>
 
-		<Card.Root class="rounded-md border-border bg-card shadow-sm">
+		<Card.Root class="flex flex-col rounded-md border-border bg-card shadow-sm">
 			<Card.Header class="border-b border-border pb-4">
 				<Card.Title>Project</Card.Title>
 				<Card.Description>Workspace details and repository context.</Card.Description>
 			</Card.Header>
-			<Card.Content class="space-y-3">
+			<Card.Content class="flex flex-1 flex-col gap-3">
 				<div class="grid gap-2">
 					{#each projectDetails as detail}
 						{@const Icon = detail.icon}
@@ -72,7 +72,7 @@
 				<Button
 					variant="outline"
 					size="sm"
-					class="w-fit rounded-sm"
+					class="mt-auto w-fit rounded-sm"
 					onclick={() => openExternalUrl("https://github.com/zoxile/fxserver-installer")}
 					title="Open GitHub repository"
 				>
