@@ -145,3 +145,70 @@ pub struct SaveServerConfigRequest {
     pub path: String,
     pub content: String,
 }
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResourceScanRequest {
+    pub tx_data_path: String,
+    pub profile: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResourceScanResult {
+    pub tx_data_path: String,
+    pub profile: String,
+    pub data_path: String,
+    pub resource_root: String,
+    pub resources: Vec<FxserverResourceInfo>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct FxserverResourceInfo {
+    pub name: String,
+    pub path: String,
+    pub manifest_path: String,
+    pub manifest_name: String,
+    pub version: Option<String>,
+    pub repository: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResourceUpdateRequest {
+    pub resource_path: String,
+    pub repository: String,
+    pub branch: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResourceUpdateResult {
+    pub resource_path: String,
+    pub repository: String,
+    pub branch: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResourceStatesRequest {
+    pub rcon: FxserverRconConfig,
+    #[serde(default)]
+    pub resource_names: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResourceStatesResult {
+    pub raw_output: String,
+    pub states: Vec<ResourceRuntimeState>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResourceRuntimeState {
+    pub name: String,
+    pub state: String,
+}

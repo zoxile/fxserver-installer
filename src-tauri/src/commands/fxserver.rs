@@ -11,8 +11,10 @@ use std::{
 
 use crate::models::fxserver::{
     FxserverCommandRequest, FxserverEnvironmentVariable, FxserverLaunchRequest,
-    FxserverLaunchResult, FxserverRconConfig, FxserverResources, FxserverStatus,
-    FxserverTerminalEntry, FxserverTerminalResult, SaveServerConfigRequest, ServerConfigFile,
+    FxserverLaunchResult, FxserverRconConfig, FxserverResourceInfo, FxserverResources,
+    FxserverStatus, FxserverTerminalEntry, FxserverTerminalResult, ResourceRuntimeState,
+    ResourceScanRequest, ResourceScanResult, ResourceStatesRequest, ResourceStatesResult,
+    ResourceUpdateRequest, ResourceUpdateResult, SaveServerConfigRequest, ServerConfigFile,
     ServerConfigRequest, ServerConfigResult, TxDataLogRequest, TxDataLogResult,
     TxDataProfilesResult,
 };
@@ -405,17 +407,115 @@ pub fn list_txdata_profiles(data_path: String) -> Result<TxDataProfilesResult, S
 
 #[tauri::command]
 pub fn read_server_config(request: ServerConfigRequest) -> Result<ServerConfigResult, String> {
-    let tx_data_path = PathBuf::from(request.tx_data_path.trim());
+    let (tx_data_path, profile, profile_config_path, data_path) =
+        resolve_profile_data_path(request.tx_data_path, request.profile)?;
+
+    let files = read_cfg_files(&data_path)?;
+    let rcon = find_rcon_password(&files);
+    let rconlog = find_rconlog(&files);
+
+    Ok(ServerConfigResult {
+        tx_data_path: tx_data_path.to_string_lossy().to_string(),
+        profile: profile.to_string(),
+        profile_config_path: profile_config_path.to_string_lossy().to_string(),
+        data_path: data_path.to_string_lossy().to_string(),
+        files,
+        rcon_password_found: rcon.is_some(),
+        rcon_password_file: rcon.as_ref().map(|(file, _)| file.clone()),
+        rcon_password_line: rcon.map(|(_, line)| line),
+        rconlog_found: rconlog.is_some(),
+        rconlog_line: rconlog.map(|(_, line)| line),
+    })
+}
+
+#[tauri::command]
+pub fn save_server_config(request: SaveServerConfigRequest) -> Result<ServerConfigFile, String> {
+    let path = PathBuf::from(request.path.trim());
+    if path.as_os_str().is_empty() {
+        return Err("Choose a config file before saving.".to_string());
+    }
+
+    if !path.is_file() || !is_cfg_file(&path) {
+        return Err("Only existing .cfg files can be saved from this editor.".to_string());
+    }
+
+    fs::write(&path, request.content)
+        .map_err(|error| format!("Failed to save {}: {error}", path.to_string_lossy()))?;
+    read_cfg_file(&path)
+}
+
+#[tauri::command]
+pub fn scan_fxserver_resources(request: ResourceScanRequest) -> Result<ResourceScanResult, String> {
+    let (tx_data_path, profile, _, data_path) =
+        resolve_profile_data_path(request.tx_data_path, request.profile)?;
+    let resource_root = data_path.join("resources");
+
+    if !resource_root.is_dir() {
+        return Err(format!(
+            "Resource folder was not found: {}",
+            resource_root.to_string_lossy()
+        ));
+    }
+
+    let resources = scan_resource_directory(&resource_root, 8)?;
+
+    Ok(ResourceScanResult {
+        tx_data_path: tx_data_path.to_string_lossy().to_string(),
+        profile,
+        data_path: data_path.to_string_lossy().to_string(),
+        resource_root: resource_root.to_string_lossy().to_string(),
+        resources,
+    })
+}
+
+#[tauri::command]
+pub fn send_fxserver_rcon_command(request: FxserverCommandRequest) -> Result<String, String> {
+    send_rcon_command(&request.rcon, &request.command)
+}
+
+#[tauri::command]
+pub fn query_fxserver_resource_states(
+    request: ResourceStatesRequest,
+) -> Result<ResourceStatesResult, String> {
+    let raw_output = send_rcon_command(&request.rcon, "resources")
+        .or_else(|_| send_rcon_command(&request.rcon, "status"))?;
+    let states = infer_resource_states(&request.resource_names, &raw_output);
+
+    Ok(ResourceStatesResult { raw_output, states })
+}
+
+#[tauri::command]
+pub async fn update_github_resource(
+    request: ResourceUpdateRequest,
+) -> Result<ResourceUpdateResult, String> {
+    tokio::task::spawn_blocking(move || update_github_resource_blocking(request))
+        .await
+        .map_err(|error| format!("Resource update task failed: {error}"))?
+}
+
+fn process_is_running(process: &mut ManagedFxserverProcess) -> Result<bool, String> {
+    Ok(process
+        .child
+        .try_wait()
+        .map_err(|error| format!("Failed to inspect FXServer: {error}"))?
+        .is_none())
+}
+
+fn resolve_profile_data_path(
+    tx_data_path: String,
+    profile: String,
+) -> Result<(PathBuf, String, PathBuf, PathBuf), String> {
+    let tx_data_path = PathBuf::from(tx_data_path.trim());
     if tx_data_path.as_os_str().is_empty() {
-        return Err("Set TXHOST_DATA_PATH before configuring server files.".to_string());
+        return Err("Set TXHOST_DATA_PATH before reading txData profile data.".to_string());
     }
 
-    let profile = request.profile.trim();
+    let profile = profile.trim().to_string();
     if profile.is_empty() {
-        return Err("Choose a txData profile before configuring server files.".to_string());
+        return Err("Choose a txData profile first.".to_string());
     }
 
-    let profile_config_path = tx_data_path.join(profile).join("config.json");
+    let profile_config_path = tx_data_path.join(&profile).join("config.json");
     let profile_config = fs::read_to_string(&profile_config_path).map_err(|error| {
         format!(
             "Failed to read txData profile config {}: {error}",
@@ -454,46 +554,336 @@ pub fn read_server_config(request: ServerConfigRequest) -> Result<ServerConfigRe
         ));
     }
 
-    let files = read_cfg_files(&data_path)?;
-    let rcon = find_rcon_password(&files);
-    let rconlog = find_rconlog(&files);
+    Ok((tx_data_path, profile, profile_config_path, data_path))
+}
 
-    Ok(ServerConfigResult {
-        tx_data_path: tx_data_path.to_string_lossy().to_string(),
-        profile: profile.to_string(),
-        profile_config_path: profile_config_path.to_string_lossy().to_string(),
-        data_path: data_path.to_string_lossy().to_string(),
-        files,
-        rcon_password_found: rcon.is_some(),
-        rcon_password_file: rcon.as_ref().map(|(file, _)| file.clone()),
-        rcon_password_line: rcon.map(|(_, line)| line),
-        rconlog_found: rconlog.is_some(),
-        rconlog_line: rconlog.map(|(_, line)| line),
+fn scan_resource_directory(
+    resource_root: &Path,
+    max_depth: usize,
+) -> Result<Vec<FxserverResourceInfo>, String> {
+    let mut resources = Vec::new();
+    scan_resource_directory_inner(resource_root, max_depth, &mut resources)?;
+    resources.sort_by_key(|resource| resource.name.to_ascii_lowercase());
+    Ok(resources)
+}
+
+fn scan_resource_directory_inner(
+    directory: &Path,
+    depth: usize,
+    resources: &mut Vec<FxserverResourceInfo>,
+) -> Result<(), String> {
+    if depth == 0 || !directory.is_dir() {
+        return Ok(());
+    }
+
+    if let Some(resource) = read_resource_manifest(directory)? {
+        resources.push(resource);
+        return Ok(());
+    }
+
+    let entries = fs::read_dir(directory).map_err(|error| {
+        format!(
+            "Failed to inspect resource folder {}: {error}",
+            directory.to_string_lossy()
+        )
+    })?;
+
+    for entry in entries {
+        let entry = entry.map_err(|error| format!("Failed to inspect resource entry: {error}"))?;
+        let path = entry.path();
+        if !path.is_dir() || should_skip_resource_scan_dir(&path) {
+            continue;
+        }
+
+        scan_resource_directory_inner(&path, depth - 1, resources)?;
+    }
+
+    Ok(())
+}
+
+fn should_skip_resource_scan_dir(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| {
+            matches!(
+                name.to_ascii_lowercase().as_str(),
+                ".git" | "node_modules" | ".vscode" | ".idea" | "cache" | "tmp" | "temp"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn read_resource_manifest(directory: &Path) -> Result<Option<FxserverResourceInfo>, String> {
+    let manifest_path = ["fxmanifest.lua", "__resource.lua"]
+        .into_iter()
+        .map(|name| directory.join(name))
+        .find(|path| path.is_file());
+
+    let Some(manifest_path) = manifest_path else {
+        return Ok(None);
+    };
+
+    let content = fs::read_to_string(&manifest_path).map_err(|error| {
+        format!(
+            "Failed to read resource manifest {}: {error}",
+            manifest_path.to_string_lossy()
+        )
+    })?;
+    let manifest_name = manifest_path
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| "fxmanifest.lua".to_string());
+    let name = directory
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| directory.to_string_lossy().to_string());
+
+    Ok(Some(FxserverResourceInfo {
+        name,
+        path: directory.to_string_lossy().to_string(),
+        manifest_path: manifest_path.to_string_lossy().to_string(),
+        manifest_name,
+        version: parse_manifest_value(&content, "version"),
+        repository: parse_manifest_value(&content, "repository"),
+    }))
+}
+
+fn parse_manifest_value(content: &str, key: &str) -> Option<String> {
+    for raw_line in content.lines() {
+        let line = raw_line.trim_start();
+        if line.starts_with("--") || line.starts_with('#') || !line.starts_with(key) {
+            continue;
+        }
+
+        let remainder = &line[key.len()..];
+        if remainder
+            .chars()
+            .next()
+            .is_some_and(|character| character.is_ascii_alphanumeric() || character == '_')
+        {
+            continue;
+        }
+
+        if let Some(value) = first_quoted_value(remainder) {
+            return Some(value);
+        }
+    }
+
+    None
+}
+
+fn first_quoted_value(value: &str) -> Option<String> {
+    let mut quote = None;
+    let mut start = 0;
+
+    for (index, character) in value.char_indices() {
+        if character == '\'' || character == '"' {
+            quote = Some(character);
+            start = index + character.len_utf8();
+            break;
+        }
+    }
+
+    let quote = quote?;
+    let mut escaped = false;
+    let mut output = String::new();
+
+    for character in value[start..].chars() {
+        if escaped {
+            output.push(character);
+            escaped = false;
+            continue;
+        }
+
+        if character == '\\' {
+            escaped = true;
+            continue;
+        }
+
+        if character == quote {
+            let output = output.trim().to_string();
+            return (!output.is_empty()).then_some(output);
+        }
+
+        output.push(character);
+    }
+
+    None
+}
+
+fn infer_resource_states(names: &[String], output: &str) -> Vec<ResourceRuntimeState> {
+    let lines: Vec<String> = output
+        .lines()
+        .map(|line| line.to_ascii_lowercase())
+        .collect();
+
+    names
+        .iter()
+        .map(|name| {
+            let needle = name.to_ascii_lowercase();
+            let state = lines
+                .iter()
+                .filter(|line| line.contains(&needle))
+                .find_map(|line| {
+                    if line.contains("started")
+                        || line.contains("running")
+                        || line.contains("start pending")
+                    {
+                        Some("running")
+                    } else if line.contains("stopped") || line.contains("stopping") {
+                        Some("stopped")
+                    } else if line.contains("missing") || line.contains("not found") {
+                        Some("missing")
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or("unknown");
+
+            ResourceRuntimeState {
+                name: name.clone(),
+                state: state.to_string(),
+            }
+        })
+        .collect()
+}
+
+fn update_github_resource_blocking(
+    request: ResourceUpdateRequest,
+) -> Result<ResourceUpdateResult, String> {
+    let resource_path = PathBuf::from(request.resource_path.trim());
+    if resource_path.as_os_str().is_empty() || !resource_path.is_dir() {
+        return Err("Resource folder was not found.".to_string());
+    }
+
+    if !resource_path.join("fxmanifest.lua").is_file()
+        && !resource_path.join("__resource.lua").is_file()
+    {
+        return Err("The selected folder does not look like a FiveM resource.".to_string());
+    }
+
+    let (owner, repo) = github_owner_repo(&request.repository)
+        .ok_or_else(|| "Only GitHub repository URLs can be updated automatically.".to_string())?;
+    let branch = validate_github_branch(&request.branch)?;
+    let zip_url = format!("https://github.com/{owner}/{repo}/archive/refs/heads/{branch}.zip");
+
+    run_resource_update_script(&zip_url, &resource_path)?;
+
+    Ok(ResourceUpdateResult {
+        resource_path: resource_path.to_string_lossy().to_string(),
+        repository: format!("https://github.com/{owner}/{repo}"),
+        branch,
+        updated_at: system_time_to_label(SystemTime::now()),
     })
 }
 
-#[tauri::command]
-pub fn save_server_config(request: SaveServerConfigRequest) -> Result<ServerConfigFile, String> {
-    let path = PathBuf::from(request.path.trim());
-    if path.as_os_str().is_empty() {
-        return Err("Choose a config file before saving.".to_string());
+fn github_owner_repo(repository: &str) -> Option<(String, String)> {
+    let mut value = repository.trim().trim_end_matches('/').to_string();
+    if value.ends_with(".git") {
+        value.truncate(value.len() - 4);
     }
 
-    if !path.is_file() || !is_cfg_file(&path) {
-        return Err("Only existing .cfg files can be saved from this editor.".to_string());
-    }
+    let path = if let Some(rest) = value.strip_prefix("git@github.com:") {
+        rest
+    } else if let Some(index) = value.find("github.com/") {
+        &value[index + "github.com/".len()..]
+    } else {
+        return None;
+    };
 
-    fs::write(&path, request.content)
-        .map_err(|error| format!("Failed to save {}: {error}", path.to_string_lossy()))?;
-    read_cfg_file(&path)
+    let mut parts = path.split('/').filter(|part| !part.trim().is_empty());
+    let owner = clean_github_path_part(parts.next()?)?;
+    let repo = clean_github_path_part(parts.next()?)?;
+    Some((owner, repo))
 }
 
-fn process_is_running(process: &mut ManagedFxserverProcess) -> Result<bool, String> {
-    Ok(process
-        .child
-        .try_wait()
-        .map_err(|error| format!("Failed to inspect FXServer: {error}"))?
-        .is_none())
+fn clean_github_path_part(value: &str) -> Option<String> {
+    let value = value.trim().trim_end_matches(".git");
+    (!value.is_empty()
+        && value.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.')
+        }))
+    .then(|| value.to_string())
+}
+
+fn validate_github_branch(branch: &str) -> Result<String, String> {
+    let branch = branch.trim();
+    if branch.is_empty() {
+        return Err("GitHub branch is required before updating a resource.".to_string());
+    }
+
+    if branch.starts_with('/')
+        || branch.ends_with('/')
+        || branch.contains("..")
+        || branch.contains('\\')
+        || branch.chars().any(char::is_whitespace)
+    {
+        return Err("GitHub branch name is not safe to use for updates.".to_string());
+    }
+
+    Ok(branch.to_string())
+}
+
+fn run_resource_update_script(zip_url: &str, resource_path: &Path) -> Result<(), String> {
+    let zip_url_literal = powershell_string_literal(zip_url);
+    let resource_path_literal = powershell_string_literal(&resource_path.to_string_lossy());
+    let script = format!(
+        r#"
+$ErrorActionPreference = "Stop"
+$ProgressPreference = "SilentlyContinue"
+
+$ZipUrl = {zip_url_literal}
+$ResourcePath = {resource_path_literal}
+$TempRoot = Join-Path $env:TEMP ("fxi-resource-update-" + [guid]::NewGuid().ToString("N"))
+$ZipPath = Join-Path $TempRoot "resource.zip"
+$ExtractPath = Join-Path $TempRoot "extract"
+
+New-Item -ItemType Directory -Path $TempRoot, $ExtractPath -Force | Out-Null
+try {{
+    Invoke-WebRequest -Uri ([uri] $ZipUrl) -OutFile $ZipPath -UseBasicParsing
+    Expand-Archive -LiteralPath $ZipPath -DestinationPath $ExtractPath -Force
+    $Source = Get-ChildItem -LiteralPath $ExtractPath -Directory | Select-Object -First 1
+    if ($null -eq $Source) {{
+        throw "GitHub archive did not contain a resource folder."
+    }}
+
+    Get-ChildItem -LiteralPath $Source.FullName -Force | ForEach-Object {{
+        Copy-Item -LiteralPath $_.FullName -Destination $ResourcePath -Recurse -Force
+    }}
+}} finally {{
+    if (Test-Path -LiteralPath $TempRoot) {{
+        Remove-Item -LiteralPath $TempRoot -Recurse -Force
+    }}
+}}
+"#
+    );
+
+    let output = Command::new("powershell")
+        .arg("-NoProfile")
+        .arg("-ExecutionPolicy")
+        .arg("Bypass")
+        .arg("-Command")
+        .arg(script)
+        .output()
+        .map_err(|error| format!("Failed to start resource updater: {error}"))?;
+
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let detail = if stderr.is_empty() { stdout } else { stderr };
+
+    Err(if detail.is_empty() {
+        "Resource updater failed without output.".to_string()
+    } else {
+        detail
+    })
+}
+
+fn powershell_string_literal(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
 }
 
 fn clear_terminal(terminal: &Arc<Mutex<TerminalState>>) -> Result<(), String> {

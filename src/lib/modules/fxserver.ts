@@ -101,6 +101,51 @@ export interface ServerConfigResult {
 	rconlogLine?: number | null;
 }
 
+export interface ResourceScanRequest {
+	txDataPath: string;
+	profile: string;
+}
+
+export interface FxserverResourceInfo {
+	name: string;
+	path: string;
+	manifestPath: string;
+	manifestName: string;
+	version?: string | null;
+	repository?: string | null;
+}
+
+export interface ResourceScanResult {
+	txDataPath: string;
+	profile: string;
+	dataPath: string;
+	resourceRoot: string;
+	resources: FxserverResourceInfo[];
+}
+
+export interface ResourceRuntimeState {
+	name: string;
+	state: "running" | "stopped" | "missing" | "unknown" | string;
+}
+
+export interface ResourceStatesResult {
+	rawOutput: string;
+	states: ResourceRuntimeState[];
+}
+
+export interface ResourceUpdateRequest {
+	resourcePath: string;
+	repository: string;
+	branch: string;
+}
+
+export interface ResourceUpdateResult {
+	resourcePath: string;
+	repository: string;
+	branch: string;
+	updatedAt: string;
+}
+
 function hasTauriRuntime() {
 	return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 }
@@ -222,6 +267,103 @@ export async function sendFxserverCommand(command: string, rcon: FxserverRconCon
 		log("FXServer command failed.", {
 			level: "error",
 			scope: "fxserver.terminal",
+			detail: errorMessage(error),
+		});
+		throw error;
+	}
+}
+
+export async function sendFxserverRconCommand(command: string, rcon: FxserverRconConfig) {
+	if (!hasTauriRuntime()) return unavailableOutsideTauri<string>();
+
+	try {
+		const output = await invoke<string>("send_fxserver_rcon_command", { request: { command, rcon } });
+		log("FXServer RCON command sent.", {
+			level: "debug",
+			scope: "fxserver.resources",
+			detail: `${rcon.host}:${rcon.port} ${command}`,
+		});
+		return output;
+	} catch (error) {
+		log("FXServer RCON command failed.", {
+			level: "error",
+			scope: "fxserver.resources",
+			detail: errorMessage(error),
+		});
+		throw error;
+	}
+}
+
+export async function scanFxserverResources(request: ResourceScanRequest) {
+	if (!hasTauriRuntime()) {
+		return {
+			txDataPath: request.txDataPath,
+			profile: request.profile,
+			dataPath: "",
+			resourceRoot: "",
+			resources: [],
+		} satisfies ResourceScanResult;
+	}
+
+	try {
+		const result = await invoke<ResourceScanResult>("scan_fxserver_resources", { request });
+		log(`Scanned ${result.resources.length} FXServer resources.`, {
+			level: "success",
+			scope: "fxserver.resources",
+			detail: result.resourceRoot,
+		});
+		return result;
+	} catch (error) {
+		log("FXServer resource scan failed.", {
+			level: "error",
+			scope: "fxserver.resources",
+			detail: errorMessage(error),
+		});
+		throw error;
+	}
+}
+
+export async function queryFxserverResourceStates(rcon: FxserverRconConfig, resourceNames: string[]) {
+	if (!hasTauriRuntime()) return unavailableOutsideTauri<ResourceStatesResult>();
+
+	try {
+		const result = await invoke<ResourceStatesResult>("query_fxserver_resource_states", {
+			request: {
+				rcon,
+				resourceNames,
+			},
+		});
+		log("FXServer resource states refreshed.", {
+			level: "debug",
+			scope: "fxserver.resources",
+			detail: `${result.states.length} resources parsed.`,
+		});
+		return result;
+	} catch (error) {
+		log("FXServer resource state refresh failed.", {
+			level: "error",
+			scope: "fxserver.resources",
+			detail: errorMessage(error),
+		});
+		throw error;
+	}
+}
+
+export async function updateGithubResource(request: ResourceUpdateRequest) {
+	if (!hasTauriRuntime()) return unavailableOutsideTauri<ResourceUpdateResult>();
+
+	try {
+		const result = await invoke<ResourceUpdateResult>("update_github_resource", { request });
+		log(`Updated resource from ${result.repository}.`, {
+			level: "success",
+			scope: "fxserver.resources",
+			detail: result.resourcePath,
+		});
+		return result;
+	} catch (error) {
+		log("FXServer resource update failed.", {
+			level: "error",
+			scope: "fxserver.resources",
 			detail: errorMessage(error),
 		});
 		throw error;
