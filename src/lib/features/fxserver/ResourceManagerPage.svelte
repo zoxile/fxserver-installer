@@ -370,6 +370,20 @@
 		return busyCommand === `${action}:${resource.path}`;
 	}
 
+	function displayResourcePath(path: string) {
+		const normalizedPath = path.replace(/\\/g, "/");
+		const normalizedDataPath = (scanResult?.dataPath ?? "").replace(/\\/g, "/").replace(/\/+$/, "");
+		const dataPathName = normalizedDataPath.split("/").filter(Boolean).at(-1);
+		if (!normalizedDataPath || !dataPathName) return normalizedPath;
+
+		const dataPathWithSlash = `${normalizedDataPath}/`;
+		if (normalizedPath.toLowerCase().startsWith(dataPathWithSlash.toLowerCase())) {
+			return `${dataPathName}/${normalizedPath.slice(dataPathWithSlash.length)}`;
+		}
+
+		return normalizedPath.toLowerCase() === normalizedDataPath.toLowerCase() ? dataPathName : normalizedPath;
+	}
+
 	async function runLimited<T>(items: T[], limit: number, task: (item: T) => Promise<void>) {
 		let nextIndex = 0;
 		const workerCount = Math.min(limit, items.length);
@@ -501,65 +515,91 @@
 			</div>
 
 			{#if filteredResources.length}
-				<div class="overflow-hidden rounded-sm border border-border bg-background/50">
+				<div class="grid gap-3">
 					{#each filteredResources as resource (resource.path)}
-						<div class="grid gap-3 border-b border-border p-3 last:border-b-0 xl:grid-cols-[minmax(12rem,1fr)_minmax(12rem,0.9fr)_minmax(10rem,0.7fr)_auto] xl:items-center">
-							<div class="min-w-0">
-								<div class="flex flex-wrap items-center gap-2">
-									<p class="truncate text-sm font-semibold text-foreground">{resource.name}</p>
-									<span class={`rounded-sm border px-2 py-0.5 text-[10px] font-semibold uppercase ${runtimeBadgeClass(resource.runtimeState)}`}>{resource.runtimeState}</span>
-									<span class={`rounded-sm border px-2 py-0.5 text-[10px] font-semibold uppercase ${updateBadgeClass(resource.updateStatus)}`}>{updateLabel(resource)}</span>
+						<article class="rounded-md border border-border bg-background/60 p-4 shadow-xs transition-colors hover:bg-background/80">
+							<div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+								<div class="min-w-0">
+									<div class="flex flex-wrap items-center gap-2">
+										<p class="text-base font-semibold text-foreground">{resource.name}</p>
+										<span class={`rounded-sm border px-2 py-0.5 text-[10px] font-semibold uppercase ${runtimeBadgeClass(resource.runtimeState)}`}>{resource.runtimeState}</span>
+										<span class={`rounded-sm border px-2 py-0.5 text-[10px] font-semibold uppercase ${updateBadgeClass(resource.updateStatus)}`}>{updateLabel(resource)}</span>
+									</div>
 								</div>
-								<p class="mt-1 truncate font-mono text-xs text-muted-foreground">{resource.path}</p>
-								{#if resource.updateError}
-									<p class="mt-1 text-xs text-red-200">{resource.updateError}</p>
+								<div class="grid grid-cols-2 gap-2 text-xs sm:w-80 sm:max-w-full">
+									<div class="rounded-sm border border-border bg-card/45 px-3 py-2">
+										<p class="text-[10px] font-semibold tracking-wide text-muted-foreground uppercase">Local</p>
+										<p class="mt-1 truncate font-mono text-sm text-foreground">{resource.version || "Unknown"}</p>
+									</div>
+									<div class="rounded-sm border border-border bg-card/45 px-3 py-2">
+										<p class="text-[10px] font-semibold tracking-wide text-muted-foreground uppercase">Latest</p>
+										<p class="mt-1 truncate font-mono text-sm text-foreground">{resource.latestVersion || "Not checked"}</p>
+									</div>
+								</div>
+							</div>
+
+							{#if resource.updateError}
+								<p class="mt-3 rounded-sm border border-red-400/20 bg-red-400/10 px-3 py-2 text-xs text-red-100">{resource.updateError}</p>
+							{/if}
+
+							<div class="mt-4 rounded-sm border border-border bg-card/45 p-3">
+								<div class="grid gap-3 lg:grid-cols-2">
+									<div class="min-w-0">
+										<p class="text-[10px] font-semibold tracking-wide text-muted-foreground uppercase">Local File Path</p>
+										<p class="mt-2 break-all font-mono text-xs text-muted-foreground" title={resource.path}>{displayResourcePath(resource.path)}</p>
+									</div>
+									<div class="min-w-0">
+										<p class="text-[10px] font-semibold tracking-wide text-muted-foreground uppercase">Repository Source</p>
+										{#if resource.repository}
+											<button
+												class="mt-2 flex max-w-full min-w-0 items-start gap-2 rounded-sm text-left font-mono text-xs text-sky-200 transition-colors hover:text-sky-100"
+												onclick={() => openExternalUrl(resource.repositoryWebUrl || resource.repository || "")}
+												title="Open repository"
+											>
+												<span class="min-w-0 break-all">{resource.repositoryWebUrl || resource.repository}</span>
+												<ExternalLinkIcon class="mt-0.5 size-3 shrink-0" />
+											</button>
+										{:else}
+											<p class="mt-2 font-mono text-xs text-muted-foreground">Repository not found in fxmanifest.</p>
+										{/if}
+									</div>
+								</div>
+								{#if resource.latestManifestUrl}
+									<p class="mt-3 break-all border-t border-border pt-3 font-mono text-[11px] text-muted-foreground" title={resource.latestManifestUrl}>{resource.latestManifestUrl}</p>
 								{/if}
 							</div>
 
-							<div class="min-w-0 space-y-1">
-								<p class="text-xs text-muted-foreground">Repository</p>
-								{#if resource.repository}
-									<button class="flex max-w-full items-center gap-1 truncate rounded-sm text-left font-mono text-xs text-sky-200 hover:text-sky-100" onclick={() => openExternalUrl(resource.repositoryWebUrl || resource.repository || "")} title="Open repository">
-										<span class="truncate">{resource.repositoryWebUrl || resource.repository}</span>
-										<ExternalLinkIcon class="size-3 shrink-0" />
-									</button>
-								{:else}
-									<p class="font-mono text-xs text-muted-foreground">Repository not found</p>
-								{/if}
-							</div>
-
-							<div class="grid grid-cols-2 gap-2 text-xs">
-								<div class="rounded-sm border border-border bg-card/60 p-2">
-									<p class="text-muted-foreground">Local</p>
-									<p class="mt-1 truncate font-mono text-foreground">{resource.version || "Unknown"}</p>
+							<div class="mt-4 flex flex-col gap-3 border-t border-border pt-4 xl:flex-row xl:items-center xl:justify-between">
+								<div class="min-w-0">
+									<p class="mb-2 text-[10px] font-semibold tracking-wide text-muted-foreground uppercase">Runtime Controls</p>
+									<div class="flex flex-wrap gap-2">
+										<Button size="xs" onclick={() => runResourceCommand("start", resource)} disabled={!rcon.password.trim() || Boolean(busyCommand)} title="Start resource">
+											<PlayIcon class={isCommandBusy("start", resource) ? "animate-spin" : undefined} />Start
+										</Button>
+										<Button size="xs" variant="destructive" onclick={() => runResourceCommand("stop", resource)} disabled={!rcon.password.trim() || Boolean(busyCommand)} title="Stop resource">
+											<SquareIcon class={isCommandBusy("stop", resource) ? "animate-spin" : undefined} />Stop
+										</Button>
+										<Button size="xs" variant="outline" onclick={() => runResourceCommand("restart", resource)} disabled={!rcon.password.trim() || Boolean(busyCommand)} title="Restart resource">
+											<RotateCcwIcon class={isCommandBusy("restart", resource) ? "animate-spin" : undefined} />Restart
+										</Button>
+										<Button size="xs" variant="outline" onclick={() => runResourceCommand("ensure", resource)} disabled={!rcon.password.trim() || Boolean(busyCommand)} title="Ensure resource">
+											<ShieldIcon class={isCommandBusy("ensure", resource) ? "animate-spin" : undefined} />Ensure
+										</Button>
+									</div>
 								</div>
-								<div class="rounded-sm border border-border bg-card/60 p-2">
-									<p class="text-muted-foreground">Latest</p>
-									<p class="mt-1 truncate font-mono text-foreground">{resource.latestVersion || "Not checked"}</p>
+								<div class="min-w-0">
+									<p class="mb-2 text-[10px] font-semibold tracking-wide text-muted-foreground uppercase xl:text-right">Update Controls</p>
+									<div class="flex flex-wrap gap-2 xl:justify-end">
+										<Button size="xs" variant="outline" onclick={() => checkResourceUpdate(resource)} disabled={!resource.repository || resource.updateStatus === "checking"} title="Check this resource against GitHub">
+											<GitBranchIcon class={resource.updateStatus === "checking" ? "animate-spin" : undefined} />Check
+										</Button>
+										<Button size="xs" variant="outline" onclick={() => updateResource(resource)} disabled={!resource.repository || resource.updating || resource.updateStatus !== "update-available"} title="Update this resource from GitHub">
+											<DownloadIcon class={resource.updating ? "animate-spin" : undefined} />Update
+										</Button>
+									</div>
 								</div>
 							</div>
-
-							<div class="flex flex-wrap justify-start gap-2 xl:justify-end">
-								<Button size="xs" onclick={() => runResourceCommand("start", resource)} disabled={!rcon.password.trim() || Boolean(busyCommand)} title="Start resource">
-									<PlayIcon class={isCommandBusy("start", resource) ? "animate-spin" : undefined} />Start
-								</Button>
-								<Button size="xs" variant="destructive" onclick={() => runResourceCommand("stop", resource)} disabled={!rcon.password.trim() || Boolean(busyCommand)} title="Stop resource">
-									<SquareIcon class={isCommandBusy("stop", resource) ? "animate-spin" : undefined} />Stop
-								</Button>
-								<Button size="xs" variant="outline" onclick={() => runResourceCommand("restart", resource)} disabled={!rcon.password.trim() || Boolean(busyCommand)} title="Restart resource">
-									<RotateCcwIcon class={isCommandBusy("restart", resource) ? "animate-spin" : undefined} />Restart
-								</Button>
-								<Button size="xs" variant="outline" onclick={() => runResourceCommand("ensure", resource)} disabled={!rcon.password.trim() || Boolean(busyCommand)} title="Ensure resource">
-									<ShieldIcon class={isCommandBusy("ensure", resource) ? "animate-spin" : undefined} />Ensure
-								</Button>
-								<Button size="xs" variant="outline" onclick={() => checkResourceUpdate(resource)} disabled={!resource.repository || resource.updateStatus === "checking"} title="Check this resource against GitHub">
-									<GitBranchIcon class={resource.updateStatus === "checking" ? "animate-spin" : undefined} />Check
-								</Button>
-								<Button size="xs" variant="outline" onclick={() => updateResource(resource)} disabled={!resource.repository || resource.updating || resource.updateStatus !== "update-available"} title="Update this resource from GitHub">
-									<DownloadIcon class={resource.updating ? "animate-spin" : undefined} />Update
-								</Button>
-							</div>
-						</div>
+						</article>
 					{/each}
 				</div>
 			{:else}
