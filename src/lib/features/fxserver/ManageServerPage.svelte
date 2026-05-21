@@ -737,7 +737,7 @@
 				</div>
 			</div>
 		</Card.Header>
-		<Card.Content class="space-y-4 pt-5">
+		<Card.Content class="space-y-4">
 			<div class="flex flex-wrap items-center gap-2">
 				<Button onclick={startServer} disabled={!canStart} title="Start FXServer.exe with the configured TXHOST variables">
 					{#if starting}

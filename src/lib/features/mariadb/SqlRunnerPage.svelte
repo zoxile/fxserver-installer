@@ -2,15 +2,14 @@
 	import DatabaseIcon from "@lucide/svelte/icons/database";
 	import FolderOpenIcon from "@lucide/svelte/icons/folder-open";
 	import PlayIcon from "@lucide/svelte/icons/play";
-	import RefreshCwIcon from "@lucide/svelte/icons/refresh-cw";
 	import { onMount } from "svelte";
 	import BackupCard from "./BackupCard.svelte";
+	import ConnectionCard from "./ConnectionCard.svelte";
 	import QueryConsole from "./QueryConsole.svelte";
 	import * as Card from "$lib/components/ui/card/index.js";
 	import { Button } from "$lib/components/ui/button/index.js";
 	import { Input } from "$lib/components/ui/input/index.js";
 	import { Notice } from "$lib/components/ui/notice/index.js";
-	import PasswordInput from "$lib/components/ui/password-input.svelte";
 	import * as Select from "$lib/components/ui/select/index.js";
 	import { databaseSession, rememberDatabaseCredentials } from "$lib/core/databaseSession.svelte";
 	import { chooseSqlFile } from "$lib/core/selectFile";
@@ -47,6 +46,8 @@
 	let error = $state("");
 	let result = $state<MariaDBQueryResult | null>(null);
 	let credentialsReady = $state(Boolean(databaseSession.credentials));
+	let connectionError = $state("");
+	let backupWarningDismissed = $state(false);
 	let backupTables = $state<string[]>([]);
 	let backupMode = $state<"database" | "tables" | "all">("database");
 	let backupDatabaseName = $state(databaseSession.credentials?.database ?? "");
@@ -78,6 +79,13 @@
 
 	onMount(() => {
 		void initializeBackupOutputDir();
+
+		if (!credentialsReady) return;
+		const loadTimer = window.setTimeout(() => {
+			void validateAndLoadDatabases(false);
+		}, 120);
+
+		return () => window.clearTimeout(loadTimer);
 	});
 
 	$effect(() => {
@@ -115,10 +123,11 @@
 		message = `Loaded ${selected}.`;
 	}
 
-	async function validateAndLoadDatabases() {
+	async function validateAndLoadDatabases(showLoadedMessage = true) {
 		busy = true;
 		error = "";
 		message = "";
+		connectionError = "";
 		try {
 			await validateMariaDBCredentials(credentials);
 			rememberDatabaseCredentials(credentials);
@@ -127,10 +136,11 @@
 			selectedScope = credentials.database && databases.includes(credentials.database) ? credentials.database : selectedScope;
 			queryDatabase = credentials.database && databases.includes(credentials.database) ? credentials.database : queryDatabase;
 			backupDatabaseName ||= credentials.database && databases.includes(credentials.database) ? credentials.database : databases[0] || "";
-			message = `Loaded ${databases.length} database${databases.length === 1 ? "" : "s"}.`;
+			if (showLoadedMessage) message = `Loaded ${databases.length} database${databases.length === 1 ? "" : "s"}.`;
 		} catch (caught) {
 			credentialsReady = false;
-			error = caught instanceof Error ? caught.message : String(caught);
+			connectionError = caught instanceof Error ? caught.message : String(caught);
+			error = connectionError;
 		} finally {
 			busy = false;
 		}
@@ -245,50 +255,18 @@
 
 	{#if message}<Notice tone={result?.success === false ? "warn" : "success"} {message} onDismiss={() => (message = "")} />{/if}
 	{#if error}<Notice tone="error" message={error} onDismiss={() => (error = "")} />{/if}
+	{#if !backupWarningDismissed}
+		<Notice
+			tone="warn"
+			title="Back up before changing MariaDB"
+			message="Before running SQL files, ad hoc queries, or restore/import scripts, create a fresh backup of any databases you care about."
+			onDismiss={() => (backupWarningDismissed = true)}
+			class="px-4 py-3 text-sm"
+		/>
+	{/if}
 
 	<div class="grid gap-4 xl:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)]">
-		<Card.Root class="rounded-md border-border bg-card shadow-sm">
-			<Card.Header class="border-b border-border pb-4">
-				<Card.Title>Connection & Scope</Card.Title>
-				<Card.Description>Use a global connection for files that create databases, or choose a database for resource migrations.</Card.Description>
-			</Card.Header>
-			<Card.Content class="space-y-4">
-				<div class="grid gap-3 sm:grid-cols-2">
-					<label class="grid gap-2">
-						<span class="text-xs font-medium text-muted-foreground">Host</span>
-						<Input bind:value={credentials.host} placeholder="localhost" class="rounded-sm font-mono text-xs" />
-					</label>
-					<label class="grid gap-2">
-						<span class="text-xs font-medium text-muted-foreground">Port</span>
-						<Input type="number" bind:value={credentials.port} placeholder="3306" class="rounded-sm font-mono text-xs" />
-					</label>
-					<label class="grid gap-2">
-						<span class="text-xs font-medium text-muted-foreground">User</span>
-						<Input bind:value={credentials.username} placeholder="root" class="rounded-sm font-mono text-xs" />
-					</label>
-					<label class="grid gap-2">
-						<span class="text-xs font-medium text-muted-foreground">Password</span>
-						<PasswordInput bind:value={credentials.password} placeholder="Password" class="rounded-sm font-mono text-xs" />
-					</label>
-				</div>
-				<div class="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
-					<Select.Root bind:value={selectedScope} type="single" items={scopeOptions}>
-						<Select.Trigger class="rounded-sm font-mono text-xs" title="Choose SQL execution scope">
-							{selectedScope === globalScope ? "Global connection" : selectedScope}
-						</Select.Trigger>
-						<Select.Content class="rounded-sm">
-							{#each scopeOptions as option}
-								<Select.Item value={option.value} label={option.label}>{option.label}</Select.Item>
-							{/each}
-						</Select.Content>
-					</Select.Root>
-					<Button variant="outline" onclick={validateAndLoadDatabases} disabled={busy} title="Validate credentials and load databases">
-						<RefreshCwIcon class={busy ? "animate-spin" : undefined} />
-						Load Databases
-					</Button>
-				</div>
-			</Card.Content>
-		</Card.Root>
+		<ConnectionCard bind:credentials {busy} {credentialsReady} {connectionError} onApply={() => validateAndLoadDatabases()} />
 
 		<Card.Root class="rounded-md border-border bg-card shadow-sm">
 			<Card.Header class="border-b border-border pb-4">
@@ -303,6 +281,20 @@
 				</div>
 			</Card.Header>
 			<Card.Content class="space-y-4">
+				<label class="grid gap-2">
+					<span class="text-xs font-medium text-muted-foreground">Execution Scope</span>
+					<Select.Root bind:value={selectedScope} type="single" items={scopeOptions}>
+						<Select.Trigger class="rounded-sm font-mono text-xs" title="Choose SQL execution scope">
+							{selectedScope === globalScope ? "Global connection" : selectedScope}
+						</Select.Trigger>
+						<Select.Content class="rounded-sm">
+							{#each scopeOptions as option}
+								<Select.Item value={option.value} label={option.label}>{option.label}</Select.Item>
+							{/each}
+						</Select.Content>
+					</Select.Root>
+					<span class="text-xs leading-5 text-muted-foreground">Use a global connection for files that create databases, or choose a database for resource migrations.</span>
+				</label>
 				<div class="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
 					<Input bind:value={sqlPath} readonly placeholder="Choose a .sql file..." class="rounded-sm font-mono text-xs" />
 					<Button variant="outline" onclick={browseSqlFile} disabled={busy} title="Browse for a .sql file">
@@ -310,7 +302,7 @@
 						Browse
 					</Button>
 				</div>
-				<textarea bind:value={sqlContent} spellcheck="false" class="h-72 w-full resize-y rounded-sm border border-input bg-background px-3 py-3 font-mono text-xs leading-5 outline-none focus-visible:ring-3 focus-visible:ring-ring/50" placeholder="SQL file contents will appear here."></textarea>
+				<textarea bind:value={sqlContent} spellcheck="false" class="h-40 min-h-32 w-full resize-y rounded-sm border border-input bg-background px-3 py-3 font-mono text-xs leading-5 outline-none focus-visible:ring-3 focus-visible:ring-ring/50" placeholder="SQL file contents will appear here."></textarea>
 				<Button onclick={runSql} disabled={busy || !canRun} title="Run SQL file">
 					<PlayIcon />
 					Run SQL

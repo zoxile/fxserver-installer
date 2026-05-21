@@ -17,6 +17,7 @@
 	let showExpandedContent = $state(false);
 	let openSections = $state<Set<string>>(new Set());
 	let isNarrow = $state(false);
+	let syncedActiveParentId = "";
 	let expandTimer: ReturnType<typeof setTimeout> | null = null;
 	let effectiveCollapsed = $derived(collapsed || isNarrow);
 	let activeParentId = $derived(
@@ -57,10 +58,11 @@
 	});
 
 	$effect(() => {
-		if (!activeParentId) return;
+		const nextActiveParentId = activeParentId ?? "";
+		if (syncedActiveParentId === nextActiveParentId) return;
 
-		if (openSections.size === 1 && openSections.has(activeParentId)) return;
-		openSections = new Set([activeParentId]);
+		syncedActiveParentId = nextActiveParentId;
+		openSections = nextActiveParentId ? new Set([nextActiveParentId]) : new Set();
 	});
 
 	function isSectionActive(item: (typeof navigation)[number]) {
@@ -116,7 +118,7 @@
 			{#each navigation as item}
 				{@const parentIsDirectPage = !item.children}
 				{@const sectionActive = isSectionActive(item)}
-				{@const sectionOpen = openSections.has(item.id) || activeParentId === item.id}
+				{@const sectionOpen = openSections.has(item.id)}
 				<SidebarNavButton
 					icon={item.icon}
 					label={item.label}
