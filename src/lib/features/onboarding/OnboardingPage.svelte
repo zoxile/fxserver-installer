@@ -44,7 +44,11 @@
 			manualCompleted = [];
 		}
 
-		void refreshAutoCompletion();
+		const refreshTimer = window.setTimeout(() => {
+			void refreshAutoCompletion();
+		}, 180);
+
+		return () => window.clearTimeout(refreshTimer);
 	});
 
 	function toggleStep(id: string) {
@@ -61,56 +65,65 @@
 	}
 
 	async function refreshAutoCompletion() {
+		if (checking) return;
 		checking = true;
 		statusMessage = "";
-		const next = new Set<string>();
+		try {
+			const detectedSteps = await Promise.all([detectMariaDbStep(), detectArtifactStep(), detectConfigSteps(), detectServerStep()]);
+			const next = new Set(detectedSteps.flat());
+			autoCompleted = [...next];
+			statusMessage = next.size ? `${next.size} step${next.size === 1 ? "" : "s"} detected automatically.` : "No completed steps detected yet.";
+		} finally {
+			checking = false;
+		}
+	}
 
+	async function detectMariaDbStep() {
 		try {
 			const status = await getMariaDBStatus(false);
-			if (status.installed && status.running) next.add("mariadb");
+			return status.installed && status.running ? ["mariadb"] : [];
 		} catch {
-			// Onboarding should stay usable even if a local probe fails.
+			return [];
 		}
+	}
 
+	async function detectArtifactStep() {
 		try {
 			loadInstallPath();
 			const installPath = getInstallPath();
-			if (installPath) {
-				const artifact = await getInstalledWindowsArtifactInfo(installPath);
-				if (artifact?.installed) next.add("artifact");
-			}
+			if (!installPath) return [];
+			const artifact = await getInstalledWindowsArtifactInfo(installPath);
+			return artifact?.installed ? ["artifact"] : [];
 		} catch {
-			// Artifact checks can fail outside the desktop runtime.
+			return [];
 		}
+	}
 
-		let configReady = false;
+	async function detectConfigSteps() {
 		try {
 			loadFxserverSettings();
 			const txDataPath = fxserverSettings.txDataPath.trim();
 			const profile = fxserverSettings.profile.trim();
-			configReady = Boolean(txDataPath && profile);
-			if (configReady) next.add("profile");
+			if (!txDataPath || !profile) return [];
 
-			if (configReady) {
-				const config = await readServerConfig({ txDataPath, profile });
-				const allConfigContent = config.files.map((file) => file.content).join("\n");
-				if (databaseSession.connectionString || /mysql_connection_string/i.test(allConfigContent)) next.add("database-string");
-				if (config.rconPasswordFound && config.rconlogFound) next.add("rcon");
-			}
+			const detected = ["profile"];
+			const config = await readServerConfig({ txDataPath, profile });
+			const allConfigContent = config.files.map((file) => file.content).join("\n");
+			if (databaseSession.connectionString || /mysql_connection_string/i.test(allConfigContent)) detected.push("database-string");
+			if (config.rconPasswordFound && config.rconlogFound) detected.push("rcon");
+			return detected;
 		} catch {
-			// Missing txData/profile data only means these steps remain incomplete.
+			return [];
 		}
+	}
 
+	async function detectServerStep() {
 		try {
 			const status = await getFxserverStatus();
-			if (status.running) next.add("start");
+			return status.running ? ["start"] : [];
 		} catch {
-			// Server status is optional for checklist rendering.
+			return [];
 		}
-
-		autoCompleted = [...next];
-		statusMessage = next.size ? `${next.size} step${next.size === 1 ? "" : "s"} detected automatically.` : "No completed steps detected yet.";
-		checking = false;
 	}
 </script>
 
