@@ -6,6 +6,20 @@ import tailwindcss from "@tailwindcss/vite";
 // https://vite.dev/config/
 export default defineConfig({
 	plugins: [svelte(), tailwindcss()],
+	optimizeDeps: {
+		force: true,
+		exclude: ["@lucide/svelte"],
+		include: [
+			"@tauri-apps/api/core",
+			"@tauri-apps/api/path",
+			"@tauri-apps/api/window",
+			"@tauri-apps/plugin-dialog",
+			"bits-ui",
+			"d3-scale",
+			"d3-shape",
+			"layerchart",
+		],
+	},
 	server: {
 		proxy: {
 			"/api/jg-artifacts/jsonv2": {
