@@ -14,6 +14,7 @@ export type CommandDefinition = {
 export type CommandPaletteSettings = {
 	enabled: boolean;
 	disabledCommandIds: string[];
+	shortcuts: Record<string, string>;
 };
 
 const storageKey = "fxserver-installer.command-palette";
@@ -21,6 +22,7 @@ const storageKey = "fxserver-installer.command-palette";
 export const commandPaletteSettings = $state<CommandPaletteSettings>({
 	enabled: true,
 	disabledCommandIds: [],
+	shortcuts: {},
 });
 
 export const commandDefinitions: CommandDefinition[] = [
@@ -48,9 +50,11 @@ export function loadCommandPaletteSettings() {
 		const saved = JSON.parse(localStorage.getItem(storageKey) || "{}") as Partial<CommandPaletteSettings>;
 		commandPaletteSettings.enabled = saved.enabled ?? true;
 		commandPaletteSettings.disabledCommandIds = Array.isArray(saved.disabledCommandIds) ? saved.disabledCommandIds : [];
+		commandPaletteSettings.shortcuts = saved.shortcuts && typeof saved.shortcuts === "object" ? saved.shortcuts : {};
 	} catch {
 		commandPaletteSettings.enabled = true;
 		commandPaletteSettings.disabledCommandIds = [];
+		commandPaletteSettings.shortcuts = {};
 	}
 }
 
@@ -71,4 +75,43 @@ export function setCommandEnabled(id: string, enabled: boolean) {
 	}
 	commandPaletteSettings.disabledCommandIds = [...next];
 	saveCommandPaletteSettings();
+}
+
+export function getCommandShortcut(id: string) {
+	return commandPaletteSettings.shortcuts[id] ?? "";
+}
+
+export function setCommandShortcut(id: string, shortcut: string) {
+	const next = { ...commandPaletteSettings.shortcuts };
+	if (shortcut) {
+		next[id] = shortcut;
+	} else {
+		delete next[id];
+	}
+	commandPaletteSettings.shortcuts = next;
+	saveCommandPaletteSettings();
+}
+
+export function shortcutFromKeyboardEvent(event: KeyboardEvent) {
+	const key = normalizedKey(event);
+	if (!key) return "";
+
+	const parts = [];
+	if (event.ctrlKey) parts.push("Ctrl");
+	if (event.altKey) parts.push("Alt");
+	if (event.shiftKey) parts.push("Shift");
+	if (event.metaKey) parts.push("Meta");
+	parts.push(key);
+	return parts.join("+");
+}
+
+export function shortcutMatchesEvent(shortcut: string, event: KeyboardEvent) {
+	return shortcutFromKeyboardEvent(event).toLowerCase() === shortcut.toLowerCase();
+}
+
+function normalizedKey(event: KeyboardEvent) {
+	if (["Control", "Alt", "Shift", "Meta"].includes(event.key)) return "";
+	if (event.key === " ") return "Space";
+	if (event.key.length === 1) return event.key.toUpperCase();
+	return event.key;
 }

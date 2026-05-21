@@ -26,7 +26,7 @@
 	import type { PageId } from "$lib/navigation";
 	import { getPageLabel } from "$lib/navigation";
 	import { initializeLogger, log } from "$lib/core/logger.svelte";
-	import { commandPaletteSettings, loadCommandPaletteSettings } from "$lib/core/commandPalette.svelte";
+	import { commandDefinitions, commandEnabled, commandPaletteSettings, loadCommandPaletteSettings, shortcutMatchesEvent } from "$lib/core/commandPalette.svelte";
 	import { onMount } from "svelte";
 
 	let scrollContainer: HTMLElement;
@@ -108,10 +108,24 @@
 			return;
 		}
 
+		if (commandPaletteSettings.enabled && !isEditableTarget(event.target)) {
+			const command = commandDefinitions.find((item) => commandEnabled(item.id) && commandPaletteSettings.shortcuts[item.id] && shortcutMatchesEvent(commandPaletteSettings.shortcuts[item.id], event));
+			if (command) {
+				event.preventDefault();
+				navigate(command.page);
+				return;
+			}
+		}
+
 		if (event.key !== "F5") return;
 
 		event.preventDefault();
 		event.stopPropagation();
+	}
+
+	function isEditableTarget(target: EventTarget | null) {
+		if (!(target instanceof HTMLElement)) return false;
+		return Boolean(target.closest("input, textarea, select, [contenteditable='true']"));
 	}
 </script>
 
