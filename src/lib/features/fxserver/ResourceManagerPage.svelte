@@ -56,6 +56,8 @@
 	let message = $state("");
 	let error = $state("");
 	let recentCommands = $state<string[]>([]);
+	let contextMenuResource = $state<ResourceView | null>(null);
+	let contextMenuPosition = $state({ x: 0, y: 0 });
 
 	const filteredResources = $derived(
 		resources.filter((resource) => {
@@ -177,7 +179,7 @@
 		}
 	}
 
-	async function updateResource(resource: ResourceView) {
+	async function updateResource(resource: ResourceView, force = false) {
 		if (!resource.repository) return;
 		let target = resource;
 
@@ -191,7 +193,8 @@
 			return;
 		}
 
-		const confirmed = window.confirm(`Update ${resource.name} from ${target.repositoryWebUrl || resource.repository}? Existing files with the same names will be overwritten.`);
+		const actionLabel = force ? "Reinstall" : "Update";
+		const confirmed = window.confirm(`${actionLabel} ${resource.name} from ${target.repositoryWebUrl || resource.repository}? Existing files with the same names will be overwritten.`);
 		if (!confirmed) return;
 
 		patchResource(resource.path, { updating: true });
@@ -203,7 +206,7 @@
 				repository: resource.repository,
 				branch: target.defaultBranch,
 			});
-			message = `${resource.name} updated from GitHub.`;
+			message = force ? `${resource.name} reinstalled from GitHub.` : `${resource.name} updated from GitHub.`;
 			await scanResources(false);
 			const refreshed = resources.find((entry) => entry.path === resource.path);
 			if (refreshed) await checkResourceUpdate(refreshed);
@@ -212,6 +215,37 @@
 		} finally {
 			patchResource(resource.path, { updating: false });
 		}
+	}
+
+	function openResourceContextMenu(event: MouseEvent, resource: ResourceView) {
+		event.preventDefault();
+		const menuWidth = 360;
+		const menuHeight = 340;
+		const padding = 12;
+		contextMenuResource = resource;
+		contextMenuPosition = {
+			x: Math.min(event.clientX, Math.max(padding, window.innerWidth - menuWidth - padding)),
+			y: Math.min(event.clientY, Math.max(padding, window.innerHeight - menuHeight - padding)),
+		};
+	}
+
+	function closeResourceContextMenu() {
+		contextMenuResource = null;
+	}
+
+	async function runContextCommand(action: "start" | "stop" | "restart" | "ensure" | "refresh", resource: ResourceView) {
+		closeResourceContextMenu();
+		await runResourceCommand(action, resource);
+	}
+
+	async function runContextUpdate(resource: ResourceView, force = false) {
+		closeResourceContextMenu();
+		await updateResource(resource, force);
+	}
+
+	async function runContextCheck(resource: ResourceView) {
+		closeResourceContextMenu();
+		await checkResourceUpdate(resource);
 	}
 
 	async function refreshRuntimeStates() {
@@ -397,6 +431,8 @@
 	}
 </script>
 
+<svelte:window onclick={closeResourceContextMenu} onkeydown={(event) => event.key === "Escape" && closeResourceContextMenu()} />
+
 <section class="space-y-6">
 	<div class="flex flex-col justify-between gap-4 lg:flex-row lg:items-end">
 		<div>
@@ -517,7 +553,7 @@
 			{#if filteredResources.length}
 				<div class="grid gap-3">
 					{#each filteredResources as resource (resource.path)}
-						<article class="rounded-md border border-border bg-background/60 p-4 shadow-xs transition-colors hover:bg-background/80">
+						<article class="rounded-md border border-border bg-background/60 p-4 shadow-xs transition-colors hover:bg-background/80" oncontextmenu={(event) => openResourceContextMenu(event, resource)}>
 							<div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
 								<div class="min-w-0">
 									<div class="flex flex-wrap items-center gap-2">
@@ -596,6 +632,9 @@
 										<Button size="xs" variant="outline" onclick={() => updateResource(resource)} disabled={!resource.repository || resource.updating || resource.updateStatus !== "update-available"} title="Update this resource from GitHub">
 											<DownloadIcon class={resource.updating ? "animate-spin" : undefined} />Update
 										</Button>
+										<Button size="xs" variant="outline" onclick={() => updateResource(resource, true)} disabled={!resource.repository || resource.updating} title="Force reinstall this resource from GitHub">
+											<DownloadIcon class={resource.updating ? "animate-spin" : undefined} />Reinstall
+										</Button>
 									</div>
 								</div>
 							</div>
@@ -609,6 +648,58 @@
 			{/if}
 		</Card.Content>
 	</Card.Root>
+
+	{#if contextMenuResource}
+		<div
+			class="fixed z-[110] w-[min(22rem,calc(100vw-1.5rem))] rounded-md border border-border bg-popover p-3 text-popover-foreground shadow-2xl animate-in fade-in-0 zoom-in-95 duration-100"
+			style={`left: ${contextMenuPosition.x}px; top: ${contextMenuPosition.y}px;`}
+			role="menu"
+			tabindex="-1"
+			onclick={(event) => event.stopPropagation()}
+			onkeydown={(event) => {
+				event.stopPropagation();
+				if (event.key === "Escape") closeResourceContextMenu();
+			}}
+		>
+			<div class="border-b border-border pb-3">
+				<p class="truncate text-sm font-semibold text-foreground">{contextMenuResource.name}</p>
+				<p class="mt-1 truncate font-mono text-xs text-muted-foreground">{displayResourcePath(contextMenuResource.path)}</p>
+			</div>
+			<div class="grid gap-4 pt-3">
+				<div>
+					<p class="mb-2 text-[10px] font-semibold tracking-wide text-muted-foreground uppercase">Runtime Controls</p>
+					<div class="grid grid-cols-2 gap-2">
+						<Button size="lg" onclick={() => runContextCommand("start", contextMenuResource!)} disabled={!rcon.password.trim() || Boolean(busyCommand)} title="Start resource">
+							<PlayIcon />Start
+						</Button>
+						<Button size="lg" variant="destructive" onclick={() => runContextCommand("stop", contextMenuResource!)} disabled={!rcon.password.trim() || Boolean(busyCommand)} title="Stop resource">
+							<SquareIcon />Stop
+						</Button>
+						<Button size="lg" variant="outline" onclick={() => runContextCommand("restart", contextMenuResource!)} disabled={!rcon.password.trim() || Boolean(busyCommand)} title="Restart resource">
+							<RotateCcwIcon />Restart
+						</Button>
+						<Button size="lg" variant="outline" onclick={() => runContextCommand("ensure", contextMenuResource!)} disabled={!rcon.password.trim() || Boolean(busyCommand)} title="Ensure resource">
+							<ShieldIcon />Ensure
+						</Button>
+					</div>
+				</div>
+				<div>
+					<p class="mb-2 text-[10px] font-semibold tracking-wide text-muted-foreground uppercase">Update Controls</p>
+					<div class="grid grid-cols-3 gap-2">
+						<Button size="lg" variant="outline" onclick={() => runContextCheck(contextMenuResource!)} disabled={!contextMenuResource.repository || contextMenuResource.updateStatus === "checking"} title="Check this resource against GitHub">
+							<GitBranchIcon />Check
+						</Button>
+						<Button size="lg" variant="outline" onclick={() => runContextUpdate(contextMenuResource!)} disabled={!contextMenuResource.repository || contextMenuResource.updating || contextMenuResource.updateStatus !== "update-available"} title="Update this resource from GitHub">
+							<DownloadIcon />Update
+						</Button>
+						<Button size="lg" variant="outline" onclick={() => runContextUpdate(contextMenuResource!, true)} disabled={!contextMenuResource.repository || contextMenuResource.updating} title="Force reinstall this resource from GitHub">
+							<DownloadIcon />Reinstall
+						</Button>
+					</div>
+				</div>
+			</div>
+		</div>
+	{/if}
 
 	<Card.Root class="rounded-md border-border bg-card shadow-sm">
 		<Card.Header class="border-b border-border pb-4">
