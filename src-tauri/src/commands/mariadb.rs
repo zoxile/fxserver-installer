@@ -9,7 +9,8 @@ use crate::{
         detect::detect_mariadb,
         install::{
             get_package_info, install_mariadb as install_mariadb_service,
-            uninstall_mariadb as uninstall_mariadb_service, update_mariadb as update_mariadb_service,
+            uninstall_mariadb as uninstall_mariadb_service,
+            update_mariadb as update_mariadb_service,
         },
         query::{execute_query, list_databases, list_tables, validate_connection},
         service::{restart_service, start_service, stop_service},

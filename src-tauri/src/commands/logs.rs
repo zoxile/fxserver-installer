@@ -185,10 +185,11 @@ fn list_client_log_files(directory: &Path) -> Result<Vec<ClientLogFile>, String>
     }
 
     files.sort_by(|left, right| {
-        right
-            .modified
-            .cmp(&left.modified)
-            .then_with(|| left.name.to_ascii_lowercase().cmp(&right.name.to_ascii_lowercase()))
+        right.modified.cmp(&left.modified).then_with(|| {
+            left.name
+                .to_ascii_lowercase()
+                .cmp(&right.name.to_ascii_lowercase())
+        })
     });
 
     Ok(files)
@@ -205,7 +206,9 @@ fn select_client_log_file(
     files: &[ClientLogFile],
     requested_file_name: Option<&str>,
 ) -> Option<ClientLogFile> {
-    let requested_file_name = requested_file_name.map(str::trim).filter(|value| !value.is_empty());
+    let requested_file_name = requested_file_name
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
 
     requested_file_name
         .and_then(|file_name| files.iter().find(|file| file.name == file_name))
@@ -219,8 +222,8 @@ fn select_client_log_file(
 }
 
 fn tail_file(path: &Path, max_lines: usize) -> Result<String, String> {
-    let mut file =
-        File::open(path).map_err(|error| format!("Failed to open {}: {error}", path.to_string_lossy()))?;
+    let mut file = File::open(path)
+        .map_err(|error| format!("Failed to open {}: {error}", path.to_string_lossy()))?;
     let file_size = file
         .metadata()
         .map_err(|error| format!("Failed to inspect {}: {error}", path.to_string_lossy()))?
