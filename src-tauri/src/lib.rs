@@ -55,7 +55,6 @@ pub fn run() {
             commands::fxserver::send_fxserver_command,
             commands::fxserver::start_fxserver,
             commands::fxserver::stop_fxserver,
-            commands::fxserver::query_fxserver_resource_states,
             commands::fxserver::update_github_resource,
             commands::fxserver::clear_fxserver_rcon_password,
             commands::jooat::get_jooat_resolver_status,

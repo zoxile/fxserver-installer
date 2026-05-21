@@ -123,16 +123,6 @@ export interface ResourceScanResult {
 	resources: FxserverResourceInfo[];
 }
 
-export interface ResourceRuntimeState {
-	name: string;
-	state: "running" | "stopped" | "missing" | "unknown" | string;
-}
-
-export interface ResourceStatesResult {
-	rawOutput: string;
-	states: ResourceRuntimeState[];
-}
-
 export interface ResourceUpdateRequest {
 	resourcePath: string;
 	repository: string;
@@ -315,32 +305,6 @@ export async function scanFxserverResources(request: ResourceScanRequest) {
 		return result;
 	} catch (error) {
 		log("FXServer resource scan failed.", {
-			level: "error",
-			scope: "fxserver.resources",
-			detail: errorMessage(error),
-		});
-		throw error;
-	}
-}
-
-export async function queryFxserverResourceStates(rcon: FxserverRconConfig, resourceNames: string[]) {
-	if (!hasTauriRuntime()) return unavailableOutsideTauri<ResourceStatesResult>();
-
-	try {
-		const result = await invoke<ResourceStatesResult>("query_fxserver_resource_states", {
-			request: {
-				rcon,
-				resourceNames,
-			},
-		});
-		log("FXServer resource states refreshed.", {
-			level: "debug",
-			scope: "fxserver.resources",
-			detail: `${result.states.length} resources parsed.`,
-		});
-		return result;
-	} catch (error) {
-		log("FXServer resource state refresh failed.", {
 			level: "error",
 			scope: "fxserver.resources",
 			detail: errorMessage(error),

@@ -1,5 +1,4 @@
 <script lang="ts">
-	import ActivityIcon from "@lucide/svelte/icons/activity";
 	import DownloadIcon from "@lucide/svelte/icons/download";
 	import ExternalLinkIcon from "@lucide/svelte/icons/external-link";
 	import GitBranchIcon from "@lucide/svelte/icons/git-branch";
@@ -19,7 +18,6 @@
 	import {
 		clearFxserverRconPassword,
 		getSavedFxserverRconPassword,
-		queryFxserverResourceStates,
 		saveFxserverRconPassword,
 		scanFxserverResources,
 		sendFxserverRconCommand,
@@ -31,7 +29,6 @@
 	import { fxserverSettings, loadFxserverSettings, readSavedEnvironment } from "./fxserverSettings.svelte";
 
 	type UpdateStatus = "unchecked" | "checking" | "up-to-date" | "update-available" | "no-repository" | "error";
-	type RuntimeState = "running" | "stopped" | "missing" | "unknown" | string;
 
 	type ResourceView = FxserverResourceInfo & {
 		updateStatus: UpdateStatus;
@@ -40,7 +37,6 @@
 		defaultBranch: string;
 		latestManifestUrl: string;
 		repositoryWebUrl: string;
-		runtimeState: RuntimeState;
 		updating: boolean;
 	};
 
@@ -48,10 +44,9 @@
 	let scanResult = $state<ResourceScanResult | null>(null);
 	let resources = $state<ResourceView[]>([]);
 	let search = $state("");
-	let filter = $state<"all" | "updates" | "repos" | "missing-repo" | "running" | "unknown">("all");
+	let filter = $state<"all" | "updates" | "repos" | "missing-repo">("all");
 	let scanning = $state(false);
 	let checkingAll = $state(false);
-	let refreshingStates = $state(false);
 	let busyCommand = $state("");
 	let message = $state("");
 	let error = $state("");
@@ -73,14 +68,11 @@
 			if (filter === "updates") return resource.updateStatus === "update-available";
 			if (filter === "repos") return Boolean(resource.repository);
 			if (filter === "missing-repo") return !resource.repository;
-			if (filter === "running") return resource.runtimeState === "running";
-			if (filter === "unknown") return resource.runtimeState === "unknown";
 			return true;
 		}),
 	);
 	const resourcesWithRepositories = $derived(resources.filter((resource) => Boolean(resource.repository)).length);
 	const updateCount = $derived(resources.filter((resource) => resource.updateStatus === "update-available").length);
-	const runningCount = $derived(resources.filter((resource) => resource.runtimeState === "running").length);
 
 	onMount(() => {
 		void initialize();
@@ -126,7 +118,6 @@
 					defaultBranch: existing?.defaultBranch ?? "",
 					latestManifestUrl: existing?.latestManifestUrl ?? "",
 					repositoryWebUrl: existing?.repositoryWebUrl ?? normalizeRepositoryWebUrl(resource.repository ?? ""),
-					runtimeState: existing?.runtimeState ?? "unknown",
 					updating: existing?.updating ?? false,
 				};
 			});
@@ -248,37 +239,6 @@
 		await checkResourceUpdate(resource);
 	}
 
-	async function refreshRuntimeStates() {
-		if (!resources.length) return;
-		if (!rcon.password.trim()) {
-			error = "Enter the RCON password before checking running resources.";
-			return;
-		}
-
-		refreshingStates = true;
-		error = "";
-		message = "";
-		try {
-			await saveFxserverRconPassword(rcon.password);
-			const result = await queryFxserverResourceStates(
-				rcon,
-				resources.map((resource) => resource.name),
-			);
-			const states = new Map(result.states.map((entry) => [entry.name, entry.state]));
-			resources = resources.map((resource) => ({
-				...resource,
-				runtimeState: states.get(resource.name) ?? "unknown",
-			}));
-			message = result.rawOutput.trim()
-				? "Resource state check completed. Some states may stay unknown if FXServer did not return a parseable resource list."
-				: "RCON accepted the state check, but did not return a resource list.";
-		} catch (caught) {
-			error = caught instanceof Error ? caught.message : String(caught);
-		} finally {
-			refreshingStates = false;
-		}
-	}
-
 	async function runResourceCommand(action: "start" | "stop" | "restart" | "ensure" | "refresh", resource: ResourceView) {
 		const command = action === "refresh" ? `refresh\nensure ${resource.name}` : `${action} ${resource.name}`;
 		busyCommand = `${action}:${resource.path}`;
@@ -288,8 +248,6 @@
 			if (rcon.password.trim()) await saveFxserverRconPassword(rcon.password);
 			await sendFxserverRconCommand(command, rcon);
 			recentCommands = [command, ...recentCommands].slice(0, 8);
-			if (action === "stop") patchResource(resource.path, { runtimeState: "stopped" });
-			if (action === "start" || action === "ensure" || action === "restart" || action === "refresh") patchResource(resource.path, { runtimeState: "running" });
 			message = `Sent RCON command: ${command.replace("\n", " then ")}`;
 		} catch (caught) {
 			error = caught instanceof Error ? caught.message : String(caught);
@@ -393,13 +351,6 @@
 		return "Not checked";
 	}
 
-	function runtimeBadgeClass(state: RuntimeState) {
-		if (state === "running") return "border-emerald-400/30 bg-emerald-400/10 text-emerald-200";
-		if (state === "stopped") return "border-red-400/30 bg-red-400/10 text-red-100";
-		if (state === "missing") return "border-amber-400/30 bg-amber-400/10 text-amber-100";
-		return "border-border bg-background/70 text-muted-foreground";
-	}
-
 	function isCommandBusy(action: string, resource: ResourceView) {
 		return busyCommand === `${action}:${resource.path}`;
 	}
@@ -441,10 +392,10 @@
 			<p class="mt-2 max-w-2xl text-sm leading-6 text-muted-foreground">Scan fxmanifest files, compare GitHub-backed resources, update resources, and control them through RCON.</p>
 		</div>
 		<div class="inline-flex items-center gap-2 rounded-sm border border-border bg-card px-3 py-2 text-xs text-muted-foreground">
-			{#if scanning || checkingAll || refreshingStates || busyCommand}
+			{#if scanning || checkingAll || busyCommand}
 				<RefreshCwIcon class="size-3.5 animate-spin" />
 			{/if}
-			{scanning || checkingAll || refreshingStates || busyCommand ? "Working..." : `${resources.length} resources`}
+			{scanning || checkingAll || busyCommand ? "Working..." : `${resources.length} resources`}
 		</div>
 	</div>
 
@@ -491,10 +442,6 @@
 						<GitBranchIcon class={checkingAll ? "animate-spin" : undefined} />
 						Check Updates
 					</Button>
-					<Button variant="outline" onclick={refreshRuntimeStates} disabled={refreshingStates || !resources.length || !rcon.password.trim()} title="Best-effort RCON resource state check">
-						<ActivityIcon class={refreshingStates ? "animate-spin" : undefined} />
-						Runtime States
-					</Button>
 				</div>
 			</Card.Content>
 		</Card.Root>
@@ -521,7 +468,6 @@
 				</label>
 				<div class="flex flex-wrap items-center gap-2">
 					<Button variant="outline" onclick={clearPassword} disabled={!rcon.password} title="Clear saved RCON password">Clear Saved Password</Button>
-					<div class="rounded-sm border border-border bg-background/70 px-3 py-2 text-xs text-muted-foreground">{runningCount} running detected</div>
 				</div>
 			</Card.Content>
 		</Card.Root>
@@ -539,8 +485,6 @@
 					<Button variant={filter === "updates" ? "default" : "outline"} size="sm" onclick={() => (filter = "updates")}>Updates</Button>
 					<Button variant={filter === "repos" ? "default" : "outline"} size="sm" onclick={() => (filter = "repos")}>Repos</Button>
 					<Button variant={filter === "missing-repo" ? "default" : "outline"} size="sm" onclick={() => (filter = "missing-repo")}>No Repo</Button>
-					<Button variant={filter === "running" ? "default" : "outline"} size="sm" onclick={() => (filter = "running")}>Running</Button>
-					<Button variant={filter === "unknown" ? "default" : "outline"} size="sm" onclick={() => (filter = "unknown")}>Unknown</Button>
 				</div>
 			</div>
 		</Card.Header>
@@ -558,7 +502,6 @@
 								<div class="min-w-0">
 									<div class="flex flex-wrap items-center gap-2">
 										<p class="text-base font-semibold text-foreground">{resource.name}</p>
-										<span class={`rounded-sm border px-2 py-0.5 text-[10px] font-semibold uppercase ${runtimeBadgeClass(resource.runtimeState)}`}>{resource.runtimeState}</span>
 										<span class={`rounded-sm border px-2 py-0.5 text-[10px] font-semibold uppercase ${updateBadgeClass(resource.updateStatus)}`}>{updateLabel(resource)}</span>
 									</div>
 								</div>
@@ -607,7 +550,7 @@
 
 							<div class="mt-4 flex flex-col gap-3 border-t border-border pt-4 xl:flex-row xl:items-center xl:justify-between">
 								<div class="min-w-0">
-									<p class="mb-2 text-[10px] font-semibold tracking-wide text-muted-foreground uppercase">Runtime Controls</p>
+									<p class="mb-2 text-[10px] font-semibold tracking-wide text-muted-foreground uppercase">RCON Controls</p>
 									<div class="flex flex-wrap gap-2">
 										<Button size="xs" onclick={() => runResourceCommand("start", resource)} disabled={!rcon.password.trim() || Boolean(busyCommand)} title="Start resource">
 											<PlayIcon class={isCommandBusy("start", resource) ? "animate-spin" : undefined} />Start
@@ -667,7 +610,7 @@
 			</div>
 			<div class="grid gap-4 pt-3">
 				<div>
-					<p class="mb-2 text-[10px] font-semibold tracking-wide text-muted-foreground uppercase">Runtime Controls</p>
+					<p class="mb-2 text-[10px] font-semibold tracking-wide text-muted-foreground uppercase">RCON Controls</p>
 					<div class="grid grid-cols-2 gap-2">
 						<Button size="lg" onclick={() => runContextCommand("start", contextMenuResource!)} disabled={!rcon.password.trim() || Boolean(busyCommand)} title="Start resource">
 							<PlayIcon />Start

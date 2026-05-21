@@ -12,10 +12,9 @@ use std::{
 use crate::models::fxserver::{
     FxserverCommandRequest, FxserverEnvironmentVariable, FxserverLaunchRequest,
     FxserverLaunchResult, FxserverRconConfig, FxserverResourceInfo, FxserverResources,
-    FxserverStatus, FxserverTerminalEntry, FxserverTerminalResult, ResourceRuntimeState,
-    ResourceScanRequest, ResourceScanResult, ResourceStatesRequest, ResourceStatesResult,
-    ResourceUpdateRequest, ResourceUpdateResult, SaveServerConfigRequest, ServerConfigFile,
-    ServerConfigRequest, ServerConfigResult, TxDataLogRequest, TxDataLogResult,
+    FxserverStatus, FxserverTerminalEntry, FxserverTerminalResult, ResourceScanRequest,
+    ResourceScanResult, ResourceUpdateRequest, ResourceUpdateResult, SaveServerConfigRequest,
+    ServerConfigFile, ServerConfigRequest, ServerConfigResult, TxDataLogRequest, TxDataLogResult,
     TxDataProfilesResult,
 };
 
@@ -474,17 +473,6 @@ pub fn send_fxserver_rcon_command(request: FxserverCommandRequest) -> Result<Str
 }
 
 #[tauri::command]
-pub fn query_fxserver_resource_states(
-    request: ResourceStatesRequest,
-) -> Result<ResourceStatesResult, String> {
-    let raw_output = send_rcon_command(&request.rcon, "resources")
-        .or_else(|_| send_rcon_command(&request.rcon, "status"))?;
-    let states = infer_resource_states(&request.resource_names, &raw_output);
-
-    Ok(ResourceStatesResult { raw_output, states })
-}
-
-#[tauri::command]
 pub async fn update_github_resource(
     request: ResourceUpdateRequest,
 ) -> Result<ResourceUpdateResult, String> {
@@ -709,43 +697,6 @@ fn first_quoted_value(value: &str) -> Option<String> {
     }
 
     None
-}
-
-fn infer_resource_states(names: &[String], output: &str) -> Vec<ResourceRuntimeState> {
-    let lines: Vec<String> = output
-        .lines()
-        .map(|line| line.to_ascii_lowercase())
-        .collect();
-
-    names
-        .iter()
-        .map(|name| {
-            let needle = name.to_ascii_lowercase();
-            let state = lines
-                .iter()
-                .filter(|line| line.contains(&needle))
-                .find_map(|line| {
-                    if line.contains("started")
-                        || line.contains("running")
-                        || line.contains("start pending")
-                    {
-                        Some("running")
-                    } else if line.contains("stopped") || line.contains("stopping") {
-                        Some("stopped")
-                    } else if line.contains("missing") || line.contains("not found") {
-                        Some("missing")
-                    } else {
-                        None
-                    }
-                })
-                .unwrap_or("unknown");
-
-            ResourceRuntimeState {
-                name: name.clone(),
-                state: state.to_string(),
-            }
-        })
-        .collect()
 }
 
 fn update_github_resource_blocking(
