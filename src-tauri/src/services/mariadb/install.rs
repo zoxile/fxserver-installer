@@ -1640,7 +1640,7 @@ mod tests {
                 .expect("time")
                 .as_nanos()
         ));
-        for schema in ["mysql", "performance_schema", "sys", "test", "qbox_88d783"] {
+        for schema in ["mysql", "performance_schema", "sys", "test"] {
             std::fs::create_dir_all(root.join(schema)).expect("schema dir");
         }
 
