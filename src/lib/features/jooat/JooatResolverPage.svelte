@@ -220,7 +220,7 @@
 		/>
 	</div>
 
-	<Card.Root class="group relative overflow-hidden rounded-sm border-border bg-card shadow-sm transition-transform duration-300 hover:-translate-y-0.5">
+	<Card.Root class="group relative overflow-hidden rounded-sm border-border bg-card shadow-sm transition-[box-shadow,transform] duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] hover:-translate-y-0.5">
 		<div
 			class="pointer-events-none absolute inset-x-4 top-0 h-px bg-linear-to-r from-transparent via-primary/70 to-transparent opacity-0 transition-opacity duration-300 group-hover:opacity-100"
 		></div>
@@ -303,7 +303,7 @@
 	</Card.Root>
 
 	<div class="grid gap-4 xl:grid-cols-[minmax(0,1.15fr)_minmax(360px,0.85fr)]">
-		<Card.Root class="group relative overflow-hidden rounded-sm border-border bg-card shadow-sm transition-transform duration-300 hover:-translate-y-0.5">
+		<Card.Root class="group relative overflow-hidden rounded-sm border-border bg-card shadow-sm transition-[box-shadow,transform] duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] hover:-translate-y-0.5">
 			<div
 				class="pointer-events-none absolute inset-x-4 top-0 h-px bg-linear-to-r from-transparent via-primary/70 to-transparent opacity-0 transition-opacity duration-300 group-hover:opacity-100"
 			></div>
@@ -333,7 +333,7 @@
 			</Card.Content>
 		</Card.Root>
 
-		<Card.Root class="group relative overflow-hidden rounded-sm border-border bg-card shadow-sm transition-transform duration-300 hover:-translate-y-0.5">
+		<Card.Root class="group relative overflow-hidden rounded-sm border-border bg-card shadow-sm transition-[box-shadow,transform] duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] hover:-translate-y-0.5">
 			<div
 				class="pointer-events-none absolute inset-x-4 top-0 h-px bg-linear-to-r from-transparent via-primary/70 to-transparent opacity-0 transition-opacity duration-300 group-hover:opacity-100"
 			></div>
@@ -430,7 +430,7 @@
 	<div class="grid gap-4 lg:grid-cols-3">
 		{#each [{ title: "Lowercase Input", description: "FiveM/GTA JOOAT lookups are normally compared against lowercased strings.", icon: ListChecksIcon }, { title: "32-bit Output", description: "Every result is shown as hex, unsigned decimal, and signed decimal for config compatibility.", icon: BinaryIcon }, { title: "Optional Resolver Pack", description: "Users can keep a tiny hasher-only app or download the larger offline resolver database from GitHub later.", icon: DatabaseZapIcon }] as item}
 			{@const Icon = item.icon}
-			<Card.Root class="group relative overflow-hidden rounded-sm border-border bg-card shadow-sm transition-transform duration-300 hover:-translate-y-0.5">
+			<Card.Root class="group relative overflow-hidden rounded-sm border-border bg-card shadow-sm transition-[box-shadow,transform] duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] hover:-translate-y-0.5">
 				<div
 					class="pointer-events-none absolute inset-x-4 top-0 h-px bg-linear-to-r from-transparent via-primary/70 to-transparent opacity-0 transition-opacity duration-300 group-hover:opacity-100"
 				></div>

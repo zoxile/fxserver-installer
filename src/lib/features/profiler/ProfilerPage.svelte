@@ -119,7 +119,7 @@
 	</div>
 
 	<div class="grid gap-4 xl:grid-cols-12">
-		<Card.Root class="group relative overflow-hidden rounded-sm border-border bg-card shadow-sm transition-transform duration-300 hover:-translate-y-0.5 xl:col-span-7">
+		<Card.Root class="group relative overflow-hidden rounded-sm border-border bg-card shadow-sm transition-[box-shadow,transform] duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] hover:-translate-y-0.5 xl:col-span-7">
 			<div
 				class="pointer-events-none absolute inset-x-4 top-0 h-px bg-linear-to-r from-transparent via-primary/70 to-transparent opacity-0 transition-opacity duration-300 group-hover:opacity-100"
 			></div>
@@ -168,7 +168,7 @@
 			</Card.Content>
 		</Card.Root>
 
-		<Card.Root class="group relative overflow-hidden rounded-sm border-border bg-card shadow-sm transition-transform duration-300 hover:-translate-y-0.5 xl:col-span-5">
+		<Card.Root class="group relative overflow-hidden rounded-sm border-border bg-card shadow-sm transition-[box-shadow,transform] duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] hover:-translate-y-0.5 xl:col-span-5">
 			<div
 				class="pointer-events-none absolute inset-x-4 top-0 h-px bg-linear-to-r from-transparent via-primary/70 to-transparent opacity-0 transition-opacity duration-300 group-hover:opacity-100"
 			></div>
@@ -213,7 +213,7 @@
 	{#if analysis}
 		<div class="grid gap-4 md:grid-cols-2 xl:grid-cols-6">
 			{#each [{ label: "Recording", value: formatMs(analysis.stats.recordingMs), description: "Capture length" }, { label: "Avg script / frame", value: formatMs(analysis.stats.averageScriptMsPerFrame), description: "Measured script time" }, { label: "Hitches", value: `${formatNumber(analysis.stats.hitchCount)} / ${formatNumber(analysis.stats.frameCount)}`, description: "frames >25ms" }, { label: "Heavy ticks", value: `${formatNumber(analysis.stats.heavyTickCount)} / ${formatNumber(analysis.stats.frameCount)}`, description: "ticks >25ms scripts" }, { label: "Profiler entries", value: formatNumber(analysis.stats.entryCount), description: "Trace rows" }, { label: "Resource manager", value: `${formatMs(analysis.stats.resourceManagerTotalMs)} / ${formatNumber(analysis.stats.resourceManagerCalls)}`, description: "total / frames" }] as stat}
-				<Card.Root class="group relative overflow-hidden rounded-sm border-border bg-card shadow-sm transition-transform duration-300 hover:-translate-y-0.5">
+				<Card.Root class="group relative overflow-hidden rounded-sm border-border bg-card shadow-sm transition-[box-shadow,transform] duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] hover:-translate-y-0.5">
 					<div
 						class="pointer-events-none absolute inset-x-4 top-0 h-px bg-linear-to-r from-transparent via-primary/70 to-transparent opacity-0 transition-opacity duration-300 group-hover:opacity-100"
 					></div>
@@ -227,7 +227,7 @@
 		</div>
 
 		<div class="grid gap-4 xl:grid-cols-12">
-			<Card.Root class="group relative overflow-hidden rounded-sm border-border bg-card shadow-sm transition-transform duration-300 hover:-translate-y-0.5 xl:col-span-7">
+			<Card.Root class="group relative overflow-hidden rounded-sm border-border bg-card shadow-sm transition-[box-shadow,transform] duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] hover:-translate-y-0.5 xl:col-span-7">
 				<div
 					class="pointer-events-none absolute inset-x-4 top-0 h-px bg-linear-to-r from-transparent via-primary/70 to-transparent opacity-0 transition-opacity duration-300 group-hover:opacity-100"
 				></div>
@@ -260,7 +260,7 @@
 				</Card.Content>
 			</Card.Root>
 
-			<Card.Root class="group relative overflow-hidden rounded-sm border-border bg-card shadow-sm transition-transform duration-300 hover:-translate-y-0.5 xl:col-span-5">
+			<Card.Root class="group relative overflow-hidden rounded-sm border-border bg-card shadow-sm transition-[box-shadow,transform] duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] hover:-translate-y-0.5 xl:col-span-5">
 				<div
 					class="pointer-events-none absolute inset-x-4 top-0 h-px bg-linear-to-r from-transparent via-primary/70 to-transparent opacity-0 transition-opacity duration-300 group-hover:opacity-100"
 				></div>
@@ -283,7 +283,7 @@
 			</Card.Root>
 		</div>
 
-		<Card.Root class="group relative overflow-hidden rounded-sm border-border bg-card shadow-sm transition-transform duration-300 hover:-translate-y-0.5">
+		<Card.Root class="group relative overflow-hidden rounded-sm border-border bg-card shadow-sm transition-[box-shadow,transform] duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] hover:-translate-y-0.5">
 			<div
 				class="pointer-events-none absolute inset-x-4 top-0 h-px bg-linear-to-r from-transparent via-primary/70 to-transparent opacity-0 transition-opacity duration-300 group-hover:opacity-100"
 			></div>
@@ -350,7 +350,7 @@
 
 		<div class="grid gap-4 xl:grid-cols-3">
 			{#each [{ title: "Most Total CPU Time", description: "Top 20 entries by total measured time.", resources: analysis.topTotal, metric: "total" }, { title: "Worst Single Tick", description: "Top 20 by worst single frame, tick, thread, event, or ref span.", resources: analysis.topWorst, metric: "worst" }, { title: "Present During Hitches", description: "Entries active during frames over the 25ms budget.", resources: analysis.topHitches, metric: "hitch" }] as ranking}
-				<Card.Root class="group relative overflow-hidden rounded-sm border-border bg-card shadow-sm transition-transform duration-300 hover:-translate-y-0.5">
+				<Card.Root class="group relative overflow-hidden rounded-sm border-border bg-card shadow-sm transition-[box-shadow,transform] duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] hover:-translate-y-0.5">
 					<div
 						class="pointer-events-none absolute inset-x-4 top-0 h-px bg-linear-to-r from-transparent via-primary/70 to-transparent opacity-0 transition-opacity duration-300 group-hover:opacity-100"
 					></div>
@@ -402,7 +402,7 @@
 			{/each}
 		</div>
 
-		<Card.Root class="group relative overflow-hidden rounded-sm border-border bg-card shadow-sm transition-transform duration-300 hover:-translate-y-0.5">
+		<Card.Root class="group relative overflow-hidden rounded-sm border-border bg-card shadow-sm transition-[box-shadow,transform] duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] hover:-translate-y-0.5">
 			<div
 				class="pointer-events-none absolute inset-x-4 top-0 h-px bg-linear-to-r from-transparent via-primary/70 to-transparent opacity-0 transition-opacity duration-300 group-hover:opacity-100"
 			></div>
@@ -466,7 +466,7 @@
 			</Card.Content>
 		</Card.Root>
 	{:else}
-		<Card.Root class="group relative overflow-hidden rounded-sm border-dashed border-border bg-card/80 shadow-sm transition-transform duration-300 hover:-translate-y-0.5">
+		<Card.Root class="group relative overflow-hidden rounded-sm border-dashed border-border bg-card/80 shadow-sm transition-[box-shadow,transform] duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] hover:-translate-y-0.5">
 			<div
 				class="pointer-events-none absolute inset-x-4 top-0 h-px bg-linear-to-r from-transparent via-primary/70 to-transparent opacity-0 transition-opacity duration-300 group-hover:opacity-100"
 			></div>
