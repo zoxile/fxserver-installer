@@ -388,11 +388,7 @@
 			return;
 		}
 
-		appendToConfigFile(
-			selectServerCfg(),
-			`## Permissions ##\nadd_principal ${identifier} ${group}${comment ? ` #${comment.replace(/^#\s*/, "")}` : ""}`,
-			"Server permissions",
-		);
+		appendToConfigFile(selectServerCfg(), `## Permissions ##\nadd_principal ${identifier} ${group}${comment ? ` #${comment.replace(/^#\s*/, "")}` : ""}`, "Server permissions");
 	}
 
 	function addPermissionsAce() {
@@ -702,7 +698,12 @@
 					<KeyRoundIcon />
 					Validate
 				</Button>
-				<Button variant="outline" onclick={() => (showDbConnectionString = !showDbConnectionString)} disabled={!dbConnectionString} title={showDbConnectionString ? "Hide connection string" : "Show connection string"}>
+				<Button
+					variant="outline"
+					onclick={() => (showDbConnectionString = !showDbConnectionString)}
+					disabled={!dbConnectionString}
+					title={showDbConnectionString ? "Hide connection string" : "Show connection string"}
+				>
 					{#if showDbConnectionString}
 						<EyeOffIcon />
 						Hide
@@ -728,7 +729,9 @@
 				<div class="flex items-start gap-2">
 					<KeyRoundIcon class="mt-0.5 size-4 shrink-0" />
 					<p>
-						RCON is configured in `server.cfg`: `ensure rconlog`{#if result.rconlogLine} on line {result.rconlogLine}{/if} and `rcon_password`{#if result.rconPasswordLine} on line
+						RCON is configured in `server.cfg`: `ensure rconlog`{#if result.rconlogLine}
+							on line {result.rconlogLine}{/if} and `rcon_password`{#if result.rconPasswordLine}
+							on line
 							{result.rconPasswordLine}{/if}. Use that password in Manage Server's Console card.
 					</p>
 				</div>
@@ -738,12 +741,8 @@
 				<div class="flex items-start gap-2">
 					<AlertCircleIcon class="mt-0.5 size-4 shrink-0" />
 					<p>
-						`server.cfg` is missing {[
-							!result.rconlogFound ? "`ensure rconlog`" : "",
-							!result.rconPasswordFound ? "`set rcon_password \"your-secure-password\"`" : "",
-						]
-							.filter(Boolean)
-							.join(" and ")}. Add the missing line{!result.rconlogFound && !result.rconPasswordFound ? "s" : ""} before using command input in Manage Server's Console card.
+						`server.cfg` is missing {[!result.rconlogFound ? "`ensure rconlog`" : "", !result.rconPasswordFound ? '`set rcon_password "your-secure-password"`' : ""].filter(Boolean).join(" and ")}. Add
+						the missing line{!result.rconlogFound && !result.rconPasswordFound ? "s" : ""} before using command input in Manage Server's Console card.
 					</p>
 				</div>
 			</div>
@@ -825,13 +824,20 @@
 						<div class="grid min-h-full grid-cols-[3.5rem_minmax(max-content,1fr)]">
 							<div class="border-r border-border bg-muted/30 py-3 text-right text-muted-foreground select-none" style={`height: ${editorContentHeight};`}>
 								{#each lineNumbers as line}
-									<div style={editorLineStyle} class={`px-2 ${line === rconLineInSelectedFile ? "bg-amber-400/20 text-amber-100" : line === rconlogLineInSelectedFile ? "bg-emerald-400/20 text-emerald-100" : ""}`}>{line}</div>
+									<div
+										style={editorLineStyle}
+										class={`px-2 ${line === rconLineInSelectedFile ? "bg-amber-400/20 text-amber-100" : line === rconlogLineInSelectedFile ? "bg-emerald-400/20 text-emerald-100" : ""}`}
+									>
+										{line}
+									</div>
 								{/each}
 							</div>
 							<div class="relative min-w-max overflow-hidden" style={`height: ${editorContentHeight};`}>
 								<div class="pointer-events-none min-w-max px-3 py-3 whitespace-pre text-foreground" aria-hidden="true">
 									{#each highlightedLines as line, index}
-										<div style={editorLineStyle} class={`min-w-max ${index + 1 === rconLineInSelectedFile ? "bg-amber-400/15" : index + 1 === rconlogLineInSelectedFile ? "bg-emerald-400/15" : ""}`}>{@html line}</div>
+										<div style={editorLineStyle} class={`min-w-max ${index + 1 === rconLineInSelectedFile ? "bg-amber-400/15" : index + 1 === rconlogLineInSelectedFile ? "bg-emerald-400/15" : ""}`}>
+											{@html line}
+										</div>
 									{/each}
 								</div>
 								<textarea
@@ -901,11 +907,16 @@
 						</label>
 						<label class="grid gap-2">
 							<span class="text-xs font-medium text-muted-foreground">Project Name</span>
-							<Input value={popularCfgValues.projectName} onchange={(event) => updatePopularValue("sets sv_projectName", event)} placeholder="Qbox Roleplay" class="rounded-sm font-mono text-xs" />
+							<Input value={popularCfgValues.projectName} onchange={(event) => updatePopularValue("sets sv_projectName", event)} placeholder="FXServer Roleplay" class="rounded-sm font-mono text-xs" />
 						</label>
 						<label class="grid gap-2">
 							<span class="text-xs font-medium text-muted-foreground">Project Description</span>
-							<Input value={popularCfgValues.projectDescription} onchange={(event) => updatePopularValue("sets sv_projectDesc", event)} placeholder="A FiveM roleplay server" class="rounded-sm font-mono text-xs" />
+							<Input
+								value={popularCfgValues.projectDescription}
+								onchange={(event) => updatePopularValue("sets sv_projectDesc", event)}
+								placeholder="A FiveM roleplay server"
+								class="rounded-sm font-mono text-xs"
+							/>
 						</label>
 						<label class="grid gap-2">
 							<span class="text-xs font-medium text-muted-foreground">License Key</span>
@@ -999,7 +1010,7 @@
 							<div class="grid gap-3 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_10rem_auto] md:items-end">
 								<label class="grid gap-2">
 									<span class="text-xs font-medium text-muted-foreground">Resource</span>
-									<Input bind:value={resourceName} placeholder="qbx_core" class="rounded-sm font-mono text-xs" />
+									<Input bind:value={resourceName} placeholder="resource_name" class="rounded-sm font-mono text-xs" />
 								</label>
 								<label class="grid gap-2">
 									<span class="text-xs font-medium text-muted-foreground">Permission</span>
