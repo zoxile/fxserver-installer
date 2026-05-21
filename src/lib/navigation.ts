@@ -5,6 +5,7 @@ import FolderCogIcon from "@lucide/svelte/icons/folder-cog";
 import HashIcon from "@lucide/svelte/icons/hash";
 import HomeIcon from "@lucide/svelte/icons/home";
 import InfoIcon from "@lucide/svelte/icons/info";
+import LogsIcon from "@lucide/svelte/icons/logs";
 import PackagePlusIcon from "@lucide/svelte/icons/package-plus";
 import RocketIcon from "@lucide/svelte/icons/rocket";
 import ScrollTextIcon from "@lucide/svelte/icons/scroll-text";
@@ -113,9 +114,26 @@ export const navigation: NavigationItem[] = [
 				label: "Configure Server",
 				icon: FolderCogIcon,
 			},
+		],
+	},
+	{
+		id: "log-viewers",
+		label: "Logs",
+		icon: LogsIcon,
+		children: [
 			{
 				id: "server-logs",
 				label: "Server Logs",
+				icon: ScrollTextIcon,
+			},
+			{
+				id: "logs",
+				label: "Application Logs",
+				icon: ScrollTextIcon,
+			},
+			{
+				id: "client-logs",
+				label: "Client Logs",
 				icon: ScrollTextIcon,
 			},
 		],
@@ -149,16 +167,6 @@ export const navigation: NavigationItem[] = [
 				id: "json-formatter",
 				label: "JSON Formatter",
 				icon: FileJsonIcon,
-			},
-			{
-				id: "logs",
-				label: "Application Logs",
-				icon: ScrollTextIcon,
-			},
-			{
-				id: "client-logs",
-				label: "Client Logs",
-				icon: ScrollTextIcon,
 			},
 		],
 	},

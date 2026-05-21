@@ -165,12 +165,12 @@
 		/>
 		<HomeBentoCard
 			title="Logs"
-			description="Inspect application logs, txData server logs, and FiveM client logs with filters, level colors, and live refresh."
+			description="Use the dedicated Logs section to inspect application logs, txData server logs, and FiveM client logs with filters, level colors, and live refresh."
 			icon={LogsIcon}
 			size="wide"
 			className="md:[grid-area:logs]"
 			kicker="Diagnostics"
-			highlights={["App logs", "FXServer logs", "Client logs"]}
+			highlights={["Dedicated nav section", "Application logs", "Server logs", "Client logs"]}
 			actions={[
 				{ label: "App Logs", onclick: () => onNavigate("logs") },
 				{ label: "Server Logs", onclick: () => onNavigate("server-logs") },
