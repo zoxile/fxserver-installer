@@ -3,8 +3,16 @@ mod models;
 mod services;
 
 use std::{env, process::Command};
+use tauri::{
+    menu::{Menu, MenuItem, PredefinedMenuItem},
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+    Manager, Runtime, WindowEvent,
+};
 
 pub(crate) const ELEVATED_SCRIPT_ARG: &str = "--fxi-elevated-script";
+const MAIN_WINDOW_LABEL: &str = "main";
+const TRAY_SHOW_ID: &str = "show-main-window";
+const TRAY_QUIT_ID: &str = "quit-app";
 
 pub fn run_elevated_helper_from_args() -> bool {
     let mut args = env::args().skip(1);
@@ -96,8 +104,78 @@ pub fn run() {
                         .build(),
                 )?;
             }
+            setup_system_tray(app)?;
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app_handle, event| {
+            if let tauri::RunEvent::WindowEvent {
+                label,
+                event: WindowEvent::CloseRequested { api, .. },
+                ..
+            } = event
+            {
+                if label == MAIN_WINDOW_LABEL {
+                    api.prevent_close();
+                    hide_main_window(app_handle);
+                }
+            }
+        });
+}
+
+fn setup_system_tray<R: Runtime>(app: &mut tauri::App<R>) -> tauri::Result<()> {
+    let open_item = MenuItem::with_id(
+        app,
+        TRAY_SHOW_ID,
+        "Open FXServer Installer",
+        true,
+        None::<&str>,
+    )?;
+    let separator = PredefinedMenuItem::separator(app)?;
+    let quit_item = MenuItem::with_id(app, TRAY_QUIT_ID, "Quit", true, None::<&str>)?;
+    let menu = Menu::with_items(app, &[&open_item, &separator, &quit_item])?;
+
+    let mut tray = TrayIconBuilder::with_id("fxserver-installer-tray")
+        .menu(&menu)
+        .tooltip("FXServer Installer")
+        .show_menu_on_left_click(false)
+        .on_menu_event(|app, event| match event.id().as_ref() {
+            TRAY_SHOW_ID => show_main_window(app),
+            TRAY_QUIT_ID => app.exit(0),
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| match event {
+            TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            }
+            | TrayIconEvent::DoubleClick {
+                button: MouseButton::Left,
+                ..
+            } => show_main_window(tray.app_handle()),
+            _ => {}
+        });
+
+    if let Some(icon) = app.default_window_icon().cloned() {
+        tray = tray.icon(icon);
+    }
+
+    tray.build(app)?;
+    Ok(())
+}
+
+fn hide_main_window<R: Runtime>(app: &tauri::AppHandle<R>) {
+    if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
+        let _ = window.hide();
+    }
+}
+
+fn show_main_window<R: Runtime>(app: &tauri::AppHandle<R>) {
+    if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+    }
 }
