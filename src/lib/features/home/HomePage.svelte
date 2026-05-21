@@ -198,11 +198,11 @@
 			grid-template-columns: repeat(6, minmax(0, 1fr));
 			grid-template-rows: repeat(5, minmax(118px, auto));
 			grid-template-areas:
-				"db db db artifacts artifacts onboarding"
+				"db db db artifacts artifacts artifacts"
 				"db db db artifacts artifacts artifacts"
 				"db db db server server server"
-				"logs logs logs tools tools tools"
-				"config config config tools tools tools";
+				"onboarding onboarding config config tools tools"
+				"logs logs logs logs tools tools";
 		}
 	}
 </style>

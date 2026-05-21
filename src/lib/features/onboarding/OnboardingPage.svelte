@@ -2,9 +2,17 @@
 	import ArrowRightIcon from "@lucide/svelte/icons/arrow-right";
 	import CheckCircle2Icon from "@lucide/svelte/icons/check-circle-2";
 	import CircleIcon from "@lucide/svelte/icons/circle";
+	import RefreshCwIcon from "@lucide/svelte/icons/refresh-cw";
 	import RocketIcon from "@lucide/svelte/icons/rocket";
+	import { onMount } from "svelte";
 	import * as Card from "$lib/components/ui/card/index.js";
 	import { Button } from "$lib/components/ui/button/index.js";
+	import { databaseSession } from "$lib/core/databaseSession.svelte";
+	import { getInstallPath, loadInstallPath } from "$lib/core/paths.svelte";
+	import { getInstalledWindowsArtifactInfo } from "$lib/modules/artifact";
+	import { getFxserverStatus, readServerConfig } from "$lib/modules/fxserver";
+	import { getMariaDBStatus } from "$lib/modules/mariadb";
+	import { fxserverSettings, loadFxserverSettings } from "$lib/features/fxserver/fxserverSettings.svelte";
 	import type { PageId } from "$lib/navigation";
 
 	type Props = {
@@ -13,7 +21,11 @@
 
 	let { onNavigate }: Props = $props();
 	const completionKey = "fxserver-installer.onboarding.completed";
-	let completed = $state<string[]>([]);
+	let manualCompleted = $state<string[]>([]);
+	let autoCompleted = $state<string[]>([]);
+	let checking = $state(false);
+	let statusMessage = $state("");
+	let completed = $derived([...new Set([...manualCompleted, ...autoCompleted])]);
 
 	const steps: { id: string; title: string; description: string; page: PageId; action: string }[] = [
 		{ id: "mariadb", title: "Prepare MariaDB", description: "Install MariaDB, start the service, and create or validate a database user.", page: "mariadb", action: "Open MariaDB" },
@@ -24,23 +36,81 @@
 		{ id: "start", title: "Start and verify server", description: "Start FXServer, watch performance, send RCON, and inspect logs.", page: "server-manage", action: "Manage Server" },
 	];
 
-	$effect(() => {
+	onMount(() => {
 		try {
-			completed = JSON.parse(localStorage.getItem(completionKey) || "[]");
+			const saved = JSON.parse(localStorage.getItem(completionKey) || "[]");
+			manualCompleted = Array.isArray(saved) ? saved : [];
 		} catch {
-			completed = [];
+			manualCompleted = [];
 		}
+
+		void refreshAutoCompletion();
 	});
 
 	function toggleStep(id: string) {
-		const next = new Set(completed);
+		if (autoCompleted.includes(id)) return;
+
+		const next = new Set(manualCompleted);
 		if (next.has(id)) {
 			next.delete(id);
 		} else {
 			next.add(id);
 		}
-		completed = [...next];
-		localStorage.setItem(completionKey, JSON.stringify(completed));
+		manualCompleted = [...next];
+		localStorage.setItem(completionKey, JSON.stringify(manualCompleted));
+	}
+
+	async function refreshAutoCompletion() {
+		checking = true;
+		statusMessage = "";
+		const next = new Set<string>();
+
+		try {
+			const status = await getMariaDBStatus(false);
+			if (status.installed && status.running) next.add("mariadb");
+		} catch {
+			// Onboarding should stay usable even if a local probe fails.
+		}
+
+		try {
+			loadInstallPath();
+			const installPath = getInstallPath();
+			if (installPath) {
+				const artifact = await getInstalledWindowsArtifactInfo(installPath);
+				if (artifact?.installed) next.add("artifact");
+			}
+		} catch {
+			// Artifact checks can fail outside the desktop runtime.
+		}
+
+		let configReady = false;
+		try {
+			loadFxserverSettings();
+			const txDataPath = fxserverSettings.txDataPath.trim();
+			const profile = fxserverSettings.profile.trim();
+			configReady = Boolean(txDataPath && profile);
+			if (configReady) next.add("profile");
+
+			if (configReady) {
+				const config = await readServerConfig({ txDataPath, profile });
+				const allConfigContent = config.files.map((file) => file.content).join("\n");
+				if (databaseSession.connectionString || /mysql_connection_string/i.test(allConfigContent)) next.add("database-string");
+				if (config.rconPasswordFound && config.rconlogFound) next.add("rcon");
+			}
+		} catch {
+			// Missing txData/profile data only means these steps remain incomplete.
+		}
+
+		try {
+			const status = await getFxserverStatus();
+			if (status.running) next.add("start");
+		} catch {
+			// Server status is optional for checklist rendering.
+		}
+
+		autoCompleted = [...next];
+		statusMessage = next.size ? `${next.size} step${next.size === 1 ? "" : "s"} detected automatically.` : "No completed steps detected yet.";
+		checking = false;
 	}
 </script>
 
@@ -51,7 +121,12 @@
 			<h1 class="mt-2 text-3xl font-semibold tracking-normal text-foreground">First Run Wizard</h1>
 			<p class="mt-2 max-w-2xl text-sm leading-6 text-muted-foreground">A guided checklist for getting a fresh FXServer workspace into a usable state.</p>
 		</div>
-		<div class="rounded-sm border border-border bg-card px-3 py-2 text-xs font-semibold text-muted-foreground">{completed.length} / {steps.length} complete</div>
+		<div class="flex items-center gap-2 rounded-sm border border-border bg-card px-3 py-2 text-xs font-semibold text-muted-foreground">
+			{#if checking}
+				<RefreshCwIcon class="size-3.5 animate-spin" />
+			{/if}
+			{completed.length} / {steps.length} complete
+		</div>
 	</div>
 
 	<Card.Root class="rounded-md border-border bg-card shadow-sm">
@@ -62,15 +137,27 @@
 				</div>
 				<div>
 					<Card.Title>Setup Flow</Card.Title>
-					<Card.Description>Mark steps complete as you go. Each action opens the matching workspace.</Card.Description>
+					<Card.Description>Detected steps are checked automatically. You can still mark the rest complete as you go.</Card.Description>
 				</div>
+				<Button variant="outline" size="sm" onclick={refreshAutoCompletion} disabled={checking} title="Refresh setup detection">
+					<RefreshCwIcon class={checking ? "animate-spin" : undefined} />
+					Refresh
+				</Button>
 			</div>
 		</Card.Header>
 		<Card.Content class="grid gap-3">
+			{#if statusMessage}
+				<p class="rounded-sm border border-border bg-background/70 px-3 py-2 text-xs text-muted-foreground">{statusMessage}</p>
+			{/if}
 			{#each steps as step, index}
 				{@const done = completed.includes(step.id)}
+				{@const autoDone = autoCompleted.includes(step.id)}
 				<div class="grid gap-3 rounded-sm border border-border bg-background/70 p-3 md:grid-cols-[auto_minmax(0,1fr)_auto] md:items-center">
-					<button class="flex size-9 items-center justify-center rounded-sm border border-border bg-card text-muted-foreground" onclick={() => toggleStep(step.id)} title={done ? "Mark incomplete" : "Mark complete"}>
+					<button
+						class={["flex size-9 items-center justify-center rounded-sm border border-border bg-card text-muted-foreground", autoDone ? "cursor-default" : ""]}
+						onclick={() => toggleStep(step.id)}
+						title={autoDone ? "Completed automatically" : done ? "Mark incomplete" : "Mark complete"}
+					>
 						{#if done}
 							<CheckCircle2Icon class="size-5 text-emerald-400" />
 						{:else}
@@ -78,7 +165,12 @@
 						{/if}
 					</button>
 					<div class="min-w-0">
-						<p class="text-sm font-semibold text-foreground">{index + 1}. {step.title}</p>
+						<div class="flex flex-wrap items-center gap-2">
+							<p class="text-sm font-semibold text-foreground">{index + 1}. {step.title}</p>
+							{#if autoDone}
+								<span class="rounded-sm border border-emerald-400/25 bg-emerald-400/10 px-2 py-0.5 text-[10px] font-semibold uppercase text-emerald-200">Auto</span>
+							{/if}
+						</div>
 						<p class="mt-1 text-xs leading-5 text-muted-foreground">{step.description}</p>
 					</div>
 					<Button variant="outline" onclick={() => onNavigate(step.page)} title={step.action}>
