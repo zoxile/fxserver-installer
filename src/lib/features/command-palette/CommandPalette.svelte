@@ -14,6 +14,8 @@
 	let { open, onClose, onNavigate }: Props = $props();
 	let query = $state("");
 	let selectedIndex = $state(0);
+	let listContainer = $state<HTMLElement>();
+	let scrollFrame: number | undefined;
 
 	const visibleCommands = $derived(
 		commandDefinitions
@@ -31,10 +33,40 @@
 		selectedIndex = 0;
 	});
 
+	$effect(() => {
+		if (!open || !listContainer || !visibleCommands.length) return;
+		queueSelectedCommandScroll();
+	});
+
 	function runCommand(page: PageId) {
 		onNavigate(page);
 		onClose();
 		query = "";
+	}
+
+	function selectCommand(index: number) {
+		selectedIndex = index;
+		queueSelectedCommandScroll(index);
+	}
+
+	function queueSelectedCommandScroll(index = selectedIndex) {
+		if (scrollFrame) cancelAnimationFrame(scrollFrame);
+
+		scrollFrame = requestAnimationFrame(() => {
+			const container = listContainer ?? document.querySelector<HTMLElement>("[data-command-list]");
+			const option = container?.querySelector<HTMLElement>(`[data-command-index="${index}"]`);
+			if (!container || !option) return;
+
+			const containerRect = container.getBoundingClientRect();
+			const optionRect = option.getBoundingClientRect();
+			const padding = 8;
+
+			if (optionRect.top < containerRect.top + padding) {
+				container.scrollTop -= containerRect.top + padding - optionRect.top;
+			} else if (optionRect.bottom > containerRect.bottom - padding) {
+				container.scrollTop += optionRect.bottom - containerRect.bottom + padding;
+			}
+		});
 	}
 
 	function handleKeydown(event: KeyboardEvent) {
@@ -47,13 +79,13 @@
 		if (event.key === "ArrowDown") {
 			event.preventDefault();
 			if (!visibleCommands.length) return;
-			selectedIndex = selectedIndex >= visibleCommands.length - 1 ? 0 : selectedIndex + 1;
+			selectCommand(selectedIndex >= visibleCommands.length - 1 ? 0 : selectedIndex + 1);
 			return;
 		}
 		if (event.key === "ArrowUp") {
 			event.preventDefault();
 			if (!visibleCommands.length) return;
-			selectedIndex = selectedIndex <= 0 ? visibleCommands.length - 1 : selectedIndex - 1;
+			selectCommand(selectedIndex <= 0 ? visibleCommands.length - 1 : selectedIndex - 1);
 			return;
 		}
 		if (event.key === "Enter" && visibleCommands[selectedIndex]) {
@@ -81,10 +113,11 @@
 					<Button variant="outline" size="xs" class="absolute top-1/2 right-2 h-6 -translate-y-1/2 rounded-sm px-2 font-mono text-[10px] uppercase text-muted-foreground" onclick={onClose}>ESC</Button>
 				</div>
 			</div>
-			<div class="max-h-[28rem] overflow-auto p-2">
+			<div bind:this={listContainer} data-command-list class="max-h-[28rem] overflow-auto p-2">
 				{#if visibleCommands.length}
 					{#each visibleCommands as command, index}
 						<button
+							data-command-index={index}
 							class={[
 								"flex w-full items-start justify-between gap-4 rounded-sm px-3 py-2 text-left transition-colors",
 								index === selectedIndex ? "bg-primary/15 text-foreground" : "text-muted-foreground hover:bg-muted/60 hover:text-foreground",
