@@ -61,11 +61,16 @@ jobs:
       - name: Check existing tag
         id: existing_tag
         run: |
+          $PSNativeCommandUseErrorActionPreference = $false
           git ls-remote --exit-code --tags origin "refs/tags/${{ steps.release_version.outputs.tag }}" *> $null
-          if ($LASTEXITCODE -eq 0) {
+          $exitCode = $LASTEXITCODE
+
+          if ($exitCode -eq 0) {
             "exists=true" >> $env:GITHUB_OUTPUT
-          } else {
+          } elseif ($exitCode -eq 2) {
             "exists=false" >> $env:GITHUB_OUTPUT
+          } else {
+            throw "Failed to check existing tag. git ls-remote exited with code $exitCode."
           }
 
       - name: Format release body
