@@ -6,5 +6,9 @@ fn main() {
         return;
     }
 
+    if app_lib::run_fxserver_watchdog_from_args() {
+        return;
+    }
+
     app_lib::run();
 }

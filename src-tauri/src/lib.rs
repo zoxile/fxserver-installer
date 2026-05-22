@@ -4,7 +4,14 @@ mod process;
 mod services;
 
 use crate::process::CommandNoWindowExt;
-use std::{env, process::Command};
+use std::{
+    env,
+    path::PathBuf,
+    process::Command,
+    sync::atomic::{AtomicIsize, Ordering},
+    thread,
+    time::Duration,
+};
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
@@ -12,9 +19,14 @@ use tauri::{
 };
 
 pub(crate) const ELEVATED_SCRIPT_ARG: &str = "--fxi-elevated-script";
+pub(crate) const FXSERVER_WATCHDOG_ARG: &str = "--fxi-watch-fxserver";
 const MAIN_WINDOW_LABEL: &str = "main";
 const TRAY_SHOW_ID: &str = "show-main-window";
 const TRAY_QUIT_ID: &str = "quit-app";
+#[cfg(target_os = "windows")]
+static SINGLE_INSTANCE_MUTEX: AtomicIsize = AtomicIsize::new(0);
+#[cfg(target_os = "windows")]
+static SINGLE_INSTANCE_LOCK_FILE: AtomicIsize = AtomicIsize::new(0);
 
 pub fn run_elevated_helper_from_args() -> bool {
     let mut args = env::args().skip(1);
@@ -42,6 +54,27 @@ pub fn run_elevated_helper_from_args() -> bool {
         .status();
 
     std::process::exit(status.ok().and_then(|status| status.code()).unwrap_or(1));
+}
+
+pub fn run_fxserver_watchdog_from_args() -> bool {
+    let mut args = env::args().skip(1);
+    let Some(first) = args.next() else {
+        return false;
+    };
+
+    if first != FXSERVER_WATCHDOG_ARG {
+        return false;
+    }
+
+    let Some(parent_pid) = args.next().and_then(|value| value.parse::<u32>().ok()) else {
+        std::process::exit(2);
+    };
+    let Some(fxserver_pid) = args.next().and_then(|value| value.parse::<u32>().ok()) else {
+        std::process::exit(2);
+    };
+
+    watch_fxserver_parent(parent_pid, fxserver_pid);
+    std::process::exit(0);
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -205,6 +238,11 @@ fn exit_if_secondary_instance() {
         UI::WindowsAndMessaging::{FindWindowW, SetForegroundWindow, ShowWindow, SW_RESTORE},
     };
 
+    if existing_instance_process_id().is_some() {
+        show_existing_instance_window();
+        std::process::exit(0);
+    }
+
     let name = wide_null("Local\\com.fxserver.installer.single-instance");
     let handle = unsafe { CreateMutexW(ptr::null(), 1, name.as_ptr()) };
     if handle.is_null() {
@@ -227,12 +265,214 @@ fn exit_if_secondary_instance() {
 
         std::process::exit(0);
     }
+
+    if !acquire_single_instance_file_lock() {
+        show_existing_instance_window();
+        std::process::exit(0);
+    }
+
+    SINGLE_INSTANCE_MUTEX.store(handle as isize, Ordering::Relaxed);
 }
 
 #[cfg(not(target_os = "windows"))]
 fn exit_if_secondary_instance() {}
 
 #[cfg(target_os = "windows")]
+fn acquire_single_instance_file_lock() -> bool {
+    use std::{fs, ptr};
+    use windows_sys::Win32::{
+        Foundation::{GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE},
+        Storage::FileSystem::{CreateFileW, FILE_ATTRIBUTE_NORMAL, OPEN_ALWAYS},
+    };
+
+    let base_dir = env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(env::temp_dir);
+    let path = base_dir
+        .join("FXServer Installer")
+        .join("single-instance.lock");
+
+    if let Some(parent) = path.parent() {
+        if fs::create_dir_all(parent).is_err() {
+            return true;
+        }
+    }
+
+    let path = wide_null(&path.to_string_lossy());
+    let handle = unsafe {
+        CreateFileW(
+            path.as_ptr(),
+            GENERIC_READ | GENERIC_WRITE,
+            0,
+            ptr::null(),
+            OPEN_ALWAYS,
+            FILE_ATTRIBUTE_NORMAL,
+            ptr::null_mut(),
+        )
+    };
+
+    if handle == INVALID_HANDLE_VALUE {
+        return false;
+    }
+
+    SINGLE_INSTANCE_LOCK_FILE.store(handle as isize, Ordering::Relaxed);
+    true
+}
+
+#[cfg(target_os = "windows")]
 fn wide_null(value: &str) -> Vec<u16> {
     value.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+#[cfg(target_os = "windows")]
+fn show_existing_instance_window() {
+    use std::ptr;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        FindWindowW, SetForegroundWindow, ShowWindow, SW_RESTORE, SW_SHOW,
+    };
+
+    let title = wide_null("FXServer Installer");
+    let hwnd = unsafe { FindWindowW(ptr::null(), title.as_ptr()) };
+    if !hwnd.is_null() {
+        unsafe {
+            ShowWindow(hwnd, SW_SHOW);
+            ShowWindow(hwnd, SW_RESTORE);
+            SetForegroundWindow(hwnd);
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn existing_instance_process_id() -> Option<u32> {
+    use std::mem;
+    use windows_sys::Win32::{
+        Foundation::{CloseHandle, INVALID_HANDLE_VALUE},
+        System::Diagnostics::ToolHelp::{
+            CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+            TH32CS_SNAPPROCESS,
+        },
+    };
+
+    let current_pid = std::process::id();
+    let current_exe = env::current_exe().ok().and_then(normalize_path);
+    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+    if snapshot == INVALID_HANDLE_VALUE {
+        return None;
+    }
+
+    let mut entry: PROCESSENTRY32W = unsafe { mem::zeroed() };
+    entry.dwSize = mem::size_of::<PROCESSENTRY32W>() as u32;
+
+    let mut found = None;
+    let mut has_entry = unsafe { Process32FirstW(snapshot, &mut entry) } != 0;
+    while has_entry {
+        let pid = entry.th32ProcessID;
+        if pid != current_pid {
+            if let Some(path) = process_image_path(pid).and_then(normalize_path) {
+                if Some(path) == current_exe {
+                    found = Some(pid);
+                    break;
+                }
+            }
+        }
+        has_entry = unsafe { Process32NextW(snapshot, &mut entry) } != 0;
+    }
+
+    unsafe {
+        CloseHandle(snapshot);
+    }
+
+    found
+}
+
+#[cfg(target_os = "windows")]
+fn process_image_path(pid: u32) -> Option<PathBuf> {
+    use windows_sys::Win32::{
+        Foundation::CloseHandle,
+        System::Threading::{
+            OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION,
+        },
+    };
+
+    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if process.is_null() {
+        return None;
+    }
+
+    let mut buffer = vec![0_u16; 32768];
+    let mut size = buffer.len() as u32;
+    let ok = unsafe { QueryFullProcessImageNameW(process, 0, buffer.as_mut_ptr(), &mut size) };
+    unsafe {
+        CloseHandle(process);
+    }
+
+    if ok == 0 || size == 0 {
+        return None;
+    }
+
+    buffer.truncate(size as usize);
+    Some(PathBuf::from(String::from_utf16_lossy(&buffer)))
+}
+
+#[cfg(target_os = "windows")]
+fn normalize_path(path: PathBuf) -> Option<PathBuf> {
+    path.canonicalize()
+        .ok()
+        .map(|path| PathBuf::from(path.to_string_lossy().to_ascii_lowercase()))
+}
+
+fn watch_fxserver_parent(parent_pid: u32, fxserver_pid: u32) {
+    #[cfg(target_os = "windows")]
+    {
+        use windows_sys::Win32::{
+            Foundation::{CloseHandle, WAIT_OBJECT_0},
+            System::Threading::{OpenProcess, WaitForSingleObject},
+        };
+
+        const SYNCHRONIZE_ACCESS: u32 = 0x0010_0000;
+
+        let parent = unsafe { OpenProcess(SYNCHRONIZE_ACCESS, 0, parent_pid) };
+        let fxserver = unsafe { OpenProcess(SYNCHRONIZE_ACCESS, 0, fxserver_pid) };
+
+        if fxserver.is_null() {
+            if !parent.is_null() {
+                unsafe {
+                    CloseHandle(parent);
+                }
+            }
+            return;
+        }
+
+        if parent.is_null() {
+            let _ = commands::fxserver::terminate_process_tree(fxserver_pid);
+            unsafe {
+                CloseHandle(fxserver);
+            }
+            return;
+        }
+
+        loop {
+            if unsafe { WaitForSingleObject(fxserver, 0) } == WAIT_OBJECT_0 {
+                break;
+            }
+
+            if unsafe { WaitForSingleObject(parent, 1000) } == WAIT_OBJECT_0 {
+                thread::sleep(Duration::from_secs(2));
+                if unsafe { WaitForSingleObject(fxserver, 0) } != WAIT_OBJECT_0 {
+                    let _ = commands::fxserver::terminate_process_tree(fxserver_pid);
+                }
+                break;
+            }
+        }
+
+        unsafe {
+            CloseHandle(parent);
+            CloseHandle(fxserver);
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (parent_pid, fxserver_pid);
+    }
 }

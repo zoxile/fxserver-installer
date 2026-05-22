@@ -1,9 +1,9 @@
 use std::{
     env, fs,
-    io::{BufRead, BufReader},
+    io::{BufRead, BufReader, Write},
     net::UdpSocket,
     path::{Path, PathBuf},
-    process::{Child, Command, Stdio},
+    process::{Child, ChildStdin, Command, Stdio},
     sync::{Arc, Mutex},
     thread,
     time::{Duration, Instant, SystemTime},
@@ -19,6 +19,7 @@ use crate::{
         TxDataLogResult, TxDataProfilesResult,
     },
     process::CommandNoWindowExt,
+    FXSERVER_WATCHDOG_ARG,
 };
 
 pub struct FxserverManager {
@@ -28,10 +29,11 @@ pub struct FxserverManager {
 
 struct ManagedFxserverProcess {
     child: Child,
+    stdin: Option<ChildStdin>,
     artifact_path: PathBuf,
     started_at: SystemTime,
     resource_sample: Option<ResourceSample>,
-    _cleanup_job: Option<ProcessCleanupJob>,
+    _cleanup_job: Option<Arc<ProcessCleanupJob>>,
 }
 
 #[derive(Default)]
@@ -41,16 +43,20 @@ struct TerminalState {
 }
 
 #[cfg(target_os = "windows")]
-struct ProcessCleanupJob(windows_sys::Win32::Foundation::HANDLE);
+struct ProcessCleanupJob(isize);
 
 #[cfg(target_os = "windows")]
-unsafe impl Send for ProcessCleanupJob {}
+impl ProcessCleanupJob {
+    fn handle(&self) -> windows_sys::Win32::Foundation::HANDLE {
+        self.0 as windows_sys::Win32::Foundation::HANDLE
+    }
+}
 
 #[cfg(target_os = "windows")]
 impl Drop for ProcessCleanupJob {
     fn drop(&mut self) {
         unsafe {
-            windows_sys::Win32::Foundation::CloseHandle(self.0);
+            windows_sys::Win32::Foundation::CloseHandle(self.handle());
         }
     }
 }
@@ -84,17 +90,40 @@ impl FxserverManager {
             return Ok(());
         };
 
-        if process
-            .child
-            .try_wait()
-            .map_err(|error| format!("Failed to inspect FXServer: {error}"))?
-            .is_none()
-        {
-            process
-                .child
-                .kill()
-                .map_err(|error| format!("Failed to stop FXServer: {error}"))?;
-            let _ = process.child.wait();
+        if process_is_running(&mut process)? {
+            let pid = process.child.id();
+            append_terminal_line(&self.terminal, "system", "Stopping FXServer gracefully...")?;
+
+            match request_graceful_fxserver_stop(&mut process) {
+                Ok(true) => {
+                    if wait_for_child_exit(&mut process.child, Duration::from_secs(15)) {
+                        append_terminal_line(&self.terminal, "system", "FXServer stopped.")?;
+                        return Ok(());
+                    }
+
+                    append_terminal_line(
+                        &self.terminal,
+                        "system",
+                        "FXServer did not exit after the graceful stop request; forcing shutdown.",
+                    )?;
+                }
+                Ok(false) => {
+                    append_terminal_line(
+                        &self.terminal,
+                        "system",
+                        "FXServer console input was unavailable; forcing shutdown.",
+                    )?;
+                }
+                Err(error) => {
+                    append_terminal_line(
+                        &self.terminal,
+                        "system",
+                        format!("Graceful FXServer stop failed: {error}. Forcing shutdown."),
+                    )?;
+                }
+            }
+
+            force_stop_fxserver_process(&mut process.child, pid)?;
         }
 
         append_terminal_line(&self.terminal, "system", "FXServer stopped.")?;
@@ -140,7 +169,7 @@ pub fn start_fxserver(
     command.no_window();
     command
         .current_dir(&artifact_path)
-        .stdin(Stdio::null())
+        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
@@ -160,11 +189,13 @@ pub fn start_fxserver(
     let pid = child.id();
     let started_at = SystemTime::now();
     let started_at_label = system_time_to_label(started_at);
+    let stdin = child.stdin.take();
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
     let cleanup_job = create_process_cleanup_job(&child);
     let cleanup_warning = cleanup_job.as_ref().err().cloned();
     let cleanup_job = cleanup_job.ok();
+    let watchdog_warning = spawn_fxserver_watchdog(pid).err();
 
     clear_terminal(&manager.terminal)?;
     append_terminal_line(
@@ -188,8 +219,17 @@ pub fn start_fxserver(
         append_terminal_line(&manager.terminal, "system", warning)?;
     }
 
+    if let Some(warning) = watchdog_warning {
+        append_terminal_line(&manager.terminal, "system", warning)?;
+    }
+
+    if let Some(job) = cleanup_job.clone() {
+        attach_process_tree_to_cleanup_job_later(job, pid);
+    }
+
     *guard = Some(ManagedFxserverProcess {
         child,
+        stdin,
         artifact_path: artifact_path.clone(),
         started_at,
         resource_sample: None,
@@ -527,14 +567,14 @@ fn process_is_running(process: &mut ManagedFxserverProcess) -> Result<bool, Stri
 }
 
 #[cfg(target_os = "windows")]
-fn create_process_cleanup_job(child: &Child) -> Result<ProcessCleanupJob, String> {
+fn create_process_cleanup_job(child: &Child) -> Result<Arc<ProcessCleanupJob>, String> {
     use std::{mem, os::windows::io::AsRawHandle, ptr};
     use windows_sys::Win32::{
         Foundation::CloseHandle,
         System::JobObjects::{
-            AssignProcessToJobObject, CreateJobObjectW, SetInformationJobObject,
-            JobObjectExtendedLimitInformation, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-            JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+            AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+            SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
         },
     };
 
@@ -563,7 +603,9 @@ fn create_process_cleanup_job(child: &Child) -> Result<ProcessCleanupJob, String
         unsafe {
             CloseHandle(job);
         }
-        return Err(format!("FXServer cleanup job could not be configured: {error}"));
+        return Err(format!(
+            "FXServer cleanup job could not be configured: {error}"
+        ));
     }
 
     let assigned = unsafe { AssignProcessToJobObject(job, child.as_raw_handle() as _) };
@@ -577,12 +619,190 @@ fn create_process_cleanup_job(child: &Child) -> Result<ProcessCleanupJob, String
         ));
     }
 
-    Ok(ProcessCleanupJob(job))
+    Ok(Arc::new(ProcessCleanupJob(job as isize)))
 }
 
 #[cfg(not(target_os = "windows"))]
-fn create_process_cleanup_job(_: &Child) -> Result<ProcessCleanupJob, String> {
-    Ok(ProcessCleanupJob)
+fn create_process_cleanup_job(_: &Child) -> Result<Arc<ProcessCleanupJob>, String> {
+    Ok(Arc::new(ProcessCleanupJob))
+}
+
+#[cfg(target_os = "windows")]
+fn spawn_fxserver_watchdog(fxserver_pid: u32) -> Result<(), String> {
+    let current_exe = env::current_exe()
+        .map_err(|error| format!("FXServer watchdog could not find the app executable: {error}"))?;
+    Command::new(current_exe)
+        .no_window()
+        .arg(FXSERVER_WATCHDOG_ARG)
+        .arg(std::process::id().to_string())
+        .arg(fxserver_pid.to_string())
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("FXServer watchdog could not start: {error}"))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn spawn_fxserver_watchdog(_: u32) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn attach_process_tree_to_cleanup_job_later(job: Arc<ProcessCleanupJob>, root_pid: u32) {
+    thread::spawn(move || {
+        for _ in 0..10 {
+            thread::sleep(Duration::from_millis(500));
+            let _ = attach_process_tree_to_cleanup_job(&job, root_pid);
+        }
+    });
+}
+
+#[cfg(not(target_os = "windows"))]
+fn attach_process_tree_to_cleanup_job_later(_: Arc<ProcessCleanupJob>, _: u32) {}
+
+#[cfg(target_os = "windows")]
+fn attach_process_tree_to_cleanup_job(
+    job: &ProcessCleanupJob,
+    root_pid: u32,
+) -> Result<(), String> {
+    use windows_sys::Win32::System::{
+        JobObjects::AssignProcessToJobObject,
+        Threading::{OpenProcess, PROCESS_SET_QUOTA, PROCESS_TERMINATE},
+    };
+
+    for pid in process_tree_ids(root_pid)? {
+        let process = unsafe { OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, 0, pid) };
+        if process.is_null() {
+            continue;
+        }
+
+        unsafe {
+            AssignProcessToJobObject(job.handle(), process);
+            windows_sys::Win32::Foundation::CloseHandle(process);
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn process_tree_ids(root_pid: u32) -> Result<Vec<u32>, String> {
+    use std::mem;
+    use windows_sys::Win32::{
+        Foundation::{CloseHandle, INVALID_HANDLE_VALUE},
+        System::Diagnostics::ToolHelp::{
+            CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+            TH32CS_SNAPPROCESS,
+        },
+    };
+
+    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+    if snapshot == INVALID_HANDLE_VALUE {
+        return Err(format!(
+            "Failed to inspect Windows process tree: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+
+    let mut entries = Vec::new();
+    let mut entry: PROCESSENTRY32W = unsafe { mem::zeroed() };
+    entry.dwSize = mem::size_of::<PROCESSENTRY32W>() as u32;
+
+    let mut has_entry = unsafe { Process32FirstW(snapshot, &mut entry) } != 0;
+    while has_entry {
+        entries.push((entry.th32ProcessID, entry.th32ParentProcessID));
+        has_entry = unsafe { Process32NextW(snapshot, &mut entry) } != 0;
+    }
+
+    unsafe {
+        CloseHandle(snapshot);
+    }
+
+    let mut all = vec![root_pid];
+    let mut frontier = vec![root_pid];
+
+    while !frontier.is_empty() {
+        let mut next = Vec::new();
+        for (pid, parent_pid) in &entries {
+            if frontier.contains(parent_pid) && !all.contains(pid) {
+                all.push(*pid);
+                next.push(*pid);
+            }
+        }
+        frontier = next;
+    }
+
+    Ok(all)
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn terminate_process_tree(root_pid: u32) -> Result<(), String> {
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, TerminateProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE,
+    };
+
+    let mut ids = process_tree_ids(root_pid)?;
+    ids.reverse();
+
+    for pid in ids {
+        let process = unsafe {
+            OpenProcess(
+                PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION,
+                0,
+                pid,
+            )
+        };
+        if process.is_null() {
+            continue;
+        }
+
+        unsafe {
+            TerminateProcess(process, 1);
+            windows_sys::Win32::Foundation::CloseHandle(process);
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(not(target_os = "windows"))]
+pub(crate) fn terminate_process_tree(_: u32) -> Result<(), String> {
+    Ok(())
+}
+
+fn request_graceful_fxserver_stop(process: &mut ManagedFxserverProcess) -> Result<bool, String> {
+    let Some(mut stdin) = process.stdin.take() else {
+        return Ok(false);
+    };
+
+    stdin
+        .write_all(b"quit\n")
+        .and_then(|_| stdin.flush())
+        .map_err(|error| format!("Failed to send quit to FXServer console: {error}"))?;
+
+    Ok(true)
+}
+
+fn force_stop_fxserver_process(child: &mut Child, pid: u32) -> Result<(), String> {
+    if let Err(error) = terminate_process_tree(pid) {
+        child
+            .kill()
+            .map_err(|kill_error| format!("Failed to force stop FXServer after process tree cleanup failed ({error}): {kill_error}"))?;
+    }
+
+    wait_for_child_exit(child, Duration::from_secs(8));
+    Ok(())
+}
+
+fn wait_for_child_exit(child: &mut Child, timeout: Duration) -> bool {
+    let started = Instant::now();
+    while started.elapsed() < timeout {
+        match child.try_wait() {
+            Ok(Some(_)) => return true,
+            Ok(None) => thread::sleep(Duration::from_millis(100)),
+            Err(_) => return true,
+        }
+    }
+    false
 }
 
 fn resolve_profile_data_path(
