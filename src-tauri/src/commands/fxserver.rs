@@ -31,6 +31,7 @@ struct ManagedFxserverProcess {
     artifact_path: PathBuf,
     started_at: SystemTime,
     resource_sample: Option<ResourceSample>,
+    _cleanup_job: Option<ProcessCleanupJob>,
 }
 
 #[derive(Default)]
@@ -38,6 +39,24 @@ struct TerminalState {
     entries: Vec<FxserverTerminalEntry>,
     next_id: u64,
 }
+
+#[cfg(target_os = "windows")]
+struct ProcessCleanupJob(windows_sys::Win32::Foundation::HANDLE);
+
+#[cfg(target_os = "windows")]
+unsafe impl Send for ProcessCleanupJob {}
+
+#[cfg(target_os = "windows")]
+impl Drop for ProcessCleanupJob {
+    fn drop(&mut self) {
+        unsafe {
+            windows_sys::Win32::Foundation::CloseHandle(self.0);
+        }
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+struct ProcessCleanupJob;
 
 #[derive(Clone, Copy)]
 struct ResourceSample {
@@ -51,6 +70,36 @@ impl Default for FxserverManager {
             process: Mutex::new(None),
             terminal: Arc::new(Mutex::new(TerminalState::default())),
         }
+    }
+}
+
+impl FxserverManager {
+    pub fn stop_running_process(&self) -> Result<(), String> {
+        let mut guard = self
+            .process
+            .lock()
+            .map_err(|_| "FXServer process state is unavailable.".to_string())?;
+
+        let Some(mut process) = guard.take() else {
+            return Ok(());
+        };
+
+        if process
+            .child
+            .try_wait()
+            .map_err(|error| format!("Failed to inspect FXServer: {error}"))?
+            .is_none()
+        {
+            process
+                .child
+                .kill()
+                .map_err(|error| format!("Failed to stop FXServer: {error}"))?;
+            let _ = process.child.wait();
+        }
+
+        append_terminal_line(&self.terminal, "system", "FXServer stopped.")?;
+
+        Ok(())
     }
 }
 
@@ -113,6 +162,9 @@ pub fn start_fxserver(
     let started_at_label = system_time_to_label(started_at);
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
+    let cleanup_job = create_process_cleanup_job(&child);
+    let cleanup_warning = cleanup_job.as_ref().err().cloned();
+    let cleanup_job = cleanup_job.ok();
 
     clear_terminal(&manager.terminal)?;
     append_terminal_line(
@@ -132,11 +184,16 @@ pub fn start_fxserver(
         spawn_terminal_reader(manager.terminal.clone(), "stderr", stderr);
     }
 
+    if let Some(warning) = cleanup_warning {
+        append_terminal_line(&manager.terminal, "system", warning)?;
+    }
+
     *guard = Some(ManagedFxserverProcess {
         child,
         artifact_path: artifact_path.clone(),
         started_at,
         resource_sample: None,
+        _cleanup_job: cleanup_job,
     });
 
     Ok(FxserverLaunchResult {
@@ -148,31 +205,7 @@ pub fn start_fxserver(
 
 #[tauri::command]
 pub fn stop_fxserver(manager: tauri::State<'_, FxserverManager>) -> Result<(), String> {
-    let mut guard = manager
-        .process
-        .lock()
-        .map_err(|_| "FXServer process state is unavailable.".to_string())?;
-
-    let Some(mut process) = guard.take() else {
-        return Ok(());
-    };
-
-    if process
-        .child
-        .try_wait()
-        .map_err(|error| format!("Failed to inspect FXServer: {error}"))?
-        .is_none()
-    {
-        process
-            .child
-            .kill()
-            .map_err(|error| format!("Failed to stop FXServer: {error}"))?;
-        let _ = process.child.wait();
-    }
-
-    append_terminal_line(&manager.terminal, "system", "FXServer stopped.")?;
-
-    Ok(())
+    manager.stop_running_process()
 }
 
 #[tauri::command]
@@ -491,6 +524,65 @@ fn process_is_running(process: &mut ManagedFxserverProcess) -> Result<bool, Stri
         .try_wait()
         .map_err(|error| format!("Failed to inspect FXServer: {error}"))?
         .is_none())
+}
+
+#[cfg(target_os = "windows")]
+fn create_process_cleanup_job(child: &Child) -> Result<ProcessCleanupJob, String> {
+    use std::{mem, os::windows::io::AsRawHandle, ptr};
+    use windows_sys::Win32::{
+        Foundation::CloseHandle,
+        System::JobObjects::{
+            AssignProcessToJobObject, CreateJobObjectW, SetInformationJobObject,
+            JobObjectExtendedLimitInformation, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        },
+    };
+
+    let job = unsafe { CreateJobObjectW(ptr::null(), ptr::null()) };
+    if job.is_null() {
+        return Err(format!(
+            "FXServer cleanup job could not be created: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+
+    let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { mem::zeroed() };
+    limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+
+    let configured = unsafe {
+        SetInformationJobObject(
+            job,
+            JobObjectExtendedLimitInformation,
+            &mut limits as *mut _ as *mut _,
+            mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+        )
+    };
+
+    if configured == 0 {
+        let error = std::io::Error::last_os_error();
+        unsafe {
+            CloseHandle(job);
+        }
+        return Err(format!("FXServer cleanup job could not be configured: {error}"));
+    }
+
+    let assigned = unsafe { AssignProcessToJobObject(job, child.as_raw_handle() as _) };
+    if assigned == 0 {
+        let error = std::io::Error::last_os_error();
+        unsafe {
+            CloseHandle(job);
+        }
+        return Err(format!(
+            "FXServer cleanup job could not attach to the server process: {error}"
+        ));
+    }
+
+    Ok(ProcessCleanupJob(job))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn create_process_cleanup_job(_: &Child) -> Result<ProcessCleanupJob, String> {
+    Ok(ProcessCleanupJob)
 }
 
 fn resolve_profile_data_path(

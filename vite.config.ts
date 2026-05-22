@@ -11,6 +11,7 @@ export default defineConfig({
 		exclude: ["@lucide/svelte"],
 		include: [
 			"@tauri-apps/api/core",
+			"@tauri-apps/api/app",
 			"@tauri-apps/api/path",
 			"@tauri-apps/api/window",
 			"@tauri-apps/plugin-dialog",

@@ -2,6 +2,7 @@
 	import ArchiveIcon from "@lucide/svelte/icons/archive";
 	import CheckCircle2Icon from "@lucide/svelte/icons/check-circle-2";
 	import DatabaseIcon from "@lucide/svelte/icons/database";
+	import DownloadIcon from "@lucide/svelte/icons/download";
 	import ExternalLinkIcon from "@lucide/svelte/icons/external-link";
 	import GaugeIcon from "@lucide/svelte/icons/gauge";
 	import GitBranchIcon from "@lucide/svelte/icons/git-branch";
@@ -11,9 +12,11 @@
 	import ServerCogIcon from "@lucide/svelte/icons/server-cog";
 	import TerminalIcon from "@lucide/svelte/icons/terminal";
 	import WrenchIcon from "@lucide/svelte/icons/wrench";
+	import { onMount } from "svelte";
 	import * as Card from "$lib/components/ui/card/index.js";
 	import { Button } from "$lib/components/ui/button/index.js";
 	import { openExternalUrl } from "$lib/core/openExternal";
+	import { compareVersions, fetchLatestAppRelease, getCurrentAppVersion, type AppReleaseInfo } from "$lib/modules/appRelease";
 	import HomeArtifactStatusCard from "./HomeArtifactStatusCard.svelte";
 	import HomeBentoCard from "./HomeBentoCard.svelte";
 	import type { PageId } from "$lib/navigation";
@@ -23,15 +26,47 @@
 	};
 
 	let { onNavigate }: Props = $props();
-	const currentVersion = "0.1.0";
-	const latestVersion = "0.1.0";
-	const isUpToDate = currentVersion === latestVersion;
+	let currentVersion = $state("Checking...");
+	let latestRelease = $state<AppReleaseInfo | null>(null);
+	let releaseError = $state("");
+	let checkingRelease = $state(false);
 
-	const projectDetails = [
+	const latestVersion = $derived(latestRelease?.version ?? "");
+	const updateAvailable = $derived(Boolean(latestRelease && compareVersions(latestRelease.version, currentVersion) > 0));
+	const projectStatus = $derived(
+		releaseError ? "Check failed" : checkingRelease ? "Checking..." : !latestRelease ? "Unknown" : updateAvailable ? `Update ${latestVersion} available` : "Up to date",
+	);
+	const projectStatusTone = $derived(releaseError ? "text-red-300" : checkingRelease ? "text-muted-foreground" : updateAvailable ? "text-amber-400" : "text-emerald-400");
+	const projectDetails = $derived([
 		{ label: "App", value: "FXServer Installer", icon: PackageIcon },
 		{ label: "Version", value: currentVersion, icon: GaugeIcon },
 		{ label: "Git", value: "zoxile/fxserver-installer", icon: GitBranchIcon },
-	];
+	]);
+
+	onMount(() => {
+		void refreshProjectVersion();
+	});
+
+	async function refreshProjectVersion() {
+		checkingRelease = true;
+		releaseError = "";
+
+		try {
+			const [version, release] = await Promise.all([getCurrentAppVersion(), fetchLatestAppRelease()]);
+			currentVersion = version;
+			latestRelease = release;
+		} catch (error) {
+			currentVersion = await getCurrentAppVersion().catch(() => "Unknown");
+			releaseError = error instanceof Error ? error.message : String(error);
+		} finally {
+			checkingRelease = false;
+		}
+	}
+
+	function openLatestInstaller() {
+		const url = latestRelease?.installerUrl || latestRelease?.htmlUrl || "https://github.com/zoxile/fxserver-installer/releases/latest";
+		void openExternalUrl(url);
+	}
 </script>
 
 <section class="relative space-y-6 overflow-hidden">
@@ -62,23 +97,30 @@
 				</div>
 				<div class="flex items-center justify-between gap-3 rounded-sm border border-border bg-background/70 px-3 py-2">
 					<div class="flex items-center gap-2 text-xs text-muted-foreground">
-						<CheckCircle2Icon class={["size-3.5", isUpToDate ? "text-emerald-400" : "text-amber-400"]} />
+						<CheckCircle2Icon class={["size-3.5", projectStatusTone]} />
 						Update status
 					</div>
-					<p class={["truncate text-xs font-medium", isUpToDate ? "text-emerald-400" : "text-amber-400"]}>
-						{isUpToDate ? "Up to date" : `Update ${latestVersion} available`}
-					</p>
+					<p class={["truncate text-xs font-medium", projectStatusTone]}>{projectStatus}</p>
 				</div>
-				<Button
-					variant="outline"
-					size="sm"
-					class="mt-auto w-fit rounded-sm"
-					onclick={() => openExternalUrl("https://github.com/zoxile/fxserver-installer")}
-					title="Open GitHub repository"
-				>
-					GitHub
-					<ExternalLinkIcon class="size-3.5" />
-				</Button>
+				{#if releaseError}
+					<p class="rounded-sm border border-red-400/20 bg-red-400/10 px-3 py-2 text-xs text-red-100">{releaseError}</p>
+				{/if}
+				<div class="mt-auto flex flex-wrap gap-2">
+					<Button variant={updateAvailable ? "default" : "outline"} size="sm" class="rounded-sm" onclick={openLatestInstaller} title="Open the latest installer download">
+						<DownloadIcon class="size-3.5" />
+						{updateAvailable ? "Update" : "Installer"}
+					</Button>
+					<Button
+						variant="outline"
+						size="sm"
+						class="rounded-sm"
+						onclick={() => openExternalUrl("https://github.com/zoxile/fxserver-installer")}
+						title="Open GitHub repository"
+					>
+						GitHub
+						<ExternalLinkIcon class="size-3.5" />
+					</Button>
+				</div>
 			</Card.Content>
 		</Card.Root>
 

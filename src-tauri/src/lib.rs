@@ -46,6 +46,8 @@ pub fn run_elevated_helper_from_args() -> bool {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    exit_if_secondary_instance();
+
     tauri::Builder::default()
         .manage(commands::fxserver::FxserverManager::default())
         .plugin(tauri_plugin_dialog::init())
@@ -112,18 +114,19 @@ pub fn run() {
         })
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
-        .run(|app_handle, event| {
-            if let tauri::RunEvent::WindowEvent {
+        .run(|app_handle, event| match event {
+            tauri::RunEvent::WindowEvent {
                 label,
                 event: WindowEvent::CloseRequested { api, .. },
                 ..
-            } = event
-            {
+            } => {
                 if label == MAIN_WINDOW_LABEL {
                     api.prevent_close();
                     hide_main_window(app_handle);
                 }
             }
+            tauri::RunEvent::ExitRequested { .. } => stop_managed_fxserver(app_handle),
+            _ => {}
         });
 }
 
@@ -145,7 +148,10 @@ fn setup_system_tray<R: Runtime>(app: &mut tauri::App<R>) -> tauri::Result<()> {
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id().as_ref() {
             TRAY_SHOW_ID => show_main_window(app),
-            TRAY_QUIT_ID => app.exit(0),
+            TRAY_QUIT_ID => {
+                stop_managed_fxserver(app);
+                app.exit(0);
+            }
             _ => {}
         })
         .on_tray_icon_event(|tray, event| match event {
@@ -181,4 +187,52 @@ fn show_main_window<R: Runtime>(app: &tauri::AppHandle<R>) {
         let _ = window.unminimize();
         let _ = window.set_focus();
     }
+}
+
+fn stop_managed_fxserver<R: Runtime>(app: &tauri::AppHandle<R>) {
+    let manager = app.state::<commands::fxserver::FxserverManager>();
+    if let Err(error) = manager.stop_running_process() {
+        eprintln!("Failed to stop FXServer during app shutdown: {error}");
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn exit_if_secondary_instance() {
+    use std::ptr;
+    use windows_sys::Win32::{
+        Foundation::{CloseHandle, GetLastError, ERROR_ALREADY_EXISTS},
+        System::Threading::CreateMutexW,
+        UI::WindowsAndMessaging::{FindWindowW, SetForegroundWindow, ShowWindow, SW_RESTORE},
+    };
+
+    let name = wide_null("Local\\com.fxserver.installer.single-instance");
+    let handle = unsafe { CreateMutexW(ptr::null(), 1, name.as_ptr()) };
+    if handle.is_null() {
+        return;
+    }
+
+    if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
+        unsafe {
+            CloseHandle(handle);
+        }
+
+        let title = wide_null("FXServer Installer");
+        let hwnd = unsafe { FindWindowW(ptr::null(), title.as_ptr()) };
+        if !hwnd.is_null() {
+            unsafe {
+                ShowWindow(hwnd, SW_RESTORE);
+                SetForegroundWindow(hwnd);
+            }
+        }
+
+        std::process::exit(0);
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn exit_if_secondary_instance() {}
+
+#[cfg(target_os = "windows")]
+fn wide_null(value: &str) -> Vec<u16> {
+    value.encode_utf16().chain(std::iter::once(0)).collect()
 }
