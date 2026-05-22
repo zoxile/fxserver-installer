@@ -1,56 +1,186 @@
-# FXServer Installer (Svelte + TS + Tauri + Vite + Redbull)
-> A simple tool to install and set up an FXServer without the usual hassle.
+# FXServer Installer
 
-## Tech Stack
-- Svelte (TypeScript) — UI
-- Tauri — backend/runtime
-- Tailwind CSS v4 + shadcn-svelte — styling
-- Vite — dev/build tooling
-- npm — package management
+FXServer Installer is a Windows desktop app for setting up, configuring, and maintaining FiveM FXServer workspaces. It combines MariaDB setup, FXServer artifact management, config editing, RCON tools, logs, resource updates, and utility panels in one Tauri app.
 
-## Why?
+The app is built with Svelte, TypeScript, Tauri, Tailwind CSS v4, shadcn-svelte, Vite, Rust, and npm.
 
-I've seen a lot of people struggle with installing servers. For some, it’s simple, but for new server owners, it can feel like uncharted territory.
+Quick note: The main purpose of this app was for me to learn how to build with Tauri and hopefully create something useful along the way. I have really enjoyed making this project, and I hope it helps you too.
 
-That’s where this project comes in.
+> [!WARNING]
+> FXServer Installer is a new project in active development. Issues, bugs, UI changes, and breaking changes may happen between releases, so back up important server data before using app features that install, update, uninstall, or rewrite files.
 
-This app streamlines the process and makes everything a lot faster. Even if you already know how to set things up, it saves you from doing the same repetitive steps every time you’re on a new machine.
+## Documentation
 
-## What does it do?
+- [User Guide](docs/user-guide.md): Install, build, update, and operate the app without relying on the installer workflow.
+- [JOOAT Resolver Pack](docs/jooat-resolver-pack.md): Build and host the optional offline JOOAT hash resolver database.
+- [Contributing Guide](CONTRIBUTING.md): How to report issues, open pull requests, and write conventional commits.
 
-Glad you asked:
+## Features
 
-1. Installs [MariaDB](https://mariadb.org/)
-2. Sets up MariaDB (credentials and basic configuration)
-3. Downloads a healthy artifact (from [JG Scripts Artifacts](https://artifacts.jgscripts.com/). Big thanks to [JG](https://github.com/jgscripts)!)
-4. Guides you through what’s happening during installation
-5. Extracts the downloaded `.zip`
-6. Runs the FXServer executable to kick off setup
-7. Provides basic MariaDB management tools + helpful tips
-8. Includes extra utilities you might need
+### Home And Onboarding
 
-## Why did I make this?
+- Dashboard cards for the main app areas.
+- First Run Wizard that checks setup status and auto-completes steps when MariaDB, artifacts, and FXServer data are already available.
+- Command palette shortcut hint in the sidebar.
 
-Honestly, I didn’t overthink it too much.
+### Manage MariaDB
 
-I wanted to build something with Svelte + Tauri and learn what I could do with it. This just felt like a useful (and practical) idea to explore.
+- Detect MariaDB installation and service status.
+- Install, update, and uninstall MariaDB while preserving database data.
+- Show installed and recommended versions.
+- Show installer progress and important messages in the UI.
+- Log MariaDB operations to Application Logs.
+- Manage users, hosts, privileges, and database access.
+- Warn users to back up databases before install, update, or uninstall actions.
 
-My main goal isn’t to get as many users as possible. I just want to learn how to build applications using Tauri and properly use GitHub without turning my commit history into chaos (still working on that).
+### Queries & Files
 
-If it ends up helping people, great. If not, I still learned a lot building it.
+- Shared MariaDB connection card with the Manage MariaDB panel.
+- Query console with helper snippets for common SELECT, filter, update, delete, and schema tasks.
+- SQL file runner with global or database-scoped execution.
+- Backup tools for full, database, and table-level exports.
 
-## What's planned?
+### Artifacts
 
-- Linux support
-- Config editor (drop in or edit your config files directly)
-- Profiler viewer (load `.json` files to analyze performance)
+- Install FXServer artifacts from healthy/recommended artifact metadata provided by [JG Scripts Artifacts DB](https://artifacts.jgscripts.com/).
+- Inspect artifact information and known issues.
+- Track configured artifact paths inside the app.
 
-No strict promises here, it's just ideas I’d like to explore next (if all goes well).
+### Configure Server
 
-## Legal
+- Read txAdmin profile data from `txData/{profile}/config.json`.
+- Resolve the server `dataPath` from the profile configuration.
+- Load and edit common `.cfg` files such as `server.cfg`, `permissions.cfg`, `voice.cfg`, `ox.cfg`, and `misc.cfg`.
+- Colored `.cfg` editor with line numbers, save, undo, and keyboard shortcuts.
+- Helpers for common `server.cfg` values, RCON setup, database connection strings, and permissions.
+- Highlight `rcon_password` and warn when `ensure rconlog` is missing.
 
-This project is licensed under the MIT License.
+### Manage Server
 
-You are free to use, modify, distribute, and sell this software, provided that the original copyright notice and license are included in copies or substantial portions of the software.
+- Start, stop, and check FXServer status.
+- Optimized console output for busy servers.
+- Send RCON commands with a saved RCON password protected by Windows data protection.
+- CPU and RAM performance charts with selectable time ranges.
+- Uptime, started time, thread count, and handle count in the Performance card.
 
-See the [LICENSE](./LICENSE) file for details.
+### Resource Manager
+
+- Scan resources from the configured server resources folder.
+- Read `fxmanifest.lua` metadata, local versions, and repository URLs.
+- Check GitHub repositories for available updates.
+- Update or reinstall resources that expose a repository in their manifest.
+- Run `start`, `stop`, `restart`, and `ensure` through RCON.
+- Exclude CitizenFX and `[cfx-default]` resources from update checks.
+- Avoid runtime state badges because FXServer does not expose a reliable resource-state command through this workflow.
+
+### Logs
+
+- Application Logs for app-side operations.
+- Server Logs for FXServer output.
+- Client Logs for FiveM client logs from the local FiveM log folder.
+- Real-time log following with controls for each log type.
+
+### Tools & Utils
+
+- Command Palette with configurable shortcuts.
+- Configurator for structured Lua/config editing.
+- Profiler viewer for FXServer profiler exports.
+- JOOAT hasher and optional offline resolver database.
+- JSON formatter and repair tool.
+
+### Desktop App Behavior
+
+- Current-user Windows installer.
+- Close-to-tray behavior for background use.
+- Custom titlebar and disabled browser context menu in production builds.
+- Hidden child-process consoles for background PowerShell/system calls where possible.
+
+## Quick Start
+
+Download the latest Windows installer from GitHub Releases, run it, and open FXServer Installer from the Start Menu.
+
+For source builds:
+
+```bash
+npm ci
+npm run check
+npm run tauri build
+```
+
+The NSIS installer is written under:
+
+```text
+src-tauri/target/release/bundle/nsis/
+```
+
+For the full setup and build workflow, read the [User Guide](docs/user-guide.md).
+
+## Development
+
+Start the development app:
+
+```bash
+npm run tauri dev
+```
+
+Run checks:
+
+```bash
+npm run check
+cargo check --manifest-path src-tauri/Cargo.toml
+```
+
+Bump both the frontend package version and Tauri version:
+
+```bash
+npm run version:bump -- patch
+```
+
+You can also pass `minor`, `major`, or an explicit version such as `0.2.0`.
+
+## Releases
+
+Pushing to `main` runs the Windows release workflow. The workflow checks the app, builds the Tauri NSIS installer, creates a tag from the Tauri version, and publishes a GitHub release unless that tag already exists.
+
+Before publishing a new release:
+
+1. Make the code changes.
+2. Run checks locally.
+3. Bump the version.
+4. Commit with a conventional commit message.
+5. Push to `main`.
+
+## Reporting Issues
+
+When opening an issue, include:
+
+- App version.
+- Windows version.
+- What you were trying to do.
+- Exact error text.
+- Steps to reproduce.
+- Screenshots or short screen recordings when UI behavior is involved.
+- Relevant Application Logs, Server Logs, MariaDB installer logs, or FXServer console output.
+
+Do not post secrets such as `rcon_password`, database passwords, CFX keys, or private server IPs. Redact `server.cfg`, `.env`, and log snippets before sharing them.
+
+## Contributing
+
+Contributions are welcome. Read the [Contributing Guide](CONTRIBUTING.md) before opening issues or pull requests. It covers duplicate checks, local setup, verification, pull request expectations, and conventional commit formatting.
+
+Do not commit `node_modules`, build output, generated installers, local logs, secrets, or machine-specific configuration.
+
+## Acknowledgements
+
+- Artifact metadata and artifact install data are powered by [JG Scripts Artifacts DB](https://artifacts.jgscripts.com/). Big thanks to JG Scripts for making artifact data easier to work with.
+
+## Safety Notes
+
+- Back up databases before installing, updating, or uninstalling MariaDB through the app.
+- MariaDB uninstall is intended to remove the server application while preserving data, but backups are still the safest recovery path.
+- RCON passwords are saved locally with Windows data protection. MariaDB credentials entered in the app are session-only unless written into a config file by the user.
+- Review resource updates before applying them, especially resources with local configuration files.
+
+## License
+
+This project is licensed under the MIT License. See [LICENSE](LICENSE) for details.
