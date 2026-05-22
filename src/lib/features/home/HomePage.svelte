@@ -15,6 +15,7 @@
 	import WrenchIcon from "@lucide/svelte/icons/wrench";
 	import { onMount } from "svelte";
 	import * as Card from "$lib/components/ui/card/index.js";
+	import * as Separator from "$lib/components/ui/separator/index.js";
 	import { Button } from "$lib/components/ui/button/index.js";
 	import { openExternalUrl } from "$lib/core/openExternal";
 	import { compareVersions, fetchLatestAppRelease, getCurrentAppVersion, type AppReleaseInfo } from "$lib/modules/appRelease";
@@ -132,6 +133,8 @@
 
 		<HomeArtifactStatusCard {onNavigate} />
 	</div>
+
+	<Separator.Root class="bg-border/80" />
 
 	<div class="bento-grid grid gap-4">
 		<HomeBentoCard

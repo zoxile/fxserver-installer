@@ -1,7 +1,8 @@
 import { getVersion } from "@tauri-apps/api/app";
 
 const repository = "zoxile/fxserver-installer";
-const latestReleaseUrl = `https://api.github.com/repos/${repository}/releases/latest`;
+const latestVersionManifestUrl = `https://raw.githubusercontent.com/${repository}/main/src-tauri/tauri.conf.json`;
+const releaseBaseUrl = `https://github.com/${repository}/releases`;
 
 export interface AppReleaseInfo {
 	version: string;
@@ -20,34 +21,30 @@ export async function getCurrentAppVersion() {
 }
 
 export async function fetchLatestAppRelease(): Promise<AppReleaseInfo> {
-	const response = await fetch(latestReleaseUrl, {
+	const response = await fetch(latestVersionManifestUrl, {
+		cache: "no-store",
 		headers: {
-			Accept: "application/vnd.github+json",
+			Accept: "application/json,text/plain,*/*",
 		},
 	});
 
 	if (!response.ok) {
-		throw new Error(`GitHub returned ${response.status} while checking the latest app release.`);
+		throw new Error(`Version manifest returned ${response.status} while checking the latest app release.`);
 	}
 
-	const release = (await response.json()) as {
-		tag_name?: string;
-		html_url?: string;
-		assets?: Array<{ name?: string; browser_download_url?: string }>;
-	};
-	const tagName = release.tag_name?.trim();
-	if (!tagName) throw new Error("Latest app release did not include a tag.");
+	const manifest = (await response.json()) as { version?: string };
+	const version = manifest.version?.trim();
+	if (!version) throw new Error("Version manifest did not include an app version.");
 
-	const installer = release.assets?.find((asset) => {
-		const name = asset.name?.toLowerCase() ?? "";
-		return name.endsWith(".exe") && name.includes("setup");
-	});
+	const tagName = `v${normalizeVersion(version)}`;
+	const fileName = `FXServer Installer_${normalizeVersion(version)}_x64-setup.exe`;
+	const htmlUrl = `${releaseBaseUrl}/tag/${encodeURIComponent(tagName)}`;
 
 	return {
 		version: normalizeVersion(tagName),
 		tagName,
-		htmlUrl: release.html_url ?? `https://github.com/${repository}/releases/tag/${tagName}`,
-		installerUrl: installer?.browser_download_url ?? release.html_url ?? `https://github.com/${repository}/releases/tag/${tagName}`,
+		htmlUrl,
+		installerUrl: `${releaseBaseUrl}/download/${encodeURIComponent(tagName)}/${encodeURIComponent(fileName)}`,
 	};
 }
 

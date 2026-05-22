@@ -6,12 +6,10 @@
     "module": "esnext",
     "types": ["svelte", "vite/client"],
     "noEmit": true,
-    "ignoreDeprecations": "6.0",
-    "baseUrl": ".",
     "paths": {
-      "$lib/*.js": ["src/lib/*.ts"],
-      "$lib/*/index.js": ["src/lib/*/index.ts"],
-      "$lib/*": ["src/lib/*"]
+      "$lib/*.js": ["./src/lib/*.ts"],
+      "$lib/*/index.js": ["./src/lib/*/index.ts"],
+      "$lib/*": ["./src/lib/*"]
     },
     /**
      * Typecheck JS in `.svelte` and `.js` files by default.
