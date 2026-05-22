@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
-  "productName": "fxserver-installer",
-  "version": "0.1.0",
+  "productName": "FXServer Installer",
+  "version": "0.1.1",
   "identifier": "com.fxserver.installer",
   "build": {
     "frontendDist": "../dist",
@@ -29,7 +29,9 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis"],
+    "targets": [
+      "nsis"
+    ],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
