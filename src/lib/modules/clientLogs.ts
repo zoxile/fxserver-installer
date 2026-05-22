@@ -29,7 +29,7 @@ function hasTauriRuntime() {
 export async function readClientLogs(request: ClientLogRequest) {
 	if (!hasTauriRuntime()) {
 		return {
-			directory: "C:\\Users\\Zox\\AppData\\Local\\FiveM\\FiveM.app\\logs",
+			directory: "%LOCALAPPDATA%\\FiveM\\FiveM.app\\logs",
 			files: [],
 			selectedFile: null,
 			path: null,

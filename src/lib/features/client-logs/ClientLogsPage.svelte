@@ -27,10 +27,10 @@
 		raw: string;
 	}
 
-	const defaultDirectory = "C:\\Users\\Zox\\AppData\\Local\\FiveM\\FiveM.app\\logs";
+	const defaultDirectory = "%LOCALAPPDATA%\\FiveM\\FiveM.app\\logs";
 	const levels: LogLevel[] = ["all", "debug", "info", "warn", "error"];
 
-	let directory = $state(defaultDirectory);
+	let directory = $state("");
 	let selectedFile = $state("");
 	let maxLines = $state("700");
 	let query = $state("");
@@ -50,7 +50,8 @@
 			return (level === "all" || entry.level === level) && (!query.trim() || haystack.includes(query.trim().toLowerCase()));
 		}),
 	);
-	const pathPreview = $derived(result?.path ?? `${directory}\\${selectedFile || "latest log file"}`);
+	const displayedDirectory = $derived(directory || result?.directory || defaultDirectory);
+	const pathPreview = $derived(result?.path ?? `${displayedDirectory}\\${selectedFile || "latest log file"}`);
 
 	onMount(() => {
 		void refresh(false);
