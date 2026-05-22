@@ -9,13 +9,16 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 
-use crate::models::fxserver::{
-    FxserverCommandRequest, FxserverEnvironmentVariable, FxserverLaunchRequest,
-    FxserverLaunchResult, FxserverRconConfig, FxserverResourceInfo, FxserverResources,
-    FxserverStatus, FxserverTerminalEntry, FxserverTerminalResult, ResourceScanRequest,
-    ResourceScanResult, ResourceUpdateRequest, ResourceUpdateResult, SaveServerConfigRequest,
-    ServerConfigFile, ServerConfigRequest, ServerConfigResult, TxDataLogRequest, TxDataLogResult,
-    TxDataProfilesResult,
+use crate::{
+    models::fxserver::{
+        FxserverCommandRequest, FxserverEnvironmentVariable, FxserverLaunchRequest,
+        FxserverLaunchResult, FxserverRconConfig, FxserverResourceInfo, FxserverResources,
+        FxserverStatus, FxserverTerminalEntry, FxserverTerminalResult, ResourceScanRequest,
+        ResourceScanResult, ResourceUpdateRequest, ResourceUpdateResult, SaveServerConfigRequest,
+        ServerConfigFile, ServerConfigRequest, ServerConfigResult, TxDataLogRequest,
+        TxDataLogResult, TxDataProfilesResult,
+    },
+    process::CommandNoWindowExt,
 };
 
 pub struct FxserverManager {
@@ -85,6 +88,7 @@ pub fn start_fxserver(
     }
 
     let mut command = Command::new(&executable_path);
+    command.no_window();
     command
         .current_dir(&artifact_path)
         .stdin(Stdio::null())
@@ -831,6 +835,7 @@ try {{
     );
 
     let output = Command::new("powershell")
+        .no_window()
         .arg("-NoProfile")
         .arg("-ExecutionPolicy")
         .arg("Bypass")
@@ -1188,6 +1193,7 @@ if ($totalMemory -gt 0) {{
     );
 
     let output = Command::new("powershell")
+        .no_window()
         .arg("-NoProfile")
         .arg("-ExecutionPolicy")
         .arg("Bypass")

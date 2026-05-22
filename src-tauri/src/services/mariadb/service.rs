@@ -1,5 +1,6 @@
 use std::process::Command;
 
+use crate::process::CommandNoWindowExt;
 use crate::services::mariadb::detect::find_service_name;
 
 pub fn start_service(service_name: Option<String>) -> Result<(), String> {
@@ -27,6 +28,7 @@ fn control_service(action: &str, service_name: Option<String>) -> Result<(), Str
 
 fn run_sc(action: &str, service_name: &str) -> Result<(), String> {
     let output = Command::new("sc")
+        .no_window()
         .args([action, service_name])
         .output()
         .map_err(|error| format!("Failed to run service command: {error}"))?;

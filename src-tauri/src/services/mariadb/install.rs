@@ -9,6 +9,7 @@ use std::{
 
 use crate::{
     models::mariadb::{MariaDBCredentials, MariaDBInstallOptions, MariaDBPackageInfo},
+    process::CommandNoWindowExt,
     services::mariadb::{
         detect::{detect_mariadb, find_service_name},
         query::validate_connection,
@@ -191,6 +192,7 @@ fn run_winget_install(
 
 fn run_process(command: &str, args: &[&str], timeout: Duration) -> Result<InstallOutput, String> {
     let mut child = Command::new(command)
+        .no_window()
         .args(args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -246,7 +248,7 @@ fn run_elevated_mariadb_uninstall(
 $productCode = '{escaped_product_code}'
 $serviceName = '{escaped_service_name}'
 $logPath = '{escaped_log_path}'
-$process = Start-Process -FilePath 'msiexec.exe' -ArgumentList @('/x', $productCode, '/qn', '/norestart', 'CLEANUPDATA=""', '/l*v', $logPath) -Wait -PassThru
+$process = Start-Process -WindowStyle Hidden -FilePath 'msiexec.exe' -ArgumentList @('/x', $productCode, '/qn', '/norestart', 'CLEANUPDATA=""', '/l*v', $logPath) -Wait -PassThru
 $exitCode = $process.ExitCode
 $service = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
 if ($service) {{
@@ -254,7 +256,7 @@ if ($service) {{
         Stop-Service -Name $serviceName -Force -ErrorAction SilentlyContinue
         $service.WaitForStatus('Stopped', [TimeSpan]::FromSeconds(30))
     }}
-    & sc.exe delete $serviceName | Out-Null
+    Start-Process -WindowStyle Hidden -FilePath 'sc.exe' -ArgumentList @('delete', $serviceName) -Wait | Out-Null
 }}
 exit $exitCode
 "#
@@ -371,7 +373,7 @@ if ($service) {{
         Stop-Service -Name $serviceName -Force -ErrorAction SilentlyContinue
         $service.WaitForStatus('Stopped', [TimeSpan]::FromSeconds(30))
     }}
-    & sc.exe delete $serviceName | Out-Null
+    Start-Process -WindowStyle Hidden -FilePath 'sc.exe' -ArgumentList @('delete', $serviceName) -Wait | Out-Null
 }}
 exit 0
 "#
@@ -414,6 +416,7 @@ fn detect_heidisql(mariadb_install_location: Option<&str>) -> bool {
 
 fn registry_heidisql_installed() -> bool {
     let output = Command::new("powershell")
+        .no_window()
         .args([
             "-NoProfile",
             "-Command",
@@ -729,7 +732,7 @@ if ($service) {{
         Stop-Service -Name $serviceName -Force -ErrorAction SilentlyContinue
         $service.WaitForStatus('Stopped', [TimeSpan]::FromSeconds(30))
     }}
-    & sc.exe delete $serviceName | Out-Null
+    Start-Process -WindowStyle Hidden -FilePath 'sc.exe' -ArgumentList @('delete', $serviceName) -Wait | Out-Null
     Start-Sleep -Seconds 2
 }}
 if ((Test-Path -LiteralPath $dataDir) -and @(Get-ChildItem -LiteralPath $dataDir -Force -ErrorAction SilentlyContinue).Count -gt 0) {{
@@ -738,11 +741,11 @@ if ((Test-Path -LiteralPath $dataDir) -and @(Get-ChildItem -LiteralPath $dataDir
 }}
 New-Item -ItemType Directory -Path $dataDir -Force | Out-Null
 $installArgs = @('--datadir=' + $dataDir, '--service=' + $serviceName, '--password={escaped_password}', '--port={port}', '--socket=' + $serviceName, '--config=' + $configTemplate, '--silent'{flags})
-$init = Start-Process -FilePath $installDbPath -ArgumentList $installArgs -Wait -PassThru
+$init = Start-Process -WindowStyle Hidden -FilePath $installDbPath -ArgumentList $installArgs -Wait -PassThru
 if ($init.ExitCode -ne 0) {{
     exit $init.ExitCode
 }}
-$start = Start-Process -FilePath 'sc.exe' -ArgumentList @('start', $serviceName) -Wait -PassThru
+$start = Start-Process -WindowStyle Hidden -FilePath 'sc.exe' -ArgumentList @('start', $serviceName) -Wait -PassThru
 if ($start.ExitCode -ne 0) {{
     exit $start.ExitCode
 }}
@@ -1066,14 +1069,14 @@ if ($service) {{
         Stop-Service -Name $serviceName -Force -ErrorAction SilentlyContinue
         $service.WaitForStatus('Stopped', [TimeSpan]::FromSeconds(30))
     }}
-    & sc.exe delete $serviceName | Out-Null
+    Start-Process -WindowStyle Hidden -FilePath 'sc.exe' -ArgumentList @('delete', $serviceName) -Wait | Out-Null
     Start-Sleep -Seconds 2
 }}
-$install = Start-Process -FilePath $mysqldPath -ArgumentList @('--install', $serviceName, "--defaults-file=`"$myIni`"") -Wait -PassThru
+$install = Start-Process -WindowStyle Hidden -FilePath $mysqldPath -ArgumentList @('--install', $serviceName, "--defaults-file=`"$myIni`"") -Wait -PassThru
 if ($install.ExitCode -ne 0) {{
     exit $install.ExitCode
 }}
-$start = Start-Process -FilePath 'sc.exe' -ArgumentList @('start', $serviceName) -Wait -PassThru
+$start = Start-Process -WindowStyle Hidden -FilePath 'sc.exe' -ArgumentList @('start', $serviceName) -Wait -PassThru
 if ($start.ExitCode -ne 0) {{
     exit $start.ExitCode
 }}
@@ -1137,7 +1140,7 @@ try {{
         $service.WaitForStatus('Stopped', [TimeSpan]::FromSeconds(30))
     }}
     [System.IO.File]::WriteAllText($myIni, $originalConfig.TrimEnd() + "`r`n`r`n[mysqld]`r`ninit-file=$initPathForIni`r`n", $utf8NoBom)
-    $start = Start-Process -FilePath 'sc.exe' -ArgumentList @('start', $serviceName) -Wait -PassThru
+    $start = Start-Process -WindowStyle Hidden -FilePath 'sc.exe' -ArgumentList @('start', $serviceName) -Wait -PassThru
     if ($start.ExitCode -ne 0) {{
         exit $start.ExitCode
     }}
@@ -1157,7 +1160,7 @@ try {{
     Stop-Service -Name $serviceName -Force -ErrorAction SilentlyContinue
     $service.WaitForStatus('Stopped', [TimeSpan]::FromSeconds(30))
     [System.IO.File]::WriteAllText($myIni, $originalConfig, $utf8NoBom)
-    $restart = Start-Process -FilePath 'sc.exe' -ArgumentList @('start', $serviceName) -Wait -PassThru
+    $restart = Start-Process -WindowStyle Hidden -FilePath 'sc.exe' -ArgumentList @('start', $serviceName) -Wait -PassThru
     if ($restart.ExitCode -ne 0) {{
         exit $restart.ExitCode
     }}
@@ -1426,6 +1429,7 @@ struct RegistryPackage {
 
 fn registry_installed_package() -> Option<RegistryPackage> {
     let output = Command::new("powershell")
+        .no_window()
         .args([
             "-NoProfile",
             "-Command",
@@ -1452,6 +1456,7 @@ fn registry_installed_package() -> Option<RegistryPackage> {
 
 fn winget_latest_version() -> Option<String> {
     let output = Command::new("winget")
+        .no_window()
         .args(["show", "--id", "MariaDB.Server", "-e", "--source", "winget"])
         .output()
         .ok()?;

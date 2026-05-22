@@ -123,13 +123,17 @@
 		event.stopPropagation();
 	}
 
+	function handleGlobalContextMenu(event: MouseEvent) {
+		event.preventDefault();
+	}
+
 	function isEditableTarget(target: EventTarget | null) {
 		if (!(target instanceof HTMLElement)) return false;
 		return Boolean(target.closest("input, textarea, select, [contenteditable='true']"));
 	}
 </script>
 
-<svelte:window onkeydown={handleGlobalKeydown} />
+<svelte:window onkeydown={handleGlobalKeydown} oncontextmenu={handleGlobalContextMenu} />
 
 <Titlebar />
 <CommandPalette open={commandPaletteOpen} onClose={() => (commandPaletteOpen = false)} onNavigate={navigate} />

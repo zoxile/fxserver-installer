@@ -1,7 +1,9 @@
 mod commands;
 mod models;
+mod process;
 mod services;
 
+use crate::process::CommandNoWindowExt;
 use std::{env, process::Command};
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem},
@@ -29,6 +31,7 @@ pub fn run_elevated_helper_from_args() -> bool {
     };
 
     let status = Command::new("powershell")
+        .no_window()
         .args([
             "-NoProfile",
             "-ExecutionPolicy",

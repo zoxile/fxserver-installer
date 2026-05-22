@@ -4,8 +4,11 @@ use std::{
     process::Command,
 };
 
-use crate::models::artifact::{
-    ArtifactInstallRequest, ArtifactInstallResult, ArtifactMetadata, InstalledArtifactInfo,
+use crate::{
+    models::artifact::{
+        ArtifactInstallRequest, ArtifactInstallResult, ArtifactMetadata, InstalledArtifactInfo,
+    },
+    process::CommandNoWindowExt,
 };
 
 #[tauri::command]
@@ -194,6 +197,7 @@ $info = [System.Diagnostics.FileVersionInfo]::GetVersionInfo({path_literal})
     );
 
     let output = Command::new("powershell")
+        .no_window()
         .arg("-NoProfile")
         .arg("-ExecutionPolicy")
         .arg("Bypass")
@@ -247,6 +251,7 @@ $ProgressPreference = "SilentlyContinue"
 "#;
 
     let output = Command::new("powershell")
+        .no_window()
         .arg("-NoProfile")
         .arg("-ExecutionPolicy")
         .arg("Bypass")
@@ -356,6 +361,7 @@ Remove-Item -LiteralPath $ZipPath -Force
     );
 
     let output = Command::new("powershell")
+        .no_window()
         .arg("-NoProfile")
         .arg("-ExecutionPolicy")
         .arg("Bypass")

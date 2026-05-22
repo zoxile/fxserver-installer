@@ -7,6 +7,7 @@ use std::{
 
 use crate::{
     models::mariadb::{MariaDBBackupOptions, MariaDBBackupResult, MariaDBCredentials},
+    process::CommandNoWindowExt,
     services::mariadb::{
         detect::get_install_path,
         query::{apply_credentials_args, find_mariadb_client},
@@ -26,6 +27,7 @@ pub fn create_backup(
     let output_path = backup_path(&options)?;
 
     let mut command = Command::new(dump_client);
+    command.no_window();
     apply_credentials_args(&mut command, &credentials);
     command
         .arg("--result-file")
@@ -179,7 +181,7 @@ fn find_dump_client() -> Option<String> {
         "mysqldump",
         "mysqldump.exe",
     ] {
-        if let Ok(output) = Command::new(command).arg("--version").output() {
+        if let Ok(output) = Command::new(command).no_window().arg("--version").output() {
             if output.status.success() {
                 return Some(command.to_string());
             }

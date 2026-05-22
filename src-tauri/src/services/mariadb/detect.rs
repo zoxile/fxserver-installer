@@ -1,6 +1,6 @@
 use std::{path::Path, process::Command};
 
-use crate::models::mariadb::MariaDBStatus;
+use crate::{models::mariadb::MariaDBStatus, process::CommandNoWindowExt};
 
 pub fn detect_mariadb() -> MariaDBStatus {
     let service = find_service();
@@ -31,7 +31,10 @@ pub fn detect_mariadb() -> MariaDBStatus {
 }
 
 pub fn is_service_running(service_name: &str) -> bool {
-    let output = Command::new("sc").args(["query", service_name]).output();
+    let output = Command::new("sc")
+        .no_window()
+        .args(["query", service_name])
+        .output();
 
     output
         .map(|result| String::from_utf8_lossy(&result.stdout).contains("RUNNING"))
@@ -48,6 +51,7 @@ pub fn get_install_path() -> Option<String> {
 
 fn find_service() -> Option<(String, String)> {
     let output = Command::new("powershell")
+        .no_window()
         .args([
             "-NoProfile",
             "-Command",
@@ -84,7 +88,11 @@ fn get_version() -> Option<String> {
 }
 
 fn run_version_command(command: &str) -> Option<String> {
-    let output = Command::new(command).arg("--version").output().ok()?;
+    let output = Command::new(command)
+        .no_window()
+        .arg("--version")
+        .output()
+        .ok()?;
     if !output.status.success() {
         return None;
     }
@@ -99,6 +107,7 @@ fn run_version_command(command: &str) -> Option<String> {
 
 fn get_install_path_from_registry() -> Option<String> {
     let output = Command::new("powershell")
+        .no_window()
         .args([
             "-NoProfile",
             "-Command",
@@ -121,6 +130,7 @@ fn get_install_path_from_service() -> Option<String> {
         service_name.replace('\'', "''")
     );
     let output = Command::new("powershell")
+        .no_window()
         .args(["-NoProfile", "-Command", &command])
         .output()
         .ok()?;

@@ -1,6 +1,7 @@
 use std::{path::PathBuf, process::Command};
 
 use crate::models::mariadb::{MariaDBCredentials, MariaDBQueryResult};
+use crate::process::CommandNoWindowExt;
 use crate::services::mariadb::{detect::get_install_path, permissions::escape_identifier};
 
 pub fn execute_query(
@@ -16,6 +17,7 @@ pub fn execute_query(
     })?;
 
     let mut command = Command::new(client);
+    command.no_window();
     apply_credentials_args(&mut command, &credentials);
     command.arg("--batch").arg("--raw").arg("-e").arg(query);
 
@@ -121,7 +123,7 @@ pub(crate) fn find_mariadb_client() -> Option<String> {
     }
 
     for command in ["mariadb", "mariadb.exe"] {
-        if let Ok(output) = Command::new(command).arg("--version").output() {
+        if let Ok(output) = Command::new(command).no_window().arg("--version").output() {
             let version = String::from_utf8_lossy(&output.stdout).to_lowercase();
             if output.status.success() && version.contains("mariadb") {
                 return Some(command.to_string());

@@ -1,5 +1,8 @@
 use std::{fs, path::Path, process::Command};
 
+#[cfg(target_os = "windows")]
+use crate::process::CommandNoWindowExt;
+
 #[tauri::command]
 pub fn open_external_url(url: String) -> Result<(), String> {
     let trimmed = url.trim();
@@ -44,6 +47,7 @@ pub fn read_text_file(path: String, max_bytes: Option<u64>) -> Result<String, St
 #[cfg(target_os = "windows")]
 fn open_url(url: &str) -> Result<(), String> {
     Command::new("rundll32")
+        .no_window()
         .arg("url.dll,FileProtocolHandler")
         .arg(url)
         .spawn()
