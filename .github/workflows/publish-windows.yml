@@ -1,0 +1,142 @@
+name: Publish Windows Installer
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      commit_sha:
+        description: "Optional commit SHA"
+        required: false
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Checkout target commit
+        if: github.event_name == 'workflow_dispatch' && inputs.commit_sha != ''
+        run: git checkout "${{ inputs.commit_sha }}"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: npm
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build output
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: ./src-tauri -> target
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Check app
+        run: npm run check
+
+      - name: Extract release version
+        id: release_version
+        run: |
+          $version = (Get-Content "src-tauri/tauri.conf.json" -Raw | ConvertFrom-Json).version
+          if ([string]::IsNullOrWhiteSpace($version)) {
+            throw "No Tauri version found"
+          }
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "tag=v$version" >> $env:GITHUB_OUTPUT
+          "commit=$(git rev-parse HEAD)" >> $env:GITHUB_OUTPUT
+
+      - name: Check existing tag
+        id: existing_tag
+        run: |
+          git ls-remote --exit-code --tags origin "refs/tags/${{ steps.release_version.outputs.tag }}" *> $null
+          if ($LASTEXITCODE -eq 0) {
+            "exists=true" >> $env:GITHUB_OUTPUT
+          } else {
+            "exists=false" >> $env:GITHUB_OUTPUT
+          }
+
+      - name: Format release body
+        id: release_body
+        run: |
+          $title = git log -1 --pretty=%s
+          $rawBody = git log -1 --pretty=%b
+
+          $features = @()
+          $fixes = @()
+          $chores = @()
+          $refactor = @()
+          $docs = @()
+          $perf = @()
+          $tests = @()
+          $notes = @()
+
+          foreach ($line in ($rawBody -split "`r?`n")) {
+            if ($line -match '^feat(\([^)]+\))?:\s*(.*)$') {
+              $features += "- $($Matches[2])"
+            } elseif ($line -match '^fix(\([^)]+\))?:\s*(.*)$') {
+              $fixes += "- $($Matches[2])"
+            } elseif ($line -match '^chore(\([^)]+\))?:\s*(.*)$') {
+              $chores += "- $($Matches[2])"
+            } elseif ($line -match '^refactor(\([^)]+\))?:\s*(.*)$') {
+              $refactor += "- $($Matches[2])"
+            } elseif ($line -match '^docs(\([^)]+\))?:\s*(.*)$') {
+              $docs += "- $($Matches[2])"
+            } elseif ($line -match '^perf(\([^)]+\))?:\s*(.*)$') {
+              $perf += "- $($Matches[2])"
+            } elseif ($line -match '^test(\([^)]+\))?:\s*(.*)$') {
+              $tests += "- $($Matches[2])"
+            } elseif ($line -match '^note(\([^)]+\))?:\s*(.*)$') {
+              $notes += "- $($Matches[2])"
+            }
+          }
+
+          $bodyParts = @()
+          if ($features.Count) { $bodyParts += "### Features"; $bodyParts += $features; $bodyParts += "" }
+          if ($fixes.Count) { $bodyParts += "### Fixes"; $bodyParts += $fixes; $bodyParts += "" }
+          if ($refactor.Count) { $bodyParts += "### Refactoring"; $bodyParts += $refactor; $bodyParts += "" }
+          if ($chores.Count) { $bodyParts += "### Maintenance"; $bodyParts += $chores; $bodyParts += "" }
+          if ($docs.Count) { $bodyParts += "### Documentation"; $bodyParts += $docs; $bodyParts += "" }
+          if ($perf.Count) { $bodyParts += "### Performance"; $bodyParts += $perf; $bodyParts += "" }
+          if ($tests.Count) { $bodyParts += "### Tests"; $bodyParts += $tests; $bodyParts += "" }
+          if ($notes.Count) { $bodyParts += "### Notes"; $bodyParts += $notes; $bodyParts += "" }
+
+          $releaseBody = ($bodyParts -join "`n").Trim()
+          if ([string]::IsNullOrWhiteSpace($releaseBody)) {
+            $releaseBody = "Built from commit: $title"
+          }
+
+          "body<<EOF" >> $env:GITHUB_OUTPUT
+          $releaseBody >> $env:GITHUB_OUTPUT
+          "EOF" >> $env:GITHUB_OUTPUT
+
+      - name: Publish Tauri release
+        if: steps.existing_tag.outputs.exists != 'true'
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ steps.release_version.outputs.tag }}
+          releaseName: FXServer Installer ${{ steps.release_version.outputs.tag }}
+          releaseBody: ${{ steps.release_body.outputs.body }}
+          releaseDraft: false
+          prerelease: false
+          releaseCommitish: ${{ steps.release_version.outputs.commit }}
+          args: --bundles nsis
+          assetNamePattern: "[name]_[version]_[platform]_[arch][setup][ext]"
+
+      - name: Skip existing release
+        if: steps.existing_tag.outputs.exists == 'true'
+        run: echo "Tag ${{ steps.release_version.outputs.tag }} already exists. Bump the app version before publishing a new release."
