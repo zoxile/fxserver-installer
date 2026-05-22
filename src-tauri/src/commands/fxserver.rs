@@ -22,6 +22,9 @@ use crate::{
     FXSERVER_WATCHDOG_ARG,
 };
 
+const GRACEFUL_STOP_TIMEOUT: Duration = Duration::from_secs(4);
+const FORCE_STOP_WAIT_TIMEOUT: Duration = Duration::from_secs(3);
+
 pub struct FxserverManager {
     process: Mutex<Option<ManagedFxserverProcess>>,
     terminal: Arc<Mutex<TerminalState>>,
@@ -96,7 +99,7 @@ impl FxserverManager {
 
             match request_graceful_fxserver_stop(&mut process) {
                 Ok(true) => {
-                    if wait_for_child_exit(&mut process.child, Duration::from_secs(15)) {
+                    if wait_for_child_exit(&mut process.child, GRACEFUL_STOP_TIMEOUT) {
                         append_terminal_line(&self.terminal, "system", "FXServer stopped.")?;
                         return Ok(());
                     }
@@ -789,7 +792,7 @@ fn force_stop_fxserver_process(child: &mut Child, pid: u32) -> Result<(), String
             .map_err(|kill_error| format!("Failed to force stop FXServer after process tree cleanup failed ({error}): {kill_error}"))?;
     }
 
-    wait_for_child_exit(child, Duration::from_secs(8));
+    wait_for_child_exit(child, FORCE_STOP_WAIT_TIMEOUT);
     Ok(())
 }
 

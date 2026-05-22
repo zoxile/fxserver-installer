@@ -21,6 +21,7 @@ use tauri::{
 pub(crate) const ELEVATED_SCRIPT_ARG: &str = "--fxi-elevated-script";
 pub(crate) const FXSERVER_WATCHDOG_ARG: &str = "--fxi-watch-fxserver";
 const MAIN_WINDOW_LABEL: &str = "main";
+const TRAY_ID: &str = "fxserver-installer-tray";
 const TRAY_SHOW_ID: &str = "show-main-window";
 const TRAY_QUIT_ID: &str = "quit-app";
 #[cfg(target_os = "windows")]
@@ -182,7 +183,7 @@ fn setup_system_tray<R: Runtime>(app: &mut tauri::App<R>) -> tauri::Result<()> {
     let quit_item = MenuItem::with_id(app, TRAY_QUIT_ID, "Quit", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&open_item, &separator, &quit_item])?;
 
-    let mut tray = TrayIconBuilder::with_id("fxserver-installer-tray")
+    let mut tray = TrayIconBuilder::with_id(TRAY_ID)
         .menu(&menu)
         .tooltip("FXServer Installer")
         .show_menu_on_left_click(false)
@@ -232,12 +233,21 @@ fn request_app_quit<R: Runtime>(app: &tauri::AppHandle<R>) {
     }
 
     hide_main_window(app);
+    hide_tray_icon(app);
 
     let app = app.clone();
     thread::spawn(move || {
         stop_managed_fxserver(&app);
         app.exit(0);
     });
+}
+
+fn hide_tray_icon<R: Runtime>(app: &tauri::AppHandle<R>) {
+    if let Some(tray) = app.tray_by_id(TRAY_ID) {
+        let _ = tray.set_visible(false);
+    }
+
+    let _ = app.remove_tray_by_id(TRAY_ID);
 }
 
 fn stop_managed_fxserver<R: Runtime>(app: &tauri::AppHandle<R>) {
