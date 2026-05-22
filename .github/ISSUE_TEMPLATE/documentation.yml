@@ -1,0 +1,51 @@
+name: Documentation issue
+description: Report missing, confusing, or incorrect documentation.
+title: "docs: "
+labels:
+  - documentation
+body:
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched existing issues and did not find a duplicate.
+          required: true
+
+  - type: dropdown
+    id: doc-area
+    attributes:
+      label: Documentation area
+      options:
+        - README
+        - Contributing guide
+        - User guide
+        - JOOAT resolver pack guide
+        - Release notes
+        - In-app text
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: location
+    attributes:
+      label: Location
+      description: Link, file path, section title, or page where the documentation issue appears.
+      placeholder: "README.md#quick-start"
+    validations:
+      required: true
+
+  - type: textarea
+    id: issue
+    attributes:
+      label: What needs to change?
+      description: Explain what is missing, outdated, incorrect, or unclear.
+    validations:
+      required: true
+
+  - type: textarea
+    id: suggestion
+    attributes:
+      label: Suggested wording or fix
+      description: Optional, but very helpful.

@@ -1,0 +1,119 @@
+name: Bug report
+description: Report something that is broken or behaving incorrectly.
+title: "fix: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug. Please search existing issues first and remove secrets from logs, configs, and screenshots.
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched existing issues and did not find a duplicate.
+          required: true
+        - label: I am using the latest release or have confirmed the issue also exists on the latest release.
+          required: true
+        - label: I removed secrets such as rcon_password, database passwords, CFX keys, tokens, and private IPs.
+          required: true
+
+  - type: input
+    id: app-version
+    attributes:
+      label: App version
+      description: The version shown in the app or release name.
+      placeholder: "0.1.0"
+    validations:
+      required: true
+
+  - type: input
+    id: windows-version
+    attributes:
+      label: Windows version
+      placeholder: "Windows 11 23H2"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: install-method
+    attributes:
+      label: Install method
+      options:
+        - GitHub release installer
+        - Built from source
+        - Tauri dev mode
+        - Other
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Affected area
+      options:
+        - Home / First Run Wizard
+        - Manage MariaDB
+        - Queries & Files
+        - Artifacts
+        - Configure Server
+        - Manage Server
+        - Resource Manager
+        - Logs
+        - Tools & Utils
+        - Build / Release
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: What happened?
+      description: Describe the bug clearly.
+      placeholder: "When I click..., the app..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect to happen?
+      placeholder: "I expected..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: List exact steps so the issue can be reproduced.
+      placeholder: |
+        1. Open ...
+        2. Click ...
+        3. Enter ...
+        4. See error ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or error output
+      description: Paste relevant Application Logs, Server Logs, MariaDB installer logs, or console output. Redact secrets first.
+      render: text
+
+  - type: textarea
+    id: screenshots
+    attributes:
+      label: Screenshots or recordings
+      description: Drag and drop screenshots or short recordings here if the bug is visual.
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Additional context
+      description: Add anything else that might help debug the issue.

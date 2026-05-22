@@ -1,0 +1,78 @@
+name: Feature request
+description: Suggest a new feature or improvement.
+title: "feat: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for suggesting an improvement. Please search existing issues and pull requests first so related ideas stay in one place.
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched existing issues and pull requests and did not find a duplicate.
+          required: true
+        - label: This request is related to FXServer Installer and not general FiveM, txAdmin, MariaDB, or resource support.
+          required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Home / First Run Wizard
+        - Manage MariaDB
+        - Queries & Files
+        - Artifacts
+        - Configure Server
+        - Manage Server
+        - Resource Manager
+        - Logs
+        - Tools & Utils
+        - Build / Release
+        - Documentation
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or workflow
+      description: What are you trying to do, and what makes it difficult right now?
+      placeholder: "I want to..., but currently..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: Describe the change you would like to see.
+      placeholder: "Add..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Any current workaround or other approach you considered.
+
+  - type: textarea
+    id: examples
+    attributes:
+      label: Examples, references, or mockups
+      description: Add screenshots, links, command examples, or rough UI ideas if useful.
+
+  - type: checkboxes
+    id: contribution
+    attributes:
+      label: Contribution
+      options:
+        - label: I would be willing to help test this feature.
+        - label: I would be willing to open a pull request for this feature.

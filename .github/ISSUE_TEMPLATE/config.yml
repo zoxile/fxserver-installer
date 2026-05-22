@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Read the user guide
+    url: https://github.com/zoxile/fxserver-installer/blob/main/docs/user-guide.md
+    about: Check the setup, build, and troubleshooting guide before opening an issue.
+  - name: Check releases
+    url: https://github.com/zoxile/fxserver-installer/releases
+    about: Make sure you are using the latest available release.

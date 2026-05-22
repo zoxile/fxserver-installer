@@ -1,0 +1,55 @@
+name: Support question
+description: Ask for help when you are not sure whether something is a bug.
+title: "question: "
+labels:
+  - question
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this for questions about FXServer Installer itself. For general FiveM, txAdmin, MariaDB, or resource support, use those projects' own support channels.
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I checked the README and user guide first.
+          required: true
+        - label: I searched existing issues and did not find an answer.
+          required: true
+        - label: I removed secrets such as rcon_password, database passwords, CFX keys, tokens, and private IPs.
+          required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Installation
+        - Manage MariaDB
+        - Queries & Files
+        - Artifacts
+        - Configure Server
+        - Manage Server
+        - Resource Manager
+        - Logs
+        - Tools & Utils
+        - Build / Release
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: question
+    attributes:
+      label: Question
+      description: Explain what you are trying to understand or accomplish.
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: Add app version, Windows version, relevant logs, screenshots, or what you already tried.
