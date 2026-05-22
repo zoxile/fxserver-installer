@@ -8,6 +8,7 @@ Quick note: The main purpose of this app was for me to learn how to build with T
 
 > [!WARNING]
 > FXServer Installer is a new project in active development. Issues, bugs, UI changes, and breaking changes may happen between releases, so back up important server data before using app features that install, update, uninstall, or rewrite files.
+
 > [!NOTE]
 > Windows SmartScreen may warn because this project is new and currently unsigned. If you downloaded it from the official GitHub Releases page, click "More info" and then "Run anyway".
 
