@@ -8,7 +8,7 @@ use std::{
     env,
     path::PathBuf,
     process::Command,
-    sync::atomic::{AtomicIsize, Ordering},
+    sync::atomic::{AtomicBool, AtomicIsize, Ordering},
     thread,
     time::Duration,
 };
@@ -27,6 +27,7 @@ const TRAY_QUIT_ID: &str = "quit-app";
 static SINGLE_INSTANCE_MUTEX: AtomicIsize = AtomicIsize::new(0);
 #[cfg(target_os = "windows")]
 static SINGLE_INSTANCE_LOCK_FILE: AtomicIsize = AtomicIsize::new(0);
+static SHUTDOWN_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
 
 pub fn run_elevated_helper_from_args() -> bool {
     let mut args = env::args().skip(1);
@@ -143,6 +144,7 @@ pub fn run() {
                 )?;
             }
             setup_system_tray(app)?;
+            spawn_activation_signal_watcher(app.handle().clone());
             Ok(())
         })
         .build(tauri::generate_context!())
@@ -158,7 +160,12 @@ pub fn run() {
                     hide_main_window(app_handle);
                 }
             }
-            tauri::RunEvent::ExitRequested { .. } => stop_managed_fxserver(app_handle),
+            tauri::RunEvent::ExitRequested { api, .. } => {
+                if !SHUTDOWN_IN_PROGRESS.load(Ordering::SeqCst) {
+                    api.prevent_exit();
+                    request_app_quit(app_handle);
+                }
+            }
             _ => {}
         });
 }
@@ -181,10 +188,7 @@ fn setup_system_tray<R: Runtime>(app: &mut tauri::App<R>) -> tauri::Result<()> {
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id().as_ref() {
             TRAY_SHOW_ID => show_main_window(app),
-            TRAY_QUIT_ID => {
-                stop_managed_fxserver(app);
-                app.exit(0);
-            }
+            TRAY_QUIT_ID => request_app_quit(app),
             _ => {}
         })
         .on_tray_icon_event(|tray, event| match event {
@@ -222,6 +226,20 @@ fn show_main_window<R: Runtime>(app: &tauri::AppHandle<R>) {
     }
 }
 
+fn request_app_quit<R: Runtime>(app: &tauri::AppHandle<R>) {
+    if SHUTDOWN_IN_PROGRESS.swap(true, Ordering::SeqCst) {
+        return;
+    }
+
+    hide_main_window(app);
+
+    let app = app.clone();
+    thread::spawn(move || {
+        stop_managed_fxserver(&app);
+        app.exit(0);
+    });
+}
+
 fn stop_managed_fxserver<R: Runtime>(app: &tauri::AppHandle<R>) {
     let manager = app.state::<commands::fxserver::FxserverManager>();
     if let Err(error) = manager.stop_running_process() {
@@ -235,11 +253,10 @@ fn exit_if_secondary_instance() {
     use windows_sys::Win32::{
         Foundation::{CloseHandle, GetLastError, ERROR_ALREADY_EXISTS},
         System::Threading::CreateMutexW,
-        UI::WindowsAndMessaging::{FindWindowW, SetForegroundWindow, ShowWindow, SW_RESTORE},
     };
 
     if existing_instance_process_id().is_some() {
-        show_existing_instance_window();
+        request_existing_instance_activation();
         std::process::exit(0);
     }
 
@@ -254,20 +271,12 @@ fn exit_if_secondary_instance() {
             CloseHandle(handle);
         }
 
-        let title = wide_null("FXServer Installer");
-        let hwnd = unsafe { FindWindowW(ptr::null(), title.as_ptr()) };
-        if !hwnd.is_null() {
-            unsafe {
-                ShowWindow(hwnd, SW_RESTORE);
-                SetForegroundWindow(hwnd);
-            }
-        }
-
+        request_existing_instance_activation();
         std::process::exit(0);
     }
 
     if !acquire_single_instance_file_lock() {
-        show_existing_instance_window();
+        request_existing_instance_activation();
         std::process::exit(0);
     }
 
@@ -285,12 +294,7 @@ fn acquire_single_instance_file_lock() -> bool {
         Storage::FileSystem::{CreateFileW, FILE_ATTRIBUTE_NORMAL, OPEN_ALWAYS},
     };
 
-    let base_dir = env::var_os("LOCALAPPDATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(env::temp_dir);
-    let path = base_dir
-        .join("FXServer Installer")
-        .join("single-instance.lock");
+    let path = app_local_data_file("single-instance.lock");
 
     if let Some(parent) = path.parent() {
         if fs::create_dir_all(parent).is_err() {
@@ -325,22 +329,58 @@ fn wide_null(value: &str) -> Vec<u16> {
 }
 
 #[cfg(target_os = "windows")]
-fn show_existing_instance_window() {
-    use std::ptr;
-    use windows_sys::Win32::UI::WindowsAndMessaging::{
-        FindWindowW, SetForegroundWindow, ShowWindow, SW_RESTORE, SW_SHOW,
-    };
-
-    let title = wide_null("FXServer Installer");
-    let hwnd = unsafe { FindWindowW(ptr::null(), title.as_ptr()) };
-    if !hwnd.is_null() {
-        unsafe {
-            ShowWindow(hwnd, SW_SHOW);
-            ShowWindow(hwnd, SW_RESTORE);
-            SetForegroundWindow(hwnd);
-        }
-    }
+fn app_local_data_file(file_name: &str) -> PathBuf {
+    env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(env::temp_dir)
+        .join("FXServer Installer")
+        .join(file_name)
 }
+
+#[cfg(target_os = "windows")]
+fn activation_signal_path() -> PathBuf {
+    app_local_data_file("activate.signal")
+}
+
+#[cfg(target_os = "windows")]
+fn request_existing_instance_activation() {
+    use std::{fs, time::SystemTime};
+
+    let path = activation_signal_path();
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+
+    let _ = fs::write(
+        path,
+        format!("{:?}:{}", SystemTime::now(), std::process::id()),
+    );
+}
+
+#[cfg(target_os = "windows")]
+fn spawn_activation_signal_watcher<R: Runtime>(app: tauri::AppHandle<R>) {
+    use std::fs;
+
+    let path = activation_signal_path();
+    let mut last_signal = fs::read_to_string(&path).ok();
+
+    thread::spawn(move || loop {
+        thread::sleep(Duration::from_millis(200));
+
+        let signal = fs::read_to_string(&path).ok();
+        if signal.is_some() && signal != last_signal && !SHUTDOWN_IN_PROGRESS.load(Ordering::SeqCst)
+        {
+            last_signal = signal;
+            let app = app.clone();
+            let _ = app
+                .clone()
+                .run_on_main_thread(move || show_main_window(&app));
+        }
+    });
+}
+
+#[cfg(not(target_os = "windows"))]
+fn spawn_activation_signal_watcher<R: Runtime>(_: tauri::AppHandle<R>) {}
 
 #[cfg(target_os = "windows")]
 fn existing_instance_process_id() -> Option<u32> {

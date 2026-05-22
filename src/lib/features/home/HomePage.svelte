@@ -8,6 +8,7 @@
 	import GitBranchIcon from "@lucide/svelte/icons/git-branch";
 	import LogsIcon from "@lucide/svelte/icons/logs";
 	import PackageIcon from "@lucide/svelte/icons/package";
+	import RefreshCwIcon from "@lucide/svelte/icons/refresh-cw";
 	import RocketIcon from "@lucide/svelte/icons/rocket";
 	import ServerCogIcon from "@lucide/svelte/icons/server-cog";
 	import TerminalIcon from "@lucide/svelte/icons/terminal";
@@ -100,7 +101,12 @@
 						<CheckCircle2Icon class={["size-3.5", projectStatusTone]} />
 						Update status
 					</div>
-					<p class={["truncate text-xs font-medium", projectStatusTone]}>{projectStatus}</p>
+					<div class="flex min-w-0 items-center gap-2">
+						<p class={["truncate text-xs font-medium", projectStatusTone]}>{projectStatus}</p>
+						<Button variant="ghost" size="icon" class="size-7 rounded-sm" onclick={refreshProjectVersion} disabled={checkingRelease} title="Refresh latest version status">
+							<RefreshCwIcon class={["size-3.5", checkingRelease && "animate-spin"]} />
+						</Button>
+					</div>
 				</div>
 				{#if releaseError}
 					<p class="rounded-sm border border-red-400/20 bg-red-400/10 px-3 py-2 text-xs text-red-100">{releaseError}</p>
