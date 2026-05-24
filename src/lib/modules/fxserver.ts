@@ -46,7 +46,15 @@ export interface FxserverTerminalEntry {
 	id: number;
 	stream: "stdout" | "stderr" | "system" | "command" | string;
 	line: string;
+	plainLine?: string;
+	segments?: FxserverTerminalSegment[];
 	timestamp: string;
+}
+
+export interface FxserverTerminalSegment {
+	text: string;
+	color?: string | null;
+	emphasis?: boolean | null;
 }
 
 export interface FxserverTerminalResult {
@@ -148,16 +156,18 @@ function errorMessage(error: unknown) {
 	return error instanceof Error ? error.message : String(error);
 }
 
-export async function getFxserverStatus() {
+export async function getFxserverStatus(options: { logResult?: boolean } = {}) {
 	if (!hasTauriRuntime()) return unavailableOutsideTauri<FxserverStatus>();
 
 	try {
 		const status = await invoke<FxserverStatus>("get_fxserver_status");
-		log(status.running ? "FXServer status refreshed." : "FXServer is not running from this app.", {
-			level: status.running ? "success" : "debug",
-			scope: "fxserver.manage",
-			detail: status.pid ? `PID ${status.pid}` : undefined,
-		});
+		if (options.logResult) {
+			log(status.running ? "FXServer status refreshed." : "FXServer is not running from this app.", {
+				level: status.running ? "success" : "debug",
+				scope: "fxserver.manage",
+				detail: status.pid ? `PID ${status.pid}` : undefined,
+			});
+		}
 		return status;
 	} catch (error) {
 		log("FXServer status refresh failed.", {

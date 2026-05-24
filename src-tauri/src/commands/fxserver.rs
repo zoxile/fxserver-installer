@@ -13,10 +13,10 @@ use crate::{
     models::fxserver::{
         FxserverCommandRequest, FxserverEnvironmentVariable, FxserverLaunchRequest,
         FxserverLaunchResult, FxserverRconConfig, FxserverResourceInfo, FxserverResources,
-        FxserverStatus, FxserverTerminalEntry, FxserverTerminalResult, ResourceScanRequest,
-        ResourceScanResult, ResourceUpdateRequest, ResourceUpdateResult, SaveServerConfigRequest,
-        ServerConfigFile, ServerConfigRequest, ServerConfigResult, TxDataLogRequest,
-        TxDataLogResult, TxDataProfilesResult,
+        FxserverStatus, FxserverTerminalEntry, FxserverTerminalResult, FxserverTerminalSegment,
+        ResourceScanRequest, ResourceScanResult, ResourceUpdateRequest, ResourceUpdateResult,
+        SaveServerConfigRequest, ServerConfigFile, ServerConfigRequest, ServerConfigResult,
+        TxDataLogRequest, TxDataLogResult, TxDataProfilesResult,
     },
     process::CommandNoWindowExt,
     FXSERVER_WATCHDOG_ARG,
@@ -71,6 +71,13 @@ struct ProcessCleanupJob;
 struct ResourceSample {
     cpu_seconds: f64,
     sampled_at: Instant,
+}
+
+#[cfg(target_os = "windows")]
+struct WindowsProcessInfo {
+    pid: u32,
+    exe_name: String,
+    thread_count: u32,
 }
 
 impl Default for FxserverManager {
@@ -283,20 +290,13 @@ pub fn get_fxserver_status(
         });
     }
 
-    let pid = process.child.id();
-    let uptime_seconds = process
-        .started_at
-        .elapsed()
-        .unwrap_or(Duration::from_secs(0))
-        .as_secs();
-
     Ok(FxserverStatus {
         running: true,
-        pid: Some(pid),
+        pid: Some(process.child.id()),
         artifact_path: Some(process.artifact_path.to_string_lossy().to_string()),
         started_at: Some(system_time_to_label(process.started_at)),
-        uptime_seconds: Some(uptime_seconds),
-        resources: read_process_resources(pid, &mut process.resource_sample),
+        uptime_seconds: None,
+        resources: read_process_resources(process.child.id(), &mut process.resource_sample),
     })
 }
 
@@ -386,18 +386,20 @@ pub fn send_fxserver_command(
         return Ok(());
     }
 
-    let mut guard = manager
-        .process
-        .lock()
-        .map_err(|_| "FXServer process state is unavailable.".to_string())?;
+    {
+        let mut guard = manager
+            .process
+            .lock()
+            .map_err(|_| "FXServer process state is unavailable.".to_string())?;
 
-    let Some(process) = guard.as_mut() else {
-        return Err("FXServer is not running from this app.".to_string());
-    };
+        let Some(process) = guard.as_mut() else {
+            return Err("FXServer is not running from this app.".to_string());
+        };
 
-    if !process_is_running(process)? {
-        *guard = None;
-        return Err("FXServer is not running from this app.".to_string());
+        if !process_is_running(process)? {
+            *guard = None;
+            return Err("FXServer is not running from this app.".to_string());
+        }
     }
 
     append_terminal_line(&manager.terminal, "command", format!("rcon> {command}"))?;
@@ -1187,18 +1189,355 @@ fn clear_terminal(terminal: &Arc<Mutex<TerminalState>>) -> Result<(), String> {
     Ok(())
 }
 
+struct ParsedTerminalLine {
+    plain_line: String,
+    segments: Vec<FxserverTerminalSegment>,
+}
+
+fn parse_terminal_line(line: &str) -> ParsedTerminalLine {
+    let bytes = line.as_bytes();
+    let mut index = 0;
+    let mut active_color: Option<String> = None;
+    let mut plain_line = String::new();
+    let mut text = String::new();
+    let mut segments = Vec::new();
+
+    while index < bytes.len() {
+        if line[index..].starts_with("]0;") {
+            break;
+        }
+
+        match bytes[index] {
+            0x1b => {
+                flush_terminal_text(&mut segments, &mut text, active_color.as_deref());
+                if index + 1 < bytes.len() && bytes[index + 1] == b']' {
+                    index = skip_ansi_osc(bytes, index + 2);
+                } else if index + 1 < bytes.len() && bytes[index + 1] == b'[' {
+                    let (next, params, final_byte) = parse_ansi_csi(bytes, index + 2);
+                    if final_byte == Some(b'm') {
+                        active_color = apply_ansi_sgr_color(&params, active_color);
+                    }
+                    index = next;
+                } else {
+                    index += 1;
+                }
+            }
+            b'^' if index + 1 < bytes.len() && bytes[index + 1].is_ascii_digit() => {
+                flush_terminal_text(&mut segments, &mut text, active_color.as_deref());
+                let code = (bytes[index + 1] as char).to_string();
+                active_color = terminal_color_code(&code).map(str::to_string);
+                index += 2;
+            }
+            0x00..=0x08 | 0x0b | 0x0c | 0x0e..=0x1f | 0x7f => {
+                index += 1;
+            }
+            _ => {
+                let Some(character) = line[index..].chars().next() else {
+                    break;
+                };
+                text.push(character);
+                plain_line.push(character);
+                index += character.len_utf8();
+            }
+        }
+    }
+
+    flush_terminal_text(&mut segments, &mut text, active_color.as_deref());
+
+    ParsedTerminalLine {
+        plain_line,
+        segments,
+    }
+}
+
+fn skip_ansi_osc(bytes: &[u8], mut index: usize) -> usize {
+    while index < bytes.len() {
+        if bytes[index] == 0x07 {
+            return index + 1;
+        }
+        if bytes[index] == 0x1b && index + 1 < bytes.len() && bytes[index + 1] == b'\\' {
+            return index + 2;
+        }
+        index += 1;
+    }
+    bytes.len()
+}
+
+fn parse_ansi_csi(bytes: &[u8], mut index: usize) -> (usize, String, Option<u8>) {
+    let start = index;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if byte == b')' {
+            let params = String::from_utf8_lossy(&bytes[start..index]).to_string();
+            return (index + 1, params, None);
+        }
+        if (0x40..=0x7e).contains(&byte) {
+            let params = String::from_utf8_lossy(&bytes[start..index]).to_string();
+            return (index + 1, params, Some(byte));
+        }
+        index += 1;
+    }
+
+    (bytes.len(), String::new(), None)
+}
+
+fn flush_terminal_text(
+    segments: &mut Vec<FxserverTerminalSegment>,
+    text: &mut String,
+    active_color: Option<&str>,
+) {
+    if text.is_empty() {
+        return;
+    }
+
+    push_terminal_text_segments(segments, text, active_color);
+    text.clear();
+}
+
+fn push_terminal_text_segments(
+    segments: &mut Vec<FxserverTerminalSegment>,
+    text: &str,
+    active_color: Option<&str>,
+) {
+    let mut index = 0;
+
+    while index < text.len() {
+        let next_bracket = text[index..].find('[').map(|offset| index + offset);
+        let next_script = text[index..].find("script:").map(|offset| index + offset);
+        let next_rcon_script = text[index..]
+            .find("rcon/script:")
+            .map(|offset| index + offset);
+        let Some(next_tag) = [next_bracket, next_script, next_rcon_script]
+            .into_iter()
+            .flatten()
+            .min()
+        else {
+            push_terminal_segment(segments, &text[index..], active_color, false);
+            break;
+        };
+
+        push_terminal_segment(segments, &text[index..next_tag], active_color, false);
+
+        if text[next_tag..].starts_with('[') {
+            if let Some((tag, next_index)) = parse_bracket_tag(text, next_tag) {
+                push_terminal_tag_segment(segments, tag, active_color);
+                index = next_index;
+            } else {
+                push_terminal_segment(segments, "[", active_color, false);
+                index = next_tag + 1;
+            }
+        } else {
+            let next_index = parse_script_tag_end(text, next_tag);
+            push_terminal_tag_segment(segments, &text[next_tag..next_index], active_color);
+            index = next_index;
+        }
+    }
+}
+
+fn parse_bracket_tag(text: &str, start: usize) -> Option<(&str, usize)> {
+    let close_offset = text[start..].find(']')?;
+    let end = start + close_offset + 1;
+    let len = end.saturating_sub(start);
+    if !(3..=66).contains(&len) || text[start..end].contains(['\r', '\n']) {
+        return None;
+    }
+    Some((&text[start..end], end))
+}
+
+fn parse_script_tag_end(text: &str, start: usize) -> usize {
+    let mut end = start;
+    for (offset, character) in text[start..].char_indices() {
+        if !(character.is_ascii_alphanumeric() || matches!(character, ':' | '/' | '_' | '.' | '-'))
+        {
+            break;
+        }
+        end = start + offset + character.len_utf8();
+    }
+    end.max(start + 1)
+}
+
+fn push_terminal_tag_segment(
+    segments: &mut Vec<FxserverTerminalSegment>,
+    tag: &str,
+    active_color: Option<&str>,
+) {
+    let inner = tag
+        .strip_prefix('[')
+        .and_then(|value| value.strip_suffix(']'))
+        .unwrap_or(tag)
+        .trim();
+    let color = if inner.eq_ignore_ascii_case("warn") || inner.eq_ignore_ascii_case("warning") {
+        Some("#facc15".to_string())
+    } else if inner.eq_ignore_ascii_case("error")
+        || inner.eq_ignore_ascii_case("script error")
+        || inner.eq_ignore_ascii_case("fatal")
+    {
+        Some("#f87171".to_string())
+    } else if inner.eq_ignore_ascii_case("debug") {
+        Some("#60a5fa".to_string())
+    } else {
+        let resource = inner
+            .strip_prefix("rcon/script:")
+            .or_else(|| inner.strip_prefix("script:"))
+            .unwrap_or(inner);
+        Some(resource_color(resource))
+    };
+
+    segments.push(FxserverTerminalSegment {
+        text: tag.to_string(),
+        color: color.or_else(|| active_color.map(str::to_string)),
+        emphasis: Some(true),
+    });
+}
+
+fn push_terminal_segment(
+    segments: &mut Vec<FxserverTerminalSegment>,
+    text: &str,
+    active_color: Option<&str>,
+    emphasis: bool,
+) {
+    if text.is_empty() {
+        return;
+    }
+
+    segments.push(FxserverTerminalSegment {
+        text: text.to_string(),
+        color: active_color.map(str::to_string),
+        emphasis: emphasis.then_some(true),
+    });
+}
+
+fn apply_ansi_sgr_color(params: &str, current_color: Option<String>) -> Option<String> {
+    let codes = if params.is_empty() {
+        vec![0]
+    } else {
+        params
+            .split([';', ':'])
+            .map(|part| part.parse::<u16>().unwrap_or(0))
+            .collect::<Vec<_>>()
+    };
+    let mut color = current_color;
+    let mut index = 0;
+
+    while index < codes.len() {
+        let code = codes[index];
+        if matches!(code, 0 | 39) {
+            color = None;
+        } else if (30..=37).contains(&code) || (90..=97).contains(&code) {
+            color = ansi_basic_color(code).map(str::to_string);
+        } else if code == 38 && codes.get(index + 1) == Some(&5) {
+            if let Some(value) = codes.get(index + 2) {
+                color = Some(ansi_256_color(*value));
+            }
+            index += 2;
+        } else if code == 38 && codes.get(index + 1) == Some(&2) {
+            if let (Some(red), Some(green), Some(blue)) = (
+                codes.get(index + 2),
+                codes.get(index + 3),
+                codes.get(index + 4),
+            ) {
+                color = Some(format!("rgb({red}, {green}, {blue})"));
+            }
+            index += 4;
+        }
+        index += 1;
+    }
+
+    color
+}
+
+fn terminal_color_code(code: &str) -> Option<&'static str> {
+    match code {
+        "0" | "7" => Some("var(--foreground)"),
+        "1" => Some("#f87171"),
+        "2" => Some("#4ade80"),
+        "3" => Some("#facc15"),
+        "4" => Some("#60a5fa"),
+        "5" => Some("#22d3ee"),
+        "6" => Some("#e879f9"),
+        "8" => Some("#94a3b8"),
+        "9" => Some("#fb923c"),
+        _ => None,
+    }
+}
+
+fn ansi_basic_color(code: u16) -> Option<&'static str> {
+    match code {
+        30 => Some("#94a3b8"),
+        31 => Some("#f87171"),
+        32 => Some("#4ade80"),
+        33 => Some("#facc15"),
+        34 => Some("#60a5fa"),
+        35 => Some("#e879f9"),
+        36 => Some("#22d3ee"),
+        37 => Some("#e5e7eb"),
+        90 => Some("#64748b"),
+        91 => Some("#fca5a5"),
+        92 => Some("#86efac"),
+        93 => Some("#fde047"),
+        94 => Some("#93c5fd"),
+        95 => Some("#f0abfc"),
+        96 => Some("#67e8f9"),
+        97 => Some("#f8fafc"),
+        _ => None,
+    }
+}
+
+fn ansi_256_color(code: u16) -> String {
+    let value = code.min(255);
+    const BASIC: [&str; 16] = [
+        "#111827", "#ef4444", "#22c55e", "#eab308", "#3b82f6", "#d946ef", "#06b6d4", "#e5e7eb",
+        "#64748b", "#f87171", "#4ade80", "#facc15", "#60a5fa", "#e879f9", "#22d3ee", "#f8fafc",
+    ];
+
+    if value < 16 {
+        return BASIC[value as usize].to_string();
+    }
+    if value >= 232 {
+        let gray = 8 + (value - 232) * 10;
+        return format!("rgb({gray}, {gray}, {gray})");
+    }
+
+    let shifted = value - 16;
+    let red = shifted / 36;
+    let green = (shifted % 36) / 6;
+    let blue = shifted % 6;
+    let channel = |part: u16| if part == 0 { 0 } else { 55 + part * 40 };
+    format!(
+        "rgb({}, {}, {})",
+        channel(red),
+        channel(green),
+        channel(blue)
+    )
+}
+
+fn resource_color(resource_name: &str) -> String {
+    const PALETTE: [&str; 10] = [
+        "#67e8f9", "#86efac", "#facc15", "#f0abfc", "#93c5fd", "#fb7185", "#c4b5fd", "#fdba74",
+        "#5eead4", "#bef264",
+    ];
+    let hash = resource_name.bytes().fold(0_u32, |hash, byte| {
+        hash.wrapping_mul(31).wrapping_add(byte as u32)
+    });
+    PALETTE[hash as usize % PALETTE.len()].to_string()
+}
+
 fn append_terminal_line(
     terminal: &Arc<Mutex<TerminalState>>,
     stream: &str,
     line: impl Into<String>,
 ) -> Result<(), String> {
+    let line = line.into();
+    let parsed = parse_terminal_line(&line);
     let mut terminal = terminal
         .lock()
         .map_err(|_| "FXServer terminal output is unavailable.".to_string())?;
     let entry = FxserverTerminalEntry {
         id: terminal.next_id,
         stream: stream.to_string(),
-        line: line.into(),
+        line: parsed.plain_line.clone(),
+        plain_line: parsed.plain_line,
+        segments: parsed.segments,
         timestamp: system_time_to_label(SystemTime::now()),
     };
     terminal.next_id += 1;
@@ -1418,114 +1757,61 @@ fn read_process_resources(
     pid: u32,
     previous_sample: &mut Option<ResourceSample>,
 ) -> Option<FxserverResources> {
-    let script = format!(
-        r#"
-$ErrorActionPreference = "Stop"
+    use std::mem;
+    use windows_sys::Win32::{
+        Foundation::CloseHandle,
+        System::{
+            SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX},
+            Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_VM_READ},
+        },
+    };
 
-$rootPid = {pid}
-
-function Get-ChildProcessIds {{
-    param([UInt32[]]$ParentIds)
-
-    $all = @()
-    $frontier = $ParentIds
-
-    while ($frontier.Count -gt 0) {{
-        $children = Get-CimInstance Win32_Process |
-            Where-Object {{ $frontier -contains [uint32]$_.ParentProcessId }} |
-            Select-Object -ExpandProperty ProcessId
-
-        $children = @($children | Where-Object {{ $null -ne $_ }})
-
-        if ($children.Count -eq 0) {{
-            break
-        }}
-
-        $all += $children
-        $frontier = $children
-    }}
-
-    return $all
-}}
-
-$pids = @($rootPid) + (Get-ChildProcessIds -ParentIds @($rootPid))
-$pids = $pids | Select-Object -Unique
-
-function Get-FxServerProcesses {{
-    param($ProcessIds)
-
-    $items = @()
-
-    foreach ($id in $ProcessIds) {{
-        $p = Get-Process -Id $id -ErrorAction SilentlyContinue
-
-        if ($p -and $p.ProcessName -eq "FXServer") {{
-            $items += $p
-        }}
-    }}
-
-    return $items
-}}
-
-$procs = Get-FxServerProcesses -ProcessIds $pids
-
-$cpuSeconds = ($procs | Measure-Object -Property CPU -Sum).Sum
-if ($null -eq $cpuSeconds) {{ $cpuSeconds = 0 }}
-
-$os = Get-CimInstance Win32_OperatingSystem
-
-$totalMemory = [uint64]$os.TotalVisibleMemorySize * 1024
-
-# Real resident RAM usage (matches actual system memory pressure)
-$memory = [uint64](($procs | Measure-Object -Property WorkingSet64 -Sum).Sum)
-
-$threads = [uint32]((
-    $procs |
-    ForEach-Object {{ $_.Threads.Count }} |
-    Measure-Object -Sum
-).Sum)
-
-$handles = [uint32]((
-    $procs |
-    Measure-Object -Property HandleCount -Sum
-).Sum)
-
-$memoryPercent = 0
-
-if ($totalMemory -gt 0) {{
-    $memoryPercent = ($memory / $totalMemory) * 100
-}}
-
-[pscustomobject]@{{
-    CpuSeconds = [Math]::Round($cpuSeconds, 4)
-    MemoryBytes = $memory
-    TotalMemoryBytes = $totalMemory
-    MemoryPercent = [Math]::Round($memoryPercent, 2)
-    ThreadCount = $threads
-    HandleCount = $handles
-}} | ConvertTo-Json -Compress
-"#
-    );
-
-    let output = Command::new("powershell")
-        .no_window()
-        .arg("-NoProfile")
-        .arg("-ExecutionPolicy")
-        .arg("Bypass")
-        .arg("-Command")
-        .arg(script)
-        .output()
-        .ok()?;
-
-    if !output.status.success() {
+    let processes = windows_fxserver_processes(pid).ok()?;
+    if processes.is_empty() {
         return None;
     }
 
-    let content = String::from_utf8_lossy(&output.stdout);
+    let mut cpu_seconds = 0.0;
+    let mut memory_bytes = 0_u64;
+    let mut thread_count = 0_u32;
+    let mut handle_count = 0_u32;
 
-    let value: serde_json::Value = serde_json::from_str(content.trim()).ok()?;
+    for process_info in processes {
+        let process = unsafe {
+            OpenProcess(
+                PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ,
+                0,
+                process_info.pid,
+            )
+        };
+        if process.is_null() {
+            continue;
+        }
+
+        cpu_seconds += process_cpu_seconds(process).unwrap_or(0.0);
+        memory_bytes = memory_bytes.saturating_add(process_working_set(process).unwrap_or(0));
+        thread_count = thread_count.saturating_add(process_info.thread_count);
+        handle_count = handle_count.saturating_add(process_handle_count(process).unwrap_or(0));
+
+        unsafe {
+            CloseHandle(process);
+        }
+    }
+
+    let mut memory_status: MEMORYSTATUSEX = unsafe { mem::zeroed() };
+    memory_status.dwLength = mem::size_of::<MEMORYSTATUSEX>() as u32;
+    let total_memory_bytes = if unsafe { GlobalMemoryStatusEx(&mut memory_status) } != 0 {
+        memory_status.ullTotalPhys
+    } else {
+        0
+    };
+    let memory_percent = if total_memory_bytes > 0 {
+        ((memory_bytes as f64 / total_memory_bytes as f64) * 100.0).clamp(0.0, 100.0)
+    } else {
+        0.0
+    };
     let current_sample = ResourceSample {
-        cpu_seconds: number_from_json(value.get("CpuSeconds")).unwrap_or(0.0),
+        cpu_seconds,
         sampled_at: Instant::now(),
     };
     let cpu_percent = previous_sample
@@ -1554,16 +1840,154 @@ if ($totalMemory -gt 0) {{
     Some(FxserverResources {
         cpu_percent: (cpu_percent * 100.0).round() / 100.0,
 
-        memory_bytes: integer_from_json(value.get("MemoryBytes")).unwrap_or(0),
+        memory_bytes,
 
-        total_memory_bytes: integer_from_json(value.get("TotalMemoryBytes")).unwrap_or(0),
+        total_memory_bytes,
 
-        memory_percent: number_from_json(value.get("MemoryPercent")).unwrap_or(0.0),
+        memory_percent: (memory_percent * 100.0).round() / 100.0,
 
-        thread_count: integer_from_json(value.get("ThreadCount")).unwrap_or(0) as u32,
+        thread_count,
 
-        handle_count: integer_from_json(value.get("HandleCount")).unwrap_or(0) as u32,
+        handle_count,
     })
+}
+
+#[cfg(target_os = "windows")]
+fn windows_fxserver_processes(root_pid: u32) -> Result<Vec<WindowsProcessInfo>, String> {
+    let processes = windows_process_tree(root_pid)?;
+    Ok(processes
+        .into_iter()
+        .filter(|process| process.exe_name.eq_ignore_ascii_case("fxserver.exe"))
+        .collect())
+}
+
+#[cfg(target_os = "windows")]
+fn windows_process_tree(root_pid: u32) -> Result<Vec<WindowsProcessInfo>, String> {
+    use std::mem;
+    use windows_sys::Win32::{
+        Foundation::{CloseHandle, INVALID_HANDLE_VALUE},
+        System::Diagnostics::ToolHelp::{
+            CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+            TH32CS_SNAPPROCESS,
+        },
+    };
+
+    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+    if snapshot == INVALID_HANDLE_VALUE {
+        return Err(format!(
+            "Failed to inspect Windows process tree: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+
+    let mut entries = Vec::new();
+    let mut entry: PROCESSENTRY32W = unsafe { mem::zeroed() };
+    entry.dwSize = mem::size_of::<PROCESSENTRY32W>() as u32;
+
+    let mut has_entry = unsafe { Process32FirstW(snapshot, &mut entry) } != 0;
+    while has_entry {
+        entries.push((
+            entry.th32ProcessID,
+            entry.th32ParentProcessID,
+            utf16_z_to_string(&entry.szExeFile),
+            entry.cntThreads,
+        ));
+        has_entry = unsafe { Process32NextW(snapshot, &mut entry) } != 0;
+    }
+
+    unsafe {
+        CloseHandle(snapshot);
+    }
+
+    let mut all = vec![root_pid];
+    let mut frontier = vec![root_pid];
+
+    while !frontier.is_empty() {
+        let mut next = Vec::new();
+        for (pid, parent_pid, _, _) in &entries {
+            if frontier.contains(parent_pid) && !all.contains(pid) {
+                all.push(*pid);
+                next.push(*pid);
+            }
+        }
+        frontier = next;
+    }
+
+    Ok(entries
+        .into_iter()
+        .filter(|(pid, _, _, _)| all.contains(pid))
+        .map(|(pid, _, exe_name, thread_count)| WindowsProcessInfo {
+            pid,
+            exe_name,
+            thread_count,
+        })
+        .collect())
+}
+
+#[cfg(target_os = "windows")]
+fn process_cpu_seconds(process: windows_sys::Win32::Foundation::HANDLE) -> Option<f64> {
+    use std::mem;
+    use windows_sys::Win32::{Foundation::FILETIME, System::Threading::GetProcessTimes};
+
+    let mut creation: FILETIME = unsafe { mem::zeroed() };
+    let mut exit: FILETIME = unsafe { mem::zeroed() };
+    let mut kernel: FILETIME = unsafe { mem::zeroed() };
+    let mut user: FILETIME = unsafe { mem::zeroed() };
+
+    if unsafe { GetProcessTimes(process, &mut creation, &mut exit, &mut kernel, &mut user) } == 0 {
+        return None;
+    }
+
+    Some((filetime_to_u64(kernel) + filetime_to_u64(user)) as f64 / 10_000_000.0)
+}
+
+#[cfg(target_os = "windows")]
+fn process_working_set(process: windows_sys::Win32::Foundation::HANDLE) -> Option<u64> {
+    use std::mem;
+    use windows_sys::Win32::System::ProcessStatus::{
+        K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS,
+    };
+
+    let mut counters: PROCESS_MEMORY_COUNTERS = unsafe { mem::zeroed() };
+    counters.cb = mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32;
+
+    if unsafe {
+        K32GetProcessMemoryInfo(
+            process,
+            &mut counters,
+            mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32,
+        )
+    } == 0
+    {
+        return None;
+    }
+
+    Some(counters.WorkingSetSize as u64)
+}
+
+#[cfg(target_os = "windows")]
+fn process_handle_count(process: windows_sys::Win32::Foundation::HANDLE) -> Option<u32> {
+    use windows_sys::Win32::System::Threading::GetProcessHandleCount;
+
+    let mut count = 0_u32;
+    if unsafe { GetProcessHandleCount(process, &mut count) } == 0 {
+        return None;
+    }
+    Some(count)
+}
+
+#[cfg(target_os = "windows")]
+fn filetime_to_u64(value: windows_sys::Win32::Foundation::FILETIME) -> u64 {
+    ((value.dwHighDateTime as u64) << 32) | value.dwLowDateTime as u64
+}
+
+#[cfg(target_os = "windows")]
+fn utf16_z_to_string(value: &[u16]) -> String {
+    let len = value
+        .iter()
+        .position(|character| *character == 0)
+        .unwrap_or(value.len());
+    String::from_utf16_lossy(&value[..len])
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -1661,22 +2085,6 @@ fn rcon_response_timeout() -> Duration {
 #[cfg(test)]
 fn rcon_response_timeout() -> Duration {
     Duration::from_millis(100)
-}
-
-fn number_from_json(value: Option<&serde_json::Value>) -> Option<f64> {
-    value.and_then(|value| {
-        value
-            .as_f64()
-            .or_else(|| value.as_str()?.parse::<f64>().ok())
-    })
-}
-
-fn integer_from_json(value: Option<&serde_json::Value>) -> Option<u64> {
-    value.and_then(|value| {
-        value
-            .as_u64()
-            .or_else(|| value.as_str()?.parse::<u64>().ok())
-    })
 }
 
 fn rcon_password_path() -> Result<PathBuf, String> {
@@ -1880,5 +2288,42 @@ mod tests {
         .expect_err("bad password");
 
         assert!(error.contains("RCON authentication failed"));
+    }
+
+    #[test]
+    fn terminal_parser_strips_title_sequences_and_control_codes() {
+        let parsed = parse_terminal_line("\x1b]0;FXServer\x07\x1b[38;5;86m[core]\x1b[0m hello");
+
+        assert_eq!(parsed.plain_line, "[core] hello");
+        assert_eq!(parsed.segments[0].text, "[core]");
+        assert!(parsed.segments[0].emphasis.unwrap_or(false));
+        assert_eq!(parsed.segments.last().expect("text").text, " hello");
+
+        let title_only = parse_terminal_line("]0;FXServer title");
+        assert_eq!(title_only.plain_line, "");
+        assert!(title_only.segments.is_empty());
+    }
+
+    #[test]
+    fn terminal_parser_preserves_split_ansi_colors() {
+        let parsed = parse_terminal_line("\x1b[94mWelcome to \x1b[33mQbox!\x1b[0m");
+
+        assert_eq!(parsed.plain_line, "Welcome to Qbox!");
+        assert_eq!(parsed.segments.len(), 2);
+        assert_eq!(parsed.segments[0].text, "Welcome to ");
+        assert_eq!(parsed.segments[0].color.as_deref(), Some("#93c5fd"));
+        assert_eq!(parsed.segments[1].text, "Qbox!");
+        assert_eq!(parsed.segments[1].color.as_deref(), Some("#facc15"));
+    }
+
+    #[test]
+    fn terminal_parser_keeps_text_after_malformed_csi() {
+        let parsed = parse_terminal_line("\x1b[0;(1) FiveMQbox - txAdmin");
+
+        assert_eq!(parsed.plain_line, " FiveMQbox - txAdmin");
+        assert_eq!(
+            parsed.segments.first().expect("text").text,
+            " FiveMQbox - txAdmin"
+        );
     }
 }

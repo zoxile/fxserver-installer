@@ -1,5 +1,16 @@
 <script module lang="ts">
-	import type { FxserverTerminalEntry as CachedTerminalEntry } from "$lib/modules/fxserver";
+	import type { FxserverTerminalEntry as CachedTerminalEntry, FxserverTerminalSegment as CachedTerminalSegment } from "$lib/modules/fxserver";
+
+	type CachedRenderTerminalSegment = CachedTerminalSegment & {
+		className?: string;
+		style?: string;
+	};
+
+	type CachedRenderTerminalEntry = Omit<CachedTerminalEntry, "plainLine" | "segments"> & {
+		plainLine: string;
+		segments: CachedRenderTerminalSegment[];
+		toneClass: string;
+	};
 
 	type CachedResourceSample = {
 		timestamp: number;
@@ -14,7 +25,7 @@
 		memoryLow: number | null;
 	};
 
-	let cachedTerminalEntries: CachedTerminalEntry[] = [];
+	let cachedTerminalEntries: CachedRenderTerminalEntry[] = [];
 	let cachedResourceSamples: CachedResourceSample[] = [];
 	let cachedResourceExtremes: CachedResourceExtremes = {
 		cpuHigh: null,
@@ -61,6 +72,7 @@
 		type FxserverRconConfig,
 		type FxserverStatus,
 		type FxserverTerminalEntry,
+		type FxserverTerminalSegment,
 	} from "$lib/modules/fxserver";
 	import TxHostFieldInput from "./TxHostFieldInput.svelte";
 	import { sensitiveTxHostKeys, txHostFields, txHostGroups } from "./fxserverEnv";
@@ -78,6 +90,15 @@
 		cpuLow: number | null;
 		memoryHigh: number | null;
 		memoryLow: number | null;
+	};
+	type TerminalSegment = FxserverTerminalSegment & {
+		className?: string;
+		style?: string;
+	};
+	type RenderTerminalEntry = Omit<FxserverTerminalEntry, "plainLine" | "segments"> & {
+		plainLine: string;
+		segments: TerminalSegment[];
+		toneClass: string;
 	};
 
 	const metricWindows: { value: MetricWindow; label: string; milliseconds: number }[] = [
@@ -117,19 +138,18 @@
 	let artifactPath = $state("");
 	let artifact = $state<InstalledArtifactInfo | null>(null);
 	let status = $state<FxserverStatus>({ running: false });
-	let terminalEntries = $state<FxserverTerminalEntry[]>([...cachedTerminalEntries]);
+	let terminalEntries = $state<RenderTerminalEntry[]>([...cachedTerminalEntries]);
 	let terminalCommand = $state("");
-	let rconConfig = $state<FxserverRconConfig>({
-		host: "127.0.0.1",
-		port: 30120,
-		password: "",
-	});
+	let rconHost = $state("127.0.0.1");
+	let rconPort = $state(30120);
+	let rconPassword = $state("");
 	let envValues = $state<Record<string, string>>(emptyEnvironment());
 	let serverProfile = $state("");
 	let storageReady = false;
 	let busy = $state(false);
 	let starting = $state(false);
 	let stopping = $state(false);
+	let rconSending = $state(false);
 	let error = $state("");
 	let message = $state("");
 	let refreshTimer: number | undefined;
@@ -139,7 +159,7 @@
 	let nowSeconds = $state(Math.floor(Date.now() / 1000));
 	let terminalViewport: HTMLDivElement | null = null;
 	let terminalRefreshPending = false;
-	let pendingTerminalEntries: FxserverTerminalEntry[] = [];
+	let pendingTerminalEntries: RenderTerminalEntry[] = [];
 	let terminalFlushTimer: number | undefined;
 	let terminalScrollFrame: number | undefined;
 	let rconPasswordLoaded = false;
@@ -149,10 +169,15 @@
 	let resourceSamples = $state<ResourceSample[]>([...cachedResourceSamples]);
 	let resourceExtremes = $state<ResourceExtremes>({ ...cachedResourceExtremes });
 
+	const rconConfig = $derived<FxserverRconConfig>({
+		host: rconHost,
+		port: rconPort,
+		password: rconPassword,
+	});
 	const activeEnvCount = $derived(Object.values(envValues).filter((value) => value.trim()).length + (serverProfile.trim() ? 1 : 0));
 	const canStart = $derived(Boolean(artifactPath.trim()) && !status.running && !starting && !busy);
 	const txHostEditableFields = $derived(txHostFields.filter((field) => field.key !== "TXHOST_DATA_PATH"));
-	const displayedUptimeSeconds = $derived(status.running ? Math.max(0, nowSeconds - (startedAtSeconds(status.startedAt) ?? nowSeconds)) : (status.uptimeSeconds ?? 0));
+	const displayedUptimeSeconds = $derived(status.running ? Math.max(0, nowSeconds - (startedAtSeconds(status.startedAt) ?? nowSeconds)) : 0);
 	const visibleResourceSamples = $derived(filterResourceSamples(resourceSamples, metricWindow, resourceWindowNowMs));
 	const resourceChartData = $derived(
 		visibleResourceSamples.map((sample) => ({
@@ -199,11 +224,11 @@
 	$effect(() => {
 		JSON.stringify(envValues);
 		serverProfile;
-		JSON.stringify(rconConfig);
+		rconHost;
+		rconPort;
 
 		if (storageReady) {
 			saveEnvironment();
-			if (rconPasswordLoaded) scheduleRconPasswordSave();
 		}
 	});
 
@@ -248,15 +273,15 @@
 		try {
 			const saved = readSavedEnvironment();
 			envValues = { ...emptyEnvironment(), ...saved, TXHOST_DATA_PATH: fxserverSettings.txDataPath };
-			rconConfig = {
-				host: saved.TXHOST_RCON_HOST || "127.0.0.1",
-				port: Number.parseInt(saved.TXHOST_RCON_PORT || "30120", 10) || 30120,
-				password: "",
-			};
+			rconHost = saved.TXHOST_RCON_HOST || "127.0.0.1";
+			rconPort = Number.parseInt(saved.TXHOST_RCON_PORT || "30120", 10) || 30120;
+			rconPassword = "";
 			serverProfile = fxserverSettings.profile;
 		} catch {
 			envValues = emptyEnvironment();
-			rconConfig = { host: "127.0.0.1", port: 30120, password: "" };
+			rconHost = "127.0.0.1";
+			rconPort = 30120;
+			rconPassword = "";
 			serverProfile = "";
 		}
 	}
@@ -264,7 +289,7 @@
 	async function loadSecureRconPassword() {
 		try {
 			const password = await getSavedFxserverRconPassword();
-			rconConfig = { ...rconConfig, password };
+			rconPassword = password;
 			lastSavedRconPassword = password;
 		} catch (caught) {
 			error = caught instanceof Error ? caught.message : String(caught);
@@ -283,15 +308,15 @@
 			.filter(([key, value]) => value && !sensitiveTxHostKeys.has(key));
 		writeSavedEnvironment({
 			...Object.fromEntries(trimmedEntries),
-			TXHOST_RCON_HOST: rconConfig.host.trim(),
-			TXHOST_RCON_PORT: String(rconConfig.port || 30120),
+			TXHOST_RCON_HOST: rconHost.trim(),
+			TXHOST_RCON_PORT: String(rconPort || 30120),
 		});
 		setTxDataPath((envValues.TXHOST_DATA_PATH ?? "").trim());
 		setServerProfile(serverProfile.trim());
 	}
 
 	function scheduleRconPasswordSave(delayMs = 400) {
-		if (rconConfig.password === lastSavedRconPassword) return;
+		if (rconPassword === lastSavedRconPassword) return;
 		if (rconPasswordSaveTimer) window.clearTimeout(rconPasswordSaveTimer);
 		rconPasswordSaveTimer = window.setTimeout(async () => {
 			await persistRconPassword();
@@ -299,26 +324,26 @@
 	}
 
 	async function persistRconPassword() {
-		if (!rconPasswordLoaded || rconConfig.password === lastSavedRconPassword) return;
+		if (!rconPasswordLoaded || rconPassword === lastSavedRconPassword) return;
 		if (rconPasswordSaveTimer) {
 			window.clearTimeout(rconPasswordSaveTimer);
 			rconPasswordSaveTimer = undefined;
 		}
 
 		try {
-			if (rconConfig.password) {
-				await saveFxserverRconPassword(rconConfig.password);
+			if (rconPassword) {
+				await saveFxserverRconPassword(rconPassword);
 			} else {
 				await clearFxserverRconPassword();
 			}
-			lastSavedRconPassword = rconConfig.password;
+			lastSavedRconPassword = rconPassword;
 		} catch (caught) {
 			error = caught instanceof Error ? caught.message : String(caught);
 		}
 	}
 
 	function updateRconPassword(event: Event) {
-		rconConfig = { ...rconConfig, password: (event.currentTarget as HTMLInputElement).value };
+		rconPassword = (event.currentTarget as HTMLInputElement).value;
 		scheduleRconPasswordSave();
 	}
 
@@ -377,7 +402,7 @@
 	}
 
 	async function refreshStatus(showMessage = true) {
-		status = await getFxserverStatus();
+		status = await getFxserverStatus({ logResult: showMessage });
 		nowSeconds = Math.floor(Date.now() / 1000);
 		recordResourceSample(status);
 		if (showMessage) message = status.running ? "FXServer status refreshed." : "FXServer is not running from this app.";
@@ -454,7 +479,7 @@
 		if (!entries.length) return;
 
 		const existingIds = new Set([...cachedTerminalEntries, ...pendingTerminalEntries].map((entry) => entry.id));
-		const uniqueEntries = entries.filter((entry) => !existingIds.has(entry.id));
+		const uniqueEntries = entries.filter((entry) => !existingIds.has(entry.id)).map(normalizeTerminalEntry);
 		if (!uniqueEntries.length) return;
 
 		pendingTerminalEntries = [...pendingTerminalEntries, ...uniqueEntries].slice(-terminalBufferLimit);
@@ -481,12 +506,30 @@
 		applyTerminalEntries(merged);
 	}
 
-	function applyTerminalEntries(entries: FxserverTerminalEntry[], suppressAutoScroll = false) {
-		terminalEntries = entries;
-		cachedTerminalEntries = entries;
+	function applyTerminalEntries(entries: (FxserverTerminalEntry | RenderTerminalEntry)[], suppressAutoScroll = false) {
+		const normalizedEntries = entries.map(normalizeTerminalEntry);
+		terminalEntries = normalizedEntries;
+		cachedTerminalEntries = normalizedEntries;
 		if (suppressAutoScroll) {
 			lastTerminalEntryId = terminalEntries.at(-1)?.id ?? null;
 		}
+	}
+
+	function normalizeTerminalEntry(entry: FxserverTerminalEntry | RenderTerminalEntry): RenderTerminalEntry {
+		const plainLine = entry.plainLine ?? entry.line;
+		const sourceSegments = entry.segments?.length ? entry.segments : [{ text: plainLine } satisfies FxserverTerminalSegment];
+
+		return {
+			...entry,
+			line: plainLine,
+			plainLine,
+			segments: sourceSegments.map((segment) => ({
+				...segment,
+				className: segment.emphasis ? "font-semibold" : undefined,
+				style: segment.color ? `color: ${segment.color};` : undefined,
+			})),
+			toneClass: terminalLineToneClassFromText(plainLine),
+		};
 	}
 
 	async function scrollTerminalToBottom() {
@@ -607,6 +650,18 @@
 		});
 	}
 
+	function terminalStreamLabel(stream: string) {
+		return (
+			{
+				stdout: "OUT",
+				stderr: "ERR",
+				system: "SYS",
+				command: "CMD",
+				rcon: "RCON",
+			}[stream] ?? stream.slice(0, 4).toUpperCase()
+		);
+	}
+
 	function terminalStreamClass(stream: string) {
 		return (
 			{
@@ -619,9 +674,22 @@
 		);
 	}
 
+	function terminalLineToneClassFromText(clean: string) {
+		if (/\b(script error|error|exception|failed|fatal)\b/i.test(clean)) {
+			return "border-l-2 border-red-400/70 bg-red-500/10 text-red-50";
+		}
+		if (/\b(warn|warning)\b/i.test(clean)) {
+			return "border-l-2 border-amber-400/70 bg-amber-500/10 text-amber-50";
+		}
+		if (/\b(debug)\b/i.test(clean)) {
+			return "border-l-2 border-sky-400/50 bg-sky-500/10";
+		}
+		return "border-l-2 border-transparent";
+	}
+
 	function updateRconPort(event: Event) {
 		const value = Number.parseInt((event.currentTarget as HTMLInputElement).value, 10);
-		rconConfig = { ...rconConfig, port: Number.isFinite(value) ? value : 30120 };
+		rconPort = Number.isFinite(value) ? value : 30120;
 	}
 
 	function updateAutoScrollFromScroll() {
@@ -632,15 +700,20 @@
 
 	async function submitTerminalCommand() {
 		const command = terminalCommand.trim();
-		if (!command) return;
+		if (!command || rconSending) return;
 
+		rconSending = true;
+		terminalCommand = "";
+		await tick();
 		try {
 			await persistRconPassword();
 			await sendFxserverCommand(command, rconConfig);
-			terminalCommand = "";
 			await refreshTerminal({ scrollToBottom: true });
 		} catch (caught) {
+			if (!terminalCommand.trim()) terminalCommand = command;
 			error = caught instanceof Error ? caught.message : String(caught);
+		} finally {
+			rconSending = false;
 		}
 	}
 </script>
@@ -964,21 +1037,23 @@
 				</div>
 			</div>
 
-			<div bind:this={terminalViewport} onscroll={updateAutoScrollFromScroll} class="h-104 overflow-auto rounded-sm border border-border bg-black/40 font-mono text-xs">
+			<div bind:this={terminalViewport} onscroll={updateAutoScrollFromScroll} class="h-104 overflow-auto rounded-sm border border-border bg-black/50 font-mono text-xs">
 				{#if visibleTerminalEntries.length}
 					<div class="min-w-0 py-1">
 						{#each visibleTerminalEntries as item (item.id)}
-							<div class="flex min-h-6 min-w-0 items-center gap-2 px-3 text-muted-foreground">
-								<span class="w-20 shrink-0 truncate text-[11px] text-muted-foreground/80">
+							<div class={["grid min-h-6 min-w-max grid-cols-[3.7rem_2.35rem_minmax(28rem,1fr)] items-center gap-2 px-2.5 text-muted-foreground", item.toneClass]}>
+								<span class="shrink-0 truncate text-[10px] leading-6 text-muted-foreground/70 tabular-nums">
 									{terminalTime(item.timestamp)}
 								</span>
 
-								<span class={`w-16 shrink-0 truncate rounded-xs border px-1.5 py-0.5 text-center text-[10px] leading-none font-semibold uppercase ${terminalStreamClass(item.stream)}`}>
-									{item.stream}
+								<span class={`shrink-0 truncate rounded-xs border px-1 py-0.5 text-center text-[9px] leading-none font-semibold uppercase ${terminalStreamClass(item.stream)}`}>
+									{terminalStreamLabel(item.stream)}
 								</span>
 
-								<span class="min-w-0 flex-1 truncate text-foreground" title={item.line}>
-									{item.line}
+								<span class="min-w-0 whitespace-pre pr-4 text-foreground" title={item.plainLine}>
+									{#each item.segments as segment}
+										<span class={segment.className} style={segment.style}>{segment.text}</span>
+									{/each}
 								</span>
 							</div>
 						{/each}
@@ -991,16 +1066,16 @@
 			<div class="grid gap-3 rounded-sm border border-border bg-muted/20 p-3 md:grid-cols-[minmax(0,1fr)_8rem_minmax(0,1fr)]">
 				<label class="grid gap-2">
 					<span class="text-xs font-medium text-muted-foreground">RCON Host</span>
-					<Input bind:value={rconConfig.host} placeholder="127.0.0.1" title="Host where FXServer accepts RCON connections." class="rounded-sm font-mono text-xs" />
+					<Input bind:value={rconHost} placeholder="127.0.0.1" title="Host where FXServer accepts RCON connections." class="rounded-sm font-mono text-xs" />
 				</label>
 				<label class="grid gap-2">
 					<span class="text-xs font-medium text-muted-foreground">Port</span>
-					<Input value={String(rconConfig.port)} oninput={updateRconPort} type="number" min="1" max="65535" placeholder="30120" title="FXServer RCON port." class="rounded-sm font-mono text-xs" />
+					<Input value={String(rconPort)} oninput={updateRconPort} type="number" min="1" max="65535" placeholder="30120" title="FXServer RCON port." class="rounded-sm font-mono text-xs" />
 				</label>
 				<label class="grid gap-2">
 					<span class="text-xs font-medium text-muted-foreground">Password</span>
 					<PasswordInput
-						value={rconConfig.password}
+						value={rconPassword}
 						oninput={updateRconPassword}
 						onblur={() => void persistRconPassword()}
 						placeholder="server.cfg rcon_password"
@@ -1021,12 +1096,17 @@
 					bind:value={terminalCommand}
 					placeholder="status, refresh, say hello..."
 					title="Command to send to FXServer through RCON"
-					disabled={!status.running || !rconConfig.password.trim()}
+					disabled={!status.running || !rconPassword.trim()}
 					class="rounded-sm font-mono text-xs"
 				/>
-				<Button type="submit" disabled={!status.running || !terminalCommand.trim() || !rconConfig.password.trim()} title="Send command through RCON">
-					<SendIcon />
-					Send
+				<Button type="submit" disabled={!status.running || !terminalCommand.trim() || !rconPassword.trim() || rconSending} title="Send command through RCON">
+					{#if rconSending}
+						<LoaderCircleIcon class="animate-spin" />
+						Sending
+					{:else}
+						<SendIcon />
+						Send
+					{/if}
 				</Button>
 			</form>
 		</Card.Content>

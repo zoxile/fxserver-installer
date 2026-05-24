@@ -61,7 +61,19 @@ pub struct FxserverTerminalEntry {
     pub id: u64,
     pub stream: String,
     pub line: String,
+    pub plain_line: String,
+    pub segments: Vec<FxserverTerminalSegment>,
     pub timestamp: String,
+}
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct FxserverTerminalSegment {
+    pub text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub emphasis: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
