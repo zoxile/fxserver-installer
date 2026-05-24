@@ -37,7 +37,7 @@ export async function fetchLatestAppRelease(): Promise<AppReleaseInfo> {
 	if (!version) throw new Error("Version manifest did not include an app version.");
 
 	const tagName = `v${normalizeVersion(version)}`;
-	const fileName = `FXServer Installer_${normalizeVersion(version)}_x64-setup.exe`;
+	const fileName = `FXServer.Installer_${normalizeVersion(version)}_windows_x64-setup.exe`;
 	const htmlUrl = `${releaseBaseUrl}/tag/${encodeURIComponent(tagName)}`;
 
 	return {
