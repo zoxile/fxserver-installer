@@ -41,6 +41,7 @@
 	import LoaderCircleIcon from "@lucide/svelte/icons/loader-circle";
 	import PlayIcon from "@lucide/svelte/icons/play";
 	import RefreshCwIcon from "@lucide/svelte/icons/refresh-cw";
+	import RotateCwIcon from "@lucide/svelte/icons/rotate-cw";
 	import SendIcon from "@lucide/svelte/icons/send";
 	import ServerIcon from "@lucide/svelte/icons/server";
 	import SquareIcon from "@lucide/svelte/icons/square";
@@ -149,6 +150,7 @@
 	let busy = $state(false);
 	let starting = $state(false);
 	let stopping = $state(false);
+	let restarting = $state(false);
 	let rconSending = $state(false);
 	let error = $state("");
 	let message = $state("");
@@ -175,7 +177,8 @@
 		password: rconPassword,
 	});
 	const activeEnvCount = $derived(Object.values(envValues).filter((value) => value.trim()).length + (serverProfile.trim() ? 1 : 0));
-	const canStart = $derived(Boolean(artifactPath.trim()) && !status.running && !starting && !busy);
+	const canStart = $derived(Boolean(artifactPath.trim()) && !status.running && !starting && !stopping && !restarting && !busy);
+	const canRestart = $derived(Boolean(artifactPath.trim()) && status.running && !starting && !stopping && !restarting && !busy);
 	const txHostEditableFields = $derived(txHostFields.filter((field) => field.key !== "TXHOST_DATA_PATH"));
 	const displayedUptimeSeconds = $derived(status.running ? Math.max(0, nowSeconds - (startedAtSeconds(status.startedAt) ?? nowSeconds)) : 0);
 	const visibleResourceSamples = $derived(filterResourceSamples(resourceSamples, metricWindow, resourceWindowNowMs));
@@ -547,6 +550,14 @@
 		return txHostFields.map((field) => ({ key: field.key, value: (envValues[field.key] ?? "").trim() })).filter((entry) => entry.value);
 	}
 
+	function launchRequest() {
+		return {
+			artifactPath: artifactPath.trim(),
+			environment: launchEnvironment(),
+			serverProfile: serverProfile.trim() || null,
+		};
+	}
+
 	async function startServer() {
 		error = "";
 		message = "";
@@ -554,17 +565,32 @@
 
 		try {
 			saveEnvironment();
-			await startFxserver({
-				artifactPath: artifactPath.trim(),
-				environment: launchEnvironment(),
-				serverProfile: serverProfile.trim() || null,
-			});
+			await startFxserver(launchRequest());
 			await Promise.all([refreshStatus(false), refreshTerminal({ reset: true })]);
 			message = "FXServer started with the selected TXHOST environment.";
 		} catch (caught) {
 			error = caught instanceof Error ? caught.message : String(caught);
 		} finally {
 			starting = false;
+		}
+	}
+
+	async function restartServer() {
+		error = "";
+		message = "";
+		restarting = true;
+
+		try {
+			saveEnvironment();
+			await stopFxserver();
+			await startFxserver(launchRequest());
+			await Promise.all([refreshStatus(false), refreshTerminal({ reset: true })]);
+			message = "FXServer restarted with the selected TXHOST environment.";
+		} catch (caught) {
+			error = caught instanceof Error ? caught.message : String(caught);
+			await Promise.all([refreshStatus(false), refreshTerminal({ reset: true })]).catch(() => undefined);
+		} finally {
+			restarting = false;
 		}
 	}
 
@@ -740,7 +766,7 @@
 	{/if}
 
 	<div class="grid gap-4">
-		<Card.Root class="group relative overflow-hidden rounded-sm border-border bg-card shadow-sm transition-[box-shadow,transform] duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] hover:-translate-y-0.5">
+		<Card.Root class="group relative overflow-hidden rounded-sm border-border bg-card shadow-sm transition-shadow duration-500 ease-[cubic-bezier(0.22,1,0.36,1)]">
 			<div
 				class="pointer-events-none absolute inset-x-4 top-0 h-px bg-linear-to-r from-transparent via-primary/70 to-transparent opacity-0 transition-opacity duration-300 group-hover:opacity-100"
 			></div>
@@ -787,7 +813,7 @@
 		</Card.Root>
 	</div>
 
-	<Card.Root class="group relative overflow-hidden rounded-sm border-border bg-card shadow-sm transition-[box-shadow,transform] duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] hover:-translate-y-0.5">
+	<Card.Root class="group relative overflow-hidden rounded-sm border-border bg-card shadow-sm transition-shadow duration-500 ease-[cubic-bezier(0.22,1,0.36,1)]">
 		<div
 			class="pointer-events-none absolute inset-x-4 top-0 h-px bg-linear-to-r from-transparent via-primary/70 to-transparent opacity-0 transition-opacity duration-300 group-hover:opacity-100"
 		></div>
@@ -820,7 +846,15 @@
 					{/if}
 					Start
 				</Button>
-				<Button variant="destructive" onclick={stopServer} disabled={!status.running || stopping} title="Stop the FXServer process started by this app">
+				<Button variant="secondary" onclick={restartServer} disabled={!canRestart} title="Restart FXServer with the configured TXHOST variables">
+					{#if restarting}
+						<LoaderCircleIcon class="animate-spin" />
+					{:else}
+						<RotateCwIcon />
+					{/if}
+					Restart
+				</Button>
+				<Button variant="destructive" onclick={stopServer} disabled={!status.running || stopping || restarting} title="Stop the FXServer process started by this app">
 					{#if stopping}
 						<LoaderCircleIcon class="animate-spin" />
 					{:else}
@@ -828,7 +862,7 @@
 					{/if}
 					Stop
 				</Button>
-				<Button variant="outline" onclick={() => refreshStatus()} disabled={busy} title="Refresh FXServer process usage">
+				<Button variant="outline" onclick={() => refreshStatus()} disabled={busy || starting || stopping || restarting} title="Refresh FXServer process usage">
 					<RefreshCwIcon />
 					Status
 				</Button>
@@ -991,7 +1025,7 @@
 		</Card.Content>
 	</Card.Root>
 
-	<Card.Root class="group relative overflow-hidden rounded-sm border-border bg-card shadow-sm transition-[box-shadow,transform] duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] hover:-translate-y-0.5">
+	<Card.Root class="group relative overflow-hidden rounded-sm border-border bg-card shadow-sm transition-shadow duration-500 ease-[cubic-bezier(0.22,1,0.36,1)]">
 		<div
 			class="pointer-events-none absolute inset-x-4 top-0 h-px bg-linear-to-r from-transparent via-primary/70 to-transparent opacity-0 transition-opacity duration-300 group-hover:opacity-100"
 		></div>
@@ -1112,7 +1146,7 @@
 		</Card.Content>
 	</Card.Root>
 
-	<Card.Root class="group relative overflow-hidden rounded-sm border-border bg-card shadow-sm transition-[box-shadow,transform] duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] hover:-translate-y-0.5">
+	<Card.Root class="group relative overflow-hidden rounded-sm border-border bg-card shadow-sm transition-shadow duration-500 ease-[cubic-bezier(0.22,1,0.36,1)]">
 		<div
 			class="pointer-events-none absolute inset-x-4 top-0 h-px bg-linear-to-r from-transparent via-primary/70 to-transparent opacity-0 transition-opacity duration-300 group-hover:opacity-100"
 		></div>

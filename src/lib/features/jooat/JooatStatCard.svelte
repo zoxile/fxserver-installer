@@ -12,7 +12,7 @@
 	let { label, value, description, icon: Icon }: Props = $props();
 </script>
 
-<Card.Root class="group relative overflow-hidden rounded-sm border-border bg-card shadow-sm transition-[box-shadow,transform] duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] hover:-translate-y-0.5">
+<Card.Root class="group relative overflow-hidden rounded-sm border-border bg-card shadow-sm transition-shadow duration-500 ease-[cubic-bezier(0.22,1,0.36,1)]">
 	<div class="pointer-events-none absolute inset-x-4 top-0 h-px bg-linear-to-r from-transparent via-primary/70 to-transparent opacity-0 transition-opacity duration-300 group-hover:opacity-100"></div>
 	<Card.Content class="flex items-start justify-between gap-4 p-4">
 		<div class="min-w-0">

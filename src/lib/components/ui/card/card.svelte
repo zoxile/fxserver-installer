@@ -15,7 +15,7 @@
 	bind:this={ref}
 	data-slot="card"
 	data-size={size}
-	class={cn("ring-foreground/10 bg-card text-card-foreground relative gap-6 overflow-hidden rounded-xl py-6 text-sm shadow-xs ring-1 transition-[box-shadow,transform] duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] will-change-transform hover:-translate-y-0.5 hover:shadow-md has-[>img:first-child]:pt-0 data-[size=sm]:gap-4 data-[size=sm]:py-4 *:[img:first-child]:rounded-t-xl *:[img:last-child]:rounded-b-xl group/card flex flex-col", className)}
+	class={cn("ring-foreground/10 bg-card text-card-foreground relative gap-6 overflow-hidden rounded-xl py-6 text-sm shadow-xs ring-1 transition-shadow duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] hover:shadow-md has-[>img:first-child]:pt-0 data-[size=sm]:gap-4 data-[size=sm]:py-4 *:[img:first-child]:rounded-t-xl *:[img:last-child]:rounded-b-xl group/card flex flex-col", className)}
 	{...restProps}
 >
 	<div class="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-primary/40 to-transparent opacity-0 transition-opacity duration-200 group-hover/card:opacity-100"></div>

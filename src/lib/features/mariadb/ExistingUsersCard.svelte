@@ -73,7 +73,7 @@
 					{@const isSelected = selectedUser?.username === user.username && selectedUser?.host === user.host}
 					<div
 						class={[
-							"group flex items-center justify-between gap-3 rounded-sm border px-3 py-2 transition-[background-color,border-color,transform] duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] hover:-translate-y-0.5 hover:border-primary/35 hover:bg-accent/40",
+							"group flex items-center justify-between gap-3 rounded-sm border px-3 py-2 transition-[background-color,border-color] duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] hover:border-primary/35 hover:bg-accent/40",
 							isSelected ? "border-primary/45 bg-accent/50" : "border-border bg-background/70",
 						]}
 					>
