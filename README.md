@@ -12,6 +12,53 @@ Quick note: The main purpose of this app was for me to learn how to build with T
 > [!NOTE]
 > Windows SmartScreen may warn because this project is new and currently unsigned. If you downloaded it from the official GitHub Releases page, click "More info" and then "Run anyway".
 
+## Screenshots
+
+<p align="center">
+  <img src="./assets/fxserver_installer_home.png" width="90%" />
+</p>
+
+### First Run Experience
+
+<p align="center">
+  <img src="./assets/fxserver_installer_command_palette.png" width="48%" />
+  <img src="./assets/fxserver_installer_onboarding.png" width="48%" />
+</p>
+
+### Artifact Management
+
+<p align="center">
+  <img src="./assets/fxserver_installer_artifact.png" width="48%" />
+  <img src="./assets/fxserver_installer_artifact_2.png" width="48%" />
+</p>
+
+### Server Configuration
+
+<p align="center">
+  <img src="./assets/fxserver_installer_conf_server.png" width="48%" />
+  <img src="./assets/fxserver_installer_configurator.png" width="48%" />
+</p>
+
+### MariaDB Management
+
+<p align="center">
+  <img src="./assets/fxserver_installer_mariadb.png" width="48%" />
+  <img src="./assets/fxserver_installer_mariadb_2.png" width="48%" />
+</p>
+
+### Server Management
+
+<p align="center">
+  <img src="./assets/fxserver_installer_manage_server.png" width="48%" />
+  <img src="./assets/fxserver_installer_manage_resources.png" width="48%" />
+</p>
+
+### Utilities & Logs
+
+<p align="center">
+  <img src="./assets/fxserver_installer_logs.png" width="48%" />
+</p>
+
 ## Documentation
 
 - [User Guide](docs/user-guide.md): Install, build, update, and operate the app without relying on the installer workflow.
