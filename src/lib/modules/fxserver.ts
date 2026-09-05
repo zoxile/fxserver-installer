@@ -412,24 +412,3 @@ export async function readServerConfig(request: ServerConfigRequest) {
 		throw error;
 	}
 }
-
-export async function saveServerConfig(path: string, content: string) {
-	if (!hasTauriRuntime()) return unavailableOutsideTauri<ServerConfigFile>();
-
-	try {
-		const file = await invoke<ServerConfigFile>("save_server_config", { request: { path, content } });
-		log(`Saved ${file.name}.`, {
-			level: "success",
-			scope: "fxserver.config",
-			detail: file.path,
-		});
-		return file;
-	} catch (error) {
-		log("Server config save failed.", {
-			level: "error",
-			scope: "fxserver.config",
-			detail: errorMessage(error),
-		});
-		throw error;
-	}
-}

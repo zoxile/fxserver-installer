@@ -1,11 +1,11 @@
 use super::*;
 
-struct Fixture {
-    root: PathBuf,
+pub(super) struct Fixture {
+    pub(super) root: PathBuf,
 }
 
 impl Fixture {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(1);
         let root = std::env::temp_dir().join(format!(
             "fxserver-diagnostics-test-{}-{}-{}",
@@ -33,13 +33,13 @@ impl Fixture {
         Self { root }
     }
 
-    fn resource(&self, path: &str, content: &str) {
+    pub(super) fn resource(&self, path: &str, content: &str) {
         let path = self.root.join("data/resources").join(path);
         fs::create_dir_all(&path).unwrap();
         fs::write(path.join("fxmanifest.lua"), content).unwrap();
     }
 
-    fn request(&self) -> PreflightRequest {
+    pub(super) fn request(&self) -> PreflightRequest {
         PreflightRequest {
             artifact_path: self.root.join("artifacts").to_string_lossy().into_owned(),
             tx_data_path: self.root.join("txData").to_string_lossy().into_owned(),

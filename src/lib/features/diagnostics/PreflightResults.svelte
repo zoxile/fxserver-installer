@@ -6,12 +6,17 @@
 	import ChevronLeftIcon from "@lucide/svelte/icons/chevron-left";
 	import ChevronRightIcon from "@lucide/svelte/icons/chevron-right";
 	import SearchIcon from "@lucide/svelte/icons/search";
+	import ArrowUpRightIcon from "@lucide/svelte/icons/arrow-up-right";
+	import FilePenLineIcon from "@lucide/svelte/icons/file-pen-line";
 	import { Button } from "$lib/components/ui/button/index.js";
 	import { Input } from "$lib/components/ui/input/index.js";
 	import * as Select from "$lib/components/ui/select/index.js";
 	import type { DiagnosticSeverity, PreflightReport } from "$lib/modules/diagnostics";
+	import type { PageId } from "$lib/navigation";
 
-	let { report }: { report: PreflightReport } = $props();
+	let { report, onNavigate, onReviewPatch, disabled = false }: {
+		report: PreflightReport; onNavigate?: (page: PageId) => void; onReviewPatch?: () => void; disabled?: boolean;
+	} = $props();
 	let search = $state("");
 	let severity = $state("all");
 	let page = $state(0);
@@ -61,6 +66,18 @@
 					<p class="text-xs leading-5 wrap-anywhere text-muted-foreground">{check.detail}</p>
 					{#if check.file || check.resource}
 						<p class="font-mono text-xs wrap-anywhere text-muted-foreground">{check.file ?? check.resource}{check.line ? `:${check.line}` : ""}</p>
+					{/if}
+					{#if check.guidance}
+						<details class="pt-1">
+							<summary class="cursor-pointer text-xs font-medium">Recommended next steps</summary>
+							<ol class="mt-2 list-decimal space-y-1 pl-5 text-xs leading-5 text-muted-foreground">
+								{#each check.guidance.steps as step}<li class="wrap-anywhere">{step}</li>{/each}
+							</ol>
+						</details>
+						<div class="flex flex-wrap gap-2 pt-2">
+							{#if onNavigate}<Button size="sm" variant="outline" {disabled} onclick={() => onNavigate?.(check.guidance!.page)}><ArrowUpRightIcon />{check.guidance.label}</Button>{/if}
+							{#if check.guidance.patchAvailable && onReviewPatch}<Button size="sm" variant="outline" {disabled} onclick={onReviewPatch}><FilePenLineIcon />Review rconlog patch</Button>{/if}
+						</div>
 					{/if}
 				</div>
 			</div>

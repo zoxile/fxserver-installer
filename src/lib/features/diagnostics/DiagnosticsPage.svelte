@@ -4,6 +4,8 @@
 	import EyeIcon from "@lucide/svelte/icons/eye";
 	import FileArchiveIcon from "@lucide/svelte/icons/file-archive";
 	import LoaderCircleIcon from "@lucide/svelte/icons/loader-circle";
+	import FileCheck2Icon from "@lucide/svelte/icons/file-check-2";
+	import XIcon from "@lucide/svelte/icons/x";
 	import { save } from "@tauri-apps/plugin-dialog";
 	import { onMount } from "svelte";
 	import * as Card from "$lib/components/ui/card/index.js";
@@ -17,6 +19,11 @@
 	import { fxserverSettings, loadFxserverSettings } from "$lib/features/fxserver/fxserverSettings.svelte";
 	import { exportDiagnosticZip, previewDiagnosticExport, runPreflight, type DiagnosticPreview, type PreflightReport, type PreflightRequest } from "$lib/modules/diagnostics";
 	import PreflightResults from "./PreflightResults.svelte";
+	import ConfigDiff from "$lib/features/config-history/ConfigDiff.svelte";
+	import { applyDiagnosticConfigPatch, previewDiagnosticConfigPatch, type DiagnosticConfigPatch } from "$lib/modules/diagnostics";
+	import type { PageId } from "$lib/navigation";
+
+	let { onNavigate }: { onNavigate?: (page: PageId) => void } = $props();
 
 	let checking = $state(false);
 	let preparing = $state(false);
@@ -30,8 +37,17 @@
 	let error = $state("");
 	let message = $state("");
 	let showPrivacyNotice = $state(true);
+	let reportRequest = $state<PreflightRequest | null>(null);
+	let patch = $state<DiagnosticConfigPatch | null>(null);
+	let patchBusy = $state(false);
+	let patchRevealed = $state(false);
+	let patchReviewed = $state(false);
+	let patchContext = "";
+	const context = $derived(JSON.stringify([getInstallPath(), fxserverSettings.txDataPath, fxserverSettings.profile]));
 	const activeEntry = $derived(preview?.entries.find((entry) => entry.name === selectedEntry));
 	$effect(() => { includeApplicationLog; includeServerLog; useDatabase; preview = null; });
+	$effect(() => { context; report = null; reportRequest = null; preview = null; patch = null; });
+	$effect(() => { patch; patchRevealed; patchReviewed = false; });
 
 	onMount(() => { loadInstallPath(); loadFxserverSettings(); });
 
@@ -46,14 +62,49 @@
 	}
 
 	async function runChecks() {
-		if (checking) return;
+		if (checking || patchBusy) return;
 		checking = true;
 		error = "";
+		patch = null;
+		const targetContext = context;
+		const target = request();
 		try {
 			const status = await getFxserverStatus();
-			report = await runPreflight(request(!status.running));
+			target.checkPorts = !status.running;
+			const result = await runPreflight(target);
+			if (targetContext === context) { report = result; reportRequest = { ...target, credentials: null, checkPorts: false }; }
 		} catch (caught) { error = String(caught); }
 		finally { checking = false; }
+	}
+
+	async function reviewPatch() {
+		if (!reportRequest || patchBusy || checking) return;
+		patchBusy = true;
+		error = "";
+		message = "";
+		patch = null;
+		patchRevealed = false;
+		const targetContext = context;
+		try {
+			const result = await previewDiagnosticConfigPatch({ ...reportRequest });
+			if (targetContext === context) { patchContext = targetContext; patch = result; }
+		} catch (caught) { error = String(caught); }
+		finally { patchBusy = false; }
+	}
+
+	async function applyPatch() {
+		if (!patch || !patchReviewed || !patchRevealed || patchBusy || patchContext !== context) return;
+		const reviewed = patch;
+		patchBusy = true;
+		error = "";
+		let saved = false;
+		try {
+			const result = await applyDiagnosticConfigPatch(reviewed.id);
+			message = `${result.name} patched. Previous content is preserved in encrypted history. No resource or service was started.`;
+			saved = true;
+		} catch (caught) { error = String(caught); }
+		finally { patchBusy = false; patch = null; preview = null; }
+		if (saved) await runChecks();
 	}
 
 	async function prepareExport() {
@@ -62,8 +113,11 @@
 		error = "";
 		message = "";
 		preview = null;
+		const target = JSON.stringify([context, includeApplicationLog, includeServerLog, useDatabase]);
 		try {
-			preview = await previewDiagnosticExport({ preflight: request(), includeApplicationLog, includeServerLog });
+			const result = await previewDiagnosticExport({ preflight: request(), includeApplicationLog, includeServerLog });
+			if (target !== JSON.stringify([context, includeApplicationLog, includeServerLog, useDatabase])) return;
+			preview = result;
 			selectedEntry = preview.entries[0]?.name ?? "";
 		} catch (caught) { error = String(caught); }
 		finally { preparing = false; }
@@ -98,7 +152,7 @@
 			<div class="flex flex-wrap items-center gap-3">
 				<ClipboardCheckIcon class="size-5 text-muted-foreground" />
 				<Card.Title class="flex-1">Preflight & Dependencies</Card.Title>
-				<Button size="sm" onclick={runChecks} disabled={checking}>
+				<Button size="sm" onclick={runChecks} disabled={checking || patchBusy}>
 					{#if checking}<LoaderCircleIcon class="animate-spin" />{:else}<ClipboardCheckIcon />{/if}
 					{checking ? "Checking" : "Run checks"}
 				</Button>
@@ -109,9 +163,25 @@
 				<label class="flex items-center gap-2 text-sm"><Checkbox bind:checked={useDatabase} disabled={!databaseSession.credentials || preparing || exporting} />Check session database connection</label>
 				{#if report}<span class="text-xs text-muted-foreground">Checked {new Date(report.checkedAt * 1000).toLocaleTimeString()}</span>{/if}
 			</div>
-			{#if report}<PreflightResults {report} />{:else}<p class="py-6 text-center text-sm text-muted-foreground">No diagnostic results yet.</p>{/if}
+			{#if report}<PreflightResults {report} {onNavigate} onReviewPatch={reviewPatch} disabled={checking || patchBusy} />{:else}<p class="py-6 text-center text-sm text-muted-foreground">No diagnostic results yet.</p>{/if}
 		</Card.Content>
 	</Card.Root>
+
+	{#if patchBusy && !patch}<p class="flex items-center gap-2 text-sm" role="status"><LoaderCircleIcon class="size-4 animate-spin" />Preparing reviewed patch...</p>{/if}
+	{#if patch}
+		<section class="min-w-0 space-y-4 border-y border-border py-5" aria-label="Review configuration repair">
+			<div class="flex items-center justify-between gap-3"><h2 class="text-base font-semibold">Review rconlog startup patch</h2><Button variant="ghost" size="icon-sm" aria-label="Discard patch" title="Discard patch" disabled={patchBusy} onclick={() => patch = null}><XIcon /></Button></div>
+			<p class="font-mono text-xs wrap-anywhere text-muted-foreground">{patch.path}</p>
+			<p class="text-xs leading-5 text-muted-foreground">Adds only <code>ensure rconlog</code>. FXServer must be stopped. Credentials and services remain unchanged. Previous content is saved to encrypted configuration history.</p>
+			<label class="flex items-center gap-2 text-xs"><Checkbox bind:checked={patchRevealed} disabled={patchBusy} />Reveal config contents, including secrets</label>
+			{#if patchRevealed}<ConfigDiff before={patch.before} after={patch.after} beforeLabel="Current file" afterLabel="Reviewed repair" />{/if}
+			<label class="flex items-center gap-2 text-xs"><Checkbox bind:checked={patchReviewed} disabled={!patchRevealed || patchBusy} />I reviewed this exact file change.</label>
+			<div class="flex flex-wrap items-center justify-between gap-3">
+				<span class="text-xs text-muted-foreground">Review expires at {new Date(patch.expiresAt * 1000).toLocaleTimeString()}</span>
+				<Button onclick={applyPatch} disabled={!patchReviewed || !patchRevealed || patchBusy}>{#if patchBusy}<LoaderCircleIcon class="animate-spin" />{:else}<FileCheck2Icon />{/if}Apply reviewed patch</Button>
+			</div>
+		</section>
+	{/if}
 
 	<Card.Root>
 		<Card.Header class="border-b border-border">

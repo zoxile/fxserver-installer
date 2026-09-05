@@ -168,12 +168,19 @@ fn lua_tokens(source: &str) -> Vec<Token> {
     tokens
 }
 
+#[cfg(test)]
 pub(super) fn config_commands(source: &str) -> Vec<(usize, Vec<String>)> {
+    config_commands_checked(source).0
+}
+
+pub(super) fn config_commands_checked(source: &str) -> (Vec<(usize, Vec<String>)>, bool) {
     let mut commands = Vec::new();
+    let mut uncertain = false;
     for (line, source) in source.lines().enumerate() {
         let mut words = Vec::new();
         let mut word = String::new();
         let mut quote = None;
+        let mut started = false;
         let mut chars = source.trim_start_matches('\u{feff}').chars().peekable();
         while let Some(character) = chars.next() {
             if let Some(delimiter) = quote {
@@ -188,29 +195,34 @@ pub(super) fn config_commands(source: &str) -> Vec<(usize, Vec<String>)> {
                 break;
             } else if matches!(character, '\'' | '"') {
                 quote = Some(character);
+                started = true;
             } else if character == ';' {
-                if !word.is_empty() {
+                if started {
                     words.push(std::mem::take(&mut word));
+                    started = false;
                 }
                 if !words.is_empty() {
                     commands.push((line + 1, std::mem::take(&mut words)));
                 }
             } else if character.is_whitespace() {
-                if !word.is_empty() {
+                if started {
                     words.push(std::mem::take(&mut word));
+                    started = false;
                 }
             } else {
                 word.push(character);
+                started = true;
             }
         }
-        if !word.is_empty() {
+        uncertain |= quote.is_some();
+        if started {
             words.push(word);
         }
         if !words.is_empty() {
             commands.push((line + 1, words));
         }
     }
-    commands
+    (commands, uncertain)
 }
 
 #[cfg(test)]

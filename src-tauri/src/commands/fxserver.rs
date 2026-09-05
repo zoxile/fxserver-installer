@@ -1,4 +1,5 @@
 use std::{
+    collections::VecDeque,
     env, fs,
     io::{BufRead, BufReader, Write},
     net::UdpSocket,
@@ -11,6 +12,8 @@ use std::{
     thread,
     time::{Duration, Instant, SystemTime},
 };
+
+use tauri::{AppHandle, Emitter};
 
 use crate::{
     models::fxserver::{
@@ -103,8 +106,20 @@ struct ManagedFxserverProcess {
 #[derive(Default)]
 struct TerminalState {
     entries: Vec<FxserverTerminalEntry>,
+    incidents: VecDeque<ConsoleIncident>,
+    workspace_id: String,
     next_id: u64,
     generation: u64,
+}
+
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ConsoleIncident {
+    id: u64,
+    workspace_id: String,
+    timestamp: u64,
+    level: &'static str,
+    message: String,
 }
 
 #[cfg(target_os = "windows")]
@@ -155,6 +170,37 @@ impl Default for FxserverManager {
 }
 
 impl FxserverManager {
+    pub(crate) fn set_incident_workspace(&self, workspace_id: &str) -> Result<(), String> {
+        self.terminal
+            .lock()
+            .map_err(|_| "FXServer terminal is unavailable.")?
+            .workspace_id = workspace_id.to_string();
+        Ok(())
+    }
+
+    pub fn start_incident_events(&self, app: AppHandle) {
+        let manager = self.clone();
+        tauri::async_runtime::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(1));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                interval.tick().await;
+                if manager.shutting_down.load(Ordering::Acquire) {
+                    break;
+                }
+                let batch = manager
+                    .terminal
+                    .try_lock()
+                    .ok()
+                    .map(|mut state| state.incidents.drain(..).collect::<Vec<_>>())
+                    .unwrap_or_default();
+                if !batch.is_empty() {
+                    let _ = app.emit("fxserver-console-incidents", batch);
+                }
+            }
+        });
+    }
+
     pub fn stop_running_process(&self) -> Result<(), String> {
         self.disarm_recovery();
         let _operation = self
@@ -196,6 +242,27 @@ impl FxserverManager {
         intent.expected_running = true;
         intent.generation = intent.generation.wrapping_add(1);
         Ok(true)
+    }
+
+    pub(crate) fn with_stopped_server<T>(
+        &self,
+        action: impl FnOnce() -> Result<T, String>,
+    ) -> Result<T, String> {
+        let _operation = self
+            .lifecycle
+            .try_lock()
+            .map_err(|_| "Wait for the current FXServer action to finish.".to_string())?;
+        let mut process = self
+            .process
+            .lock()
+            .map_err(|_| "FXServer process state is unavailable.".to_string())?;
+        if let Some(process) = process.as_mut() {
+            if process_is_running(process)? {
+                return Err("Stop FXServer before changing managed server files.".to_string());
+            }
+        }
+        drop(process);
+        action()
     }
 
     pub(crate) fn prepare_workspace_switch(
@@ -903,7 +970,7 @@ fn read_server_config_blocking(request: ServerConfigRequest) -> Result<ServerCon
     let (tx_data_path, profile, profile_config_path, data_path) =
         resolve_profile_data_path(request.tx_data_path, request.profile)?;
 
-    let files = read_cfg_files(&data_path)?;
+    let files = super::config_history::read_profile_configs(&data_path)?;
     let rcon = find_rcon_password(&files);
     let rconlog = find_rconlog(&files);
 
@@ -923,26 +990,32 @@ fn read_server_config_blocking(request: ServerConfigRequest) -> Result<ServerCon
 
 #[tauri::command]
 pub async fn save_server_config(
+    app: AppHandle,
     request: SaveServerConfigRequest,
+    tx_data_path: Option<String>,
+    profile: Option<String>,
+    expected_content: Option<String>,
 ) -> Result<ServerConfigFile, String> {
-    super::run_blocking(move || save_server_config_blocking(request)).await
+    super::run_blocking(move || {
+        let target = super::config_history::ConfigFileRequest {
+            tx_data_path: tx_data_path.ok_or("Reload the selected profile before saving.")?,
+            profile: profile.ok_or("Reload the selected profile before saving.")?,
+            path: request.path,
+        };
+        let expected = expected_content.ok_or("Reload and review the file before saving.")?;
+        super::config_history::save_config_atomic(
+            &super::config_history::history_root(&app)?,
+            &target,
+            &expected,
+            &request.content,
+            super::config_history::ConfigChangeReason::Save,
+        )
+    })
+    .await
 }
 
-fn save_server_config_blocking(
-    request: SaveServerConfigRequest,
-) -> Result<ServerConfigFile, String> {
-    let path = PathBuf::from(request.path.trim());
-    if path.as_os_str().is_empty() {
-        return Err("Choose a config file before saving.".to_string());
-    }
-
-    if !path.is_file() || !is_cfg_file(&path) {
-        return Err("Only existing .cfg files can be saved from this editor.".to_string());
-    }
-
-    fs::write(&path, request.content)
-        .map_err(|error| format!("Failed to save {}: {error}", path.to_string_lossy()))?;
-    read_cfg_file(&path)
+pub(crate) fn config_file_metadata(path: &Path) -> Result<ServerConfigFile, String> {
+    read_cfg_file(path)
 }
 
 #[tauri::command]
@@ -1233,7 +1306,7 @@ fn wait_for_child_exit(child: &mut Child, timeout: Duration) -> bool {
     false
 }
 
-fn resolve_profile_data_path(
+pub(crate) fn resolve_profile_data_path(
     tx_data_path: String,
     profile: String,
 ) -> Result<(PathBuf, String, PathBuf, PathBuf), String> {
@@ -1243,17 +1316,39 @@ fn resolve_profile_data_path(
     }
 
     let profile = profile.trim().to_string();
-    if profile.is_empty() {
-        return Err("Choose a txData profile first.".to_string());
+    if profile.is_empty()
+        || profile == "."
+        || profile == ".."
+        || profile.contains(['/', '\\', ':', '\0'])
+        || profile.ends_with([' ', '.'])
+    {
+        return Err("Choose a valid txData profile name.".to_string());
     }
 
-    let profile_config_path = tx_data_path.join(&profile).join("config.json");
-    let profile_config = fs::read_to_string(&profile_config_path).map_err(|error| {
-        format!(
-            "Failed to read txData profile config {}: {error}",
-            profile_config_path.to_string_lossy()
-        )
-    })?;
+    let tx_data_path = tx_data_path
+        .canonicalize()
+        .map_err(|_| "The txData directory cannot be opened.".to_string())?;
+    let profile_root = tx_data_path
+        .join(&profile)
+        .canonicalize()
+        .map_err(|_| "The selected profile directory cannot be opened.".to_string())?;
+    if profile_root.parent() != Some(tx_data_path.as_path()) {
+        return Err("The profile directory must stay inside the selected txData directory.".into());
+    }
+    let profile_config_path = profile_root
+        .join("config.json")
+        .canonicalize()
+        .map_err(|_| "The selected profile config.json cannot be opened.".to_string())?;
+    if profile_config_path.parent() != Some(profile_root.as_path()) {
+        return Err("The profile config.json must stay inside the selected profile.".into());
+    }
+    let profile_config =
+        super::config_history::read_bounded_config(&profile_config_path).map_err(|error| {
+            format!(
+                "Failed to read txData profile config {}: {error}",
+                profile_config_path.to_string_lossy()
+            )
+        })?;
     let profile_config: serde_json::Value =
         serde_json::from_str(&profile_config).map_err(|error| {
             format!(
@@ -1285,6 +1380,13 @@ fn resolve_profile_data_path(
             data_path.to_string_lossy()
         ));
     }
+
+    if !data_path.is_absolute() {
+        return Err("The profile dataPath must be an absolute directory path.".into());
+    }
+    let data_path = data_path
+        .canonicalize()
+        .map_err(|_| "The profile data directory cannot be opened.".to_string())?;
 
     Ok((tx_data_path, profile, profile_config_path, data_path))
 }
@@ -1448,6 +1550,7 @@ fn clear_terminal(terminal: &Arc<Mutex<TerminalState>>) -> Result<(), String> {
         .lock()
         .map_err(|_| "FXServer terminal output is unavailable.".to_string())?;
     terminal.entries.clear();
+    terminal.incidents.clear();
     terminal.generation = terminal.generation.wrapping_add(1);
     Ok(())
 }
@@ -1801,6 +1904,7 @@ fn append_terminal_generation(
 ) -> Result<(), String> {
     let line = line.into();
     let parsed = parse_terminal_line(&line);
+    let incident_level = console_incident_level(&parsed.plain_line);
     let mut terminal = terminal
         .lock()
         .map_err(|_| "FXServer terminal output is unavailable.".to_string())?;
@@ -1816,6 +1920,26 @@ fn append_terminal_generation(
         timestamp: system_time_to_label(SystemTime::now()),
     };
     terminal.next_id += 1;
+    if let Some(level) = incident_level {
+        if terminal.incidents.len() >= 100 {
+            terminal.incidents.pop_front();
+        }
+        let workspace_id = if terminal.workspace_id.is_empty() {
+            "default".into()
+        } else {
+            terminal.workspace_id.clone()
+        };
+        terminal.incidents.push_back(ConsoleIncident {
+            id: entry.id,
+            workspace_id,
+            timestamp: SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64,
+            level,
+            message: entry.plain_line.chars().take(2000).collect(),
+        });
+    }
     terminal.entries.push(entry);
 
     if terminal.entries.len() > 5000 {
@@ -1824,6 +1948,22 @@ fn append_terminal_generation(
     }
 
     Ok(())
+}
+
+fn console_incident_level(line: &str) -> Option<&'static str> {
+    let bytes = line.as_bytes();
+    let head = &bytes[..bytes.len().min(512)];
+    let contains = |word: &[u8]| {
+        head.windows(word.len())
+            .any(|part| part.eq_ignore_ascii_case(word))
+    };
+    if contains(b"script error") || contains(b"[error]") || contains(b"fatal error") {
+        Some("error")
+    } else if contains(b"warning:") || contains(b"[warn]") || contains(b"hitch warning") {
+        Some("warn")
+    } else {
+        None
+    }
 }
 
 fn spawn_terminal_reader<R>(terminal: Arc<Mutex<TerminalState>>, stream: &'static str, reader: R)
@@ -1863,36 +2003,8 @@ fn resolve_log_path(data_path: PathBuf, profile: &str, log_name: &str) -> PathBu
     data_path.join(profile).join("logs").join(log_name)
 }
 
-fn read_cfg_files(data_path: &Path) -> Result<Vec<ServerConfigFile>, String> {
-    let entries = fs::read_dir(data_path).map_err(|error| {
-        format!(
-            "Failed to inspect server data path {}: {error}",
-            data_path.to_string_lossy()
-        )
-    })?;
-    let mut paths = Vec::new();
-
-    for entry in entries {
-        let entry =
-            entry.map_err(|error| format!("Failed to inspect server config file: {error}"))?;
-        let path = entry.path();
-        if path.is_file() && is_cfg_file(&path) {
-            paths.push(path);
-        }
-    }
-
-    paths.sort_by(|left, right| {
-        cfg_sort_rank(left)
-            .cmp(&cfg_sort_rank(right))
-            .then_with(|| cfg_name(left).cmp(&cfg_name(right)))
-    });
-
-    paths.into_iter().map(|path| read_cfg_file(&path)).collect()
-}
-
 fn read_cfg_file(path: &Path) -> Result<ServerConfigFile, String> {
-    let content = fs::read_to_string(path)
-        .map_err(|error| format!("Failed to read {}: {error}", path.to_string_lossy()))?;
+    let content = super::config_history::read_bounded_config(path)?;
     let metadata = fs::metadata(path)
         .map_err(|error| format!("Failed to inspect {}: {error}", path.to_string_lossy()))?;
 
@@ -1911,28 +2023,10 @@ fn read_cfg_file(path: &Path) -> Result<ServerConfigFile, String> {
     })
 }
 
-fn is_cfg_file(path: &Path) -> bool {
-    path.extension()
-        .and_then(|extension| extension.to_str())
-        .map(|extension| extension.eq_ignore_ascii_case("cfg"))
-        .unwrap_or(false)
-}
-
 fn cfg_name(path: &Path) -> String {
     path.file_name()
         .map(|name| name.to_string_lossy().to_string())
         .unwrap_or_else(|| path.to_string_lossy().to_string())
-}
-
-fn cfg_sort_rank(path: &Path) -> usize {
-    match cfg_name(path).to_ascii_lowercase().as_str() {
-        "server.cfg" => 0,
-        "permissions.cfg" => 1,
-        "misc.cfg" => 2,
-        "ox.cfg" => 3,
-        "voice.cfg" => 4,
-        _ => 10,
-    }
 }
 
 fn cfg_has_rcon_password(content: &str) -> bool {
@@ -2471,7 +2565,7 @@ fn hex_value(byte: u8) -> Result<u8, String> {
 }
 
 #[cfg(target_os = "windows")]
-fn encrypt_secret(secret: &[u8]) -> Result<Vec<u8>, String> {
+pub(crate) fn encrypt_secret(secret: &[u8]) -> Result<Vec<u8>, String> {
     use std::ptr;
     use std::slice;
     use windows_sys::Win32::Foundation::LocalFree;
@@ -2513,7 +2607,7 @@ fn encrypt_secret(secret: &[u8]) -> Result<Vec<u8>, String> {
 }
 
 #[cfg(target_os = "windows")]
-fn decrypt_secret(secret: &[u8]) -> Result<Vec<u8>, String> {
+pub(crate) fn decrypt_secret(secret: &[u8]) -> Result<Vec<u8>, String> {
     use std::ptr;
     use std::slice;
     use windows_sys::Win32::Foundation::LocalFree;
@@ -2555,17 +2649,41 @@ fn decrypt_secret(secret: &[u8]) -> Result<Vec<u8>, String> {
 }
 
 #[cfg(not(target_os = "windows"))]
-fn encrypt_secret(_: &[u8]) -> Result<Vec<u8>, String> {
+pub(crate) fn encrypt_secret(_: &[u8]) -> Result<Vec<u8>, String> {
     Err("Secure RCON password storage is only supported on Windows.".to_string())
 }
 
 #[cfg(not(target_os = "windows"))]
-fn decrypt_secret(_: &[u8]) -> Result<Vec<u8>, String> {
+pub(crate) fn decrypt_secret(_: &[u8]) -> Result<Vec<u8>, String> {
     Err("Secure RCON password storage is only supported on Windows.".to_string())
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn console_incidents_are_filtered_bounded_and_cleared() {
+        let manager = super::FxserverManager::default();
+        manager.set_incident_workspace("original").unwrap();
+        super::append_terminal_line(&manager.terminal, "stdout", "normal output").unwrap();
+        assert!(manager.terminal.lock().unwrap().incidents.is_empty());
+        for _ in 0..200 {
+            super::append_terminal_line(&manager.terminal, "stdout", "^1SCRIPT ERROR: fixture")
+                .unwrap();
+        }
+        assert_eq!(manager.terminal.lock().unwrap().incidents.len(), 100);
+        manager.set_incident_workspace("next").unwrap();
+        assert_eq!(
+            manager.terminal.lock().unwrap().incidents[0].workspace_id,
+            "original"
+        );
+        super::clear_terminal(&manager.terminal).unwrap();
+        assert!(manager.terminal.lock().unwrap().incidents.is_empty());
+        assert_eq!(
+            super::console_incident_level("[WARN] slow tick"),
+            Some("warn")
+        );
+    }
+
     use super::*;
     use std::sync::mpsc;
 

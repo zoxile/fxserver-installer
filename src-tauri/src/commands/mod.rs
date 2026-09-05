@@ -1,5 +1,6 @@
 pub mod artifact;
 pub mod backup_manager;
+pub mod config_history;
 pub mod diagnostics;
 pub mod fxserver;
 pub mod health;

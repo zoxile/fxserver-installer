@@ -596,6 +596,7 @@ pub async fn prepare_workspace_switch(
             let next_event = state.next_event;
             let app = state.app.clone();
             let pending_events = std::mem::take(&mut state.pending_events);
+            manager.set_incident_workspace(&workspace_id)?;
             *state = MonitorState {
                 app,
                 pending_events,
@@ -617,6 +618,7 @@ pub async fn prepare_workspace_switch(
 pub async fn initialize_health_workspace(
     workspace_id: String,
     monitor: tauri::State<'_, HealthMonitor>,
+    manager: tauri::State<'_, FxserverManager>,
 ) -> Result<(), String> {
     if workspace_id.is_empty()
         || workspace_id.len() > 64
@@ -634,6 +636,7 @@ pub async fn initialize_health_workspace(
     if state.workspace_initialized && state.workspace_id != workspace_id {
         return Err("Use the workspace switch action to change the active workspace.".to_string());
     }
+    manager.set_incident_workspace(&workspace_id)?;
     state.workspace_id = workspace_id;
     state.workspace_initialized = true;
     Ok(())

@@ -1,3 +1,4 @@
+pub mod guided;
 mod parsing;
 mod redaction;
 
@@ -62,6 +63,7 @@ pub struct DiagnosticCheck {
     pub resource: Option<String>,
     pub file: Option<String>,
     pub line: Option<usize>,
+    pub guidance: Option<guided::Guidance>,
 }
 
 #[derive(Clone, Serialize)]
@@ -115,6 +117,7 @@ struct Inspection {
     checks: Vec<DiagnosticCheck>,
     resources: Vec<Resource>,
     configs: Vec<Config>,
+    executed_commands: Vec<Vec<String>>,
     secrets: Vec<String>,
     data_root: Option<PathBuf>,
     database_version: Option<String>,
@@ -125,11 +128,13 @@ struct Resource {
     path: PathBuf,
     groups: Vec<String>,
     manifest: parsing::Manifest,
+    revision: String,
 }
 
 struct Config {
     path: PathBuf,
     commands: Vec<(usize, Vec<String>)>,
+    source: String,
 }
 
 #[tauri::command]
@@ -186,12 +191,14 @@ fn check(
         resource: None,
         file: None,
         line: None,
+        guidance: None,
     });
 }
 
 fn report(inspection: &Inspection) -> PreflightReport {
     let mut checks = inspection.checks.clone();
     for item in &mut checks {
+        item.guidance = guided::guidance(item, inspection);
         item.detail = redact_known(&item.detail, &inspection.secrets);
         item.resource = item
             .resource
@@ -227,35 +234,12 @@ fn report(inspection: &Inspection) -> PreflightReport {
     }
 }
 
-fn resolve_data_root(request: &PreflightRequest) -> Result<PathBuf, &'static str> {
-    if request.tx_data_path.trim().is_empty() {
-        return Err("Choose a txData directory.");
-    }
-    if !safe_component(request.profile.trim()) {
-        return Err("Choose a valid txAdmin profile.");
-    }
-    let root = Path::new(request.tx_data_path.trim());
-    let content = read_bounded(&root.join(request.profile.trim()).join("config.json"))
-        .map_err(|_| "The selected profile config.json is missing, unreadable, or too large.")?;
-    let value: serde_json::Value = serde_json::from_str(&content)
-        .map_err(|_| "The selected profile config.json is not valid JSON.")?;
-    let data_path = value
-        .get("dataPath")
-        .or_else(|| {
-            value
-                .get("server")
-                .and_then(|server| server.get("dataPath"))
-        })
-        .and_then(serde_json::Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .ok_or("The profile has no dataPath or server.dataPath value.")?;
-    let path = PathBuf::from(data_path);
-    if !path.is_dir() {
-        return Err("The profile's server data directory does not exist.");
-    }
-    path.canonicalize()
-        .map_err(|_| "The profile's server data directory cannot be opened.")
+fn resolve_data_root(request: &PreflightRequest) -> Result<PathBuf, String> {
+    super::fxserver::resolve_profile_data_path(
+        request.tx_data_path.clone(),
+        request.profile.clone(),
+    )
+    .map(|(_, _, _, root)| root)
 }
 
 fn inspect(request: &PreflightRequest) -> Inspection {
@@ -306,7 +290,11 @@ fn inspect(request: &PreflightRequest) -> Inspection {
                 );
                 inspection.data_root = Some(root.clone());
                 let resources = root.join("resources");
-                if resources.is_dir() {
+                if let Some(resources) = resources
+                    .canonicalize()
+                    .ok()
+                    .filter(|path| path.is_dir() && path.starts_with(&root))
+                {
                     scan_resources(&resources, &resources, 0, &mut inspection);
                     inspection
                         .resources
@@ -318,7 +306,7 @@ fn inspect(request: &PreflightRequest) -> Inspection {
                         "resources-missing",
                         Severity::Error,
                         "Resources directory missing",
-                        "The data directory has no resources folder.",
+                        "The resources folder is missing, unreadable, or resolves outside dataPath.",
                     );
                 }
                 read_config(
@@ -392,6 +380,20 @@ fn scan_resources(path: &Path, root: &Path, depth: usize, inspection: &mut Inspe
             .map(|name| path.join(name))
             .find(|path| path.is_file());
         if let Some(manifest_path) = manifest_path {
+            if !manifest_path
+                .canonicalize()
+                .is_ok_and(|path| path.starts_with(root))
+            {
+                check(
+                    inspection,
+                    "Resources",
+                    "manifest-unreadable",
+                    Severity::Warning,
+                    "Resource manifest outside dataPath",
+                    "A resource manifest resolves outside the resource directory and was not read.",
+                );
+                return;
+            }
             match read_bounded(&manifest_path) {
                 Ok(source) => inspection.resources.push(Resource {
                     name: path
@@ -411,6 +413,7 @@ fn scan_resources(path: &Path, root: &Path, depth: usize, inspection: &mut Inspe
                         })
                         .collect(),
                     manifest: parsing::manifest(&source),
+                    revision: guided::digest(source.as_bytes()),
                 }),
                 Err(_) => check(
                     inspection,
@@ -514,7 +517,26 @@ fn read_config(
         );
         return;
     };
-    if !path.starts_with(root) || !visited.insert(path.clone()) {
+    if !path.starts_with(root) {
+        check(
+            inspection,
+            "Configuration",
+            "exec-unresolved",
+            Severity::Warning,
+            "Config outside dataPath",
+            "A config resolved outside the server data directory and was not read.",
+        );
+        return;
+    }
+    if !visited.insert(path.clone()) {
+        check(
+            inspection,
+            "Configuration",
+            "config-repeated",
+            Severity::Warning,
+            "Repeated config include",
+            "A repeated or cyclic exec was read only once. Review execution order manually.",
+        );
         return;
     }
     if visited.len() > MAX_CONFIGS {
@@ -549,7 +571,20 @@ fn read_config(
             return;
         }
     };
-    let commands = parsing::config_commands(&source);
+    let (commands, uncertain) = parsing::config_commands_checked(&source);
+    if uncertain {
+        check(
+            inspection,
+            "Configuration",
+            "config-parse-uncertain",
+            Severity::Warning,
+            "Config quoting needs review",
+            "An unterminated quoted value prevents a complete static config review.",
+        );
+        if let Some(check) = inspection.checks.last_mut() {
+            check.file = Some(relative(&path, root));
+        }
+    }
     for (_, words) in &commands {
         let offset = usize::from(matches!(
             words[0].to_ascii_lowercase().as_str(),
@@ -567,6 +602,7 @@ fn read_config(
         }
     }
     for (line, words) in &commands {
+        inspection.executed_commands.push(words.clone());
         if words[0].eq_ignore_ascii_case("exec") {
             if let Some(reference) = words.get(1) {
                 if let Some(target) = config_target(reference, root, &inspection.resources) {
@@ -585,10 +621,27 @@ fn read_config(
                         check.line = Some(*line);
                     }
                 }
+            } else {
+                check(
+                    inspection,
+                    "Configuration",
+                    "exec-unresolved",
+                    Severity::Warning,
+                    "Included config not specified",
+                    "An exec command has no target file.",
+                );
+                if let Some(check) = inspection.checks.last_mut() {
+                    check.file = Some(relative(&path, root));
+                    check.line = Some(*line);
+                }
             }
         }
     }
-    inspection.configs.push(Config { path, commands });
+    inspection.configs.push(Config {
+        path,
+        commands,
+        source,
+    });
 }
 
 fn inspect_dependencies(root: &Path, inspection: &mut Inspection) {
@@ -628,6 +681,7 @@ fn inspect_dependencies(root: &Path, inspection: &mut Inspection) {
                     category: "Resources".into(), code: "dynamic-resource-reference".into(), severity: Severity::Warning,
                     title: "Resource reference needs review".into(), detail: "A dynamic startup reference could not be resolved without executing configuration commands.".into(),
                     resource: None, file: Some(relative(&config.path, root)), line: Some(*line),
+                    guidance: None,
                 });
                 continue;
             }
@@ -652,6 +706,7 @@ fn inspect_dependencies(root: &Path, inspection: &mut Inspection) {
                     resource: Some(target.clone()),
                     file: Some(relative(&config.path, root)),
                     line: Some(*line),
+                    guidance: None,
                 });
             }
             for resource in found {
@@ -699,6 +754,7 @@ fn inspect_dependencies(root: &Path, inspection: &mut Inspection) {
             resource: Some(resources[0].name.clone()),
             file: None,
             line: None,
+            guidance: None,
         });
     }
     for resource in &inspection.resources {
@@ -725,6 +781,7 @@ fn inspect_dependencies(root: &Path, inspection: &mut Inspection) {
                 resource: Some(resource.name.clone()),
                 file: Some(relative(&resource.path, root)),
                 line: None,
+                guidance: None,
             });
         }
         if resource.manifest.dynamic && checks.len() < MAX_CHECKS {
@@ -739,6 +796,7 @@ fn inspect_dependencies(root: &Path, inspection: &mut Inspection) {
                 resource: Some(resource.name.clone()),
                 file: None,
                 line: None,
+                guidance: None,
             });
         }
     }
@@ -754,33 +812,35 @@ fn inspect_config(root: &Path, check_ports: bool, inspection: &mut Inspection) {
     let mut rcon_configured = false;
     let mut rconlog = false;
     let mut endpoints = BTreeSet::new();
-    for config in &inspection.configs {
-        for (_, words) in &config.commands {
-            let command = words[0].to_ascii_lowercase();
-            let offset = usize::from(matches!(command.as_str(), "set" | "setr" | "sets"));
-            if words
-                .get(offset)
-                .is_some_and(|name| name.eq_ignore_ascii_case("rcon_password"))
-                && words.get(offset + 1).is_some_and(|value| !value.is_empty())
-            {
-                rcon_configured = true;
-            }
-            if matches!(command.as_str(), "ensure" | "start") {
-                if let Some(target) = words.get(1) {
-                    rconlog |= target.eq_ignore_ascii_case("rconlog")
-                        || inspection.resources.iter().any(|resource| {
-                            resource.name.eq_ignore_ascii_case("rconlog")
-                                && resource
-                                    .groups
-                                    .iter()
-                                    .any(|group| group.eq_ignore_ascii_case(target))
-                        });
+    for words in &inspection.executed_commands {
+        let command = words[0].to_ascii_lowercase();
+        let offset = usize::from(matches!(command.as_str(), "set" | "setr" | "sets"));
+        if words
+            .get(offset)
+            .is_some_and(|name| name.eq_ignore_ascii_case("rcon_password"))
+        {
+            rcon_configured = words
+                .get(offset + 1)
+                .is_some_and(|value| !value.is_empty() && !value.contains('$'));
+        }
+        if matches!(command.as_str(), "ensure" | "start" | "stop") {
+            if let Some(target) = words.get(1) {
+                let matches = target.eq_ignore_ascii_case("rconlog")
+                    || inspection.resources.iter().any(|resource| {
+                        resource.name.eq_ignore_ascii_case("rconlog")
+                            && resource
+                                .groups
+                                .iter()
+                                .any(|group| group.eq_ignore_ascii_case(target))
+                    });
+                if matches {
+                    rconlog = command != "stop";
                 }
             }
-            if matches!(command.as_str(), "endpoint_add_tcp" | "endpoint_add_udp") {
-                if let Some(endpoint) = words.get(1) {
-                    endpoints.insert((command, endpoint.clone()));
-                }
+        }
+        if matches!(command.as_str(), "endpoint_add_tcp" | "endpoint_add_udp") {
+            if let Some(endpoint) = words.get(1) {
+                endpoints.insert((command, endpoint.clone()));
             }
         }
     }

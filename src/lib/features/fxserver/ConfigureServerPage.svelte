@@ -12,16 +12,21 @@
 	import SearchIcon from "@lucide/svelte/icons/search";
 	import Undo2Icon from "@lucide/svelte/icons/undo-2";
 	import { onMount } from "svelte";
+	import { confirm } from "@tauri-apps/plugin-dialog";
 	import * as Card from "$lib/components/ui/card/index.js";
 	import { Button } from "$lib/components/ui/button/index.js";
 	import { Input } from "$lib/components/ui/input/index.js";
+	import { Checkbox } from "$lib/components/ui/checkbox/index.js";
 	import { Notice } from "$lib/components/ui/notice/index.js";
 	import PasswordInput from "$lib/components/ui/password-input.svelte";
 	import * as Select from "$lib/components/ui/select/index.js";
 	import { chooseFolder } from "$lib/core/selectFolder";
 	import { databaseSession, formatMariaDBConnectionString, rememberDatabaseCredentials } from "$lib/core/databaseSession.svelte";
 	import { listMariaDBDatabases, validateMariaDBCredentials, type MariaDBCredentials } from "$lib/modules/mariadb";
-	import { readServerConfig, saveServerConfig, type ServerConfigFile, type ServerConfigResult } from "$lib/modules/fxserver";
+	import { readServerConfig, type ServerConfigFile, type ServerConfigResult } from "$lib/modules/fxserver";
+	import { readConfigHistoryFile, saveConfigWithHistory } from "$lib/modules/configHistory";
+	import ConfigHistoryPanel from "$lib/features/config-history/ConfigHistoryPanel.svelte";
+	import ConfigDiff from "$lib/features/config-history/ConfigDiff.svelte";
 	import { fxserverSettings, loadFxserverSettings, refreshTxDataProfiles, setServerProfile, setTxDataPath } from "./fxserverSettings.svelte";
 
 	let dataPath = $state("");
@@ -32,6 +37,9 @@
 	let query = $state("");
 	let busy = $state(false);
 	let saving = $state(false);
+	let externalFile = $state<ServerConfigFile | null>(null);
+	let externalReviewed = $state(false);
+	let checkingExternal = false;
 	let notice = $state("");
 	let noticeLevel = $state<"success" | "error">("success");
 	let drafts = $state<Record<string, string>>({});
@@ -69,6 +77,8 @@
 		}),
 	);
 	const selectedFile = $derived((result?.files ?? []).find((file) => file.path === selectedPath) ?? null);
+	const historyRequest = $derived(result && selectedFile ? { txDataPath: result.txDataPath, profile: result.profile, path: selectedFile.path } : null);
+	$effect(() => { editorContent; externalFile; externalReviewed = false; });
 	const selectedFileName = $derived(selectedFile?.name.toLowerCase() ?? "");
 	const serverCfgSelected = $derived(selectedFileName === "server.cfg");
 	const permissionsCfgSelected = $derived(selectedFileName === "permissions.cfg");
@@ -124,7 +134,16 @@
 	});
 
 	async function loadConfig() {
+		if (busy || saving) return;
 		busy = true;
+		if (!await confirmDiscardDrafts()) {
+			dataPath = result?.txDataPath ?? dataPath;
+			profile = result?.profile ?? profile;
+			setTxDataPath(dataPath);
+			setServerProfile(profile);
+			busy = false;
+			return;
+		}
 		notice = "";
 		setTxDataPath(dataPath);
 		setServerProfile(profile);
@@ -188,19 +207,22 @@
 		notice = "";
 		const selectedFolder = await chooseFolder();
 		if (!selectedFolder) return;
+		if (!await confirmDiscardDrafts()) return;
 
 		dataPath = selectedFolder;
 		profile = "";
-		result = null;
+		clearLoadedConfig();
 		setTxDataPath(selectedFolder);
 		setServerProfile("");
 		await refreshTxDataProfiles();
 	}
 
 	async function handleTxDataChange(event: Event) {
-		dataPath = (event.currentTarget as HTMLInputElement).value;
+		const nextPath = (event.currentTarget as HTMLInputElement).value;
+		if (!await confirmDiscardDrafts()) { dataPath = result?.txDataPath ?? dataPath; return; }
+		dataPath = nextPath;
 		profile = "";
-		result = null;
+		clearLoadedConfig();
 		setTxDataPath(dataPath);
 		setServerProfile("");
 		await refreshTxDataProfiles();
@@ -214,7 +236,23 @@
 		}
 	}
 
+	async function confirmDiscardDrafts() {
+		const hasDrafts = dirty || Object.entries(drafts).some(([path, content]) => result?.files.find((file) => file.path === path)?.content !== content);
+		return !hasDrafts || await confirm("Discard unsaved config drafts and reload this profile?", { title: "Reload configuration", kind: "warning" });
+	}
+
+	function clearLoadedConfig() {
+		result = null;
+		drafts = {};
+		selectedPath = "";
+		editorContent = "";
+		externalFile = null;
+	}
+
 	function selectFile(path: string, keepCurrentDraft = true) {
+		if (saving) return;
+		externalFile = null;
+		externalReviewed = false;
 		if (!path) {
 			selectedPath = "";
 			editorContent = "";
@@ -240,13 +278,29 @@
 	}
 
 	async function saveFile() {
-		if (!selectedFile) return;
+		if (!selectedFile || !historyRequest || saving || busy || externalFile) return;
+		const target = historyRequest;
+		const expected = selectedFile.content;
+		const submitted = editorContent;
 
 		saving = true;
 		notice = "";
 
 		try {
-			const savedFile = await saveServerConfig(selectedFile.path, editorContent);
+			const savedFile = await saveConfigWithHistory(target, expected, submitted);
+			acceptFile(savedFile, editorContent === submitted);
+			notice = `${savedFile.name} saved with encrypted history.`;
+			noticeLevel = "success";
+		} catch (error) {
+			notice = error instanceof Error ? error.message : String(error);
+			noticeLevel = "error";
+			if (notice.includes("CONFIG_CHANGED") || notice.includes("config was saved")) await checkExternal(true);
+		} finally {
+			saving = false;
+		}
+	}
+
+	function acceptFile(savedFile: ServerConfigFile, replaceDraft = true) {
 			const nextFiles = result?.files.map((file) => (file.path === savedFile.path ? savedFile : file)) ?? [];
 			const rcon = findRconPassword(nextFiles);
 			const rconlog = findRconlog(nextFiles);
@@ -261,15 +315,35 @@
 						rconlogLine: rconlog?.line ?? null,
 					}
 				: result;
-			drafts = { ...drafts, [savedFile.path]: savedFile.content };
-			editorContent = savedFile.content;
-			notice = `${savedFile.name} saved.`;
-			noticeLevel = "success";
+			if (replaceDraft) {
+				drafts = { ...drafts, [savedFile.path]: savedFile.content };
+				if (selectedPath === savedFile.path) editorContent = savedFile.content;
+			}
+			externalFile = null;
+			externalReviewed = false;
+	}
+
+	async function checkExternal(force = false) {
+		if (!historyRequest || !selectedFile || checkingExternal || busy || (saving && !force)) return;
+		const target = historyRequest;
+		checkingExternal = true;
+		try {
+			const current = await readConfigHistoryFile(target);
+			if (selectedPath === target.path && current.content !== selectedFile?.content) {
+				externalFile = current;
+				externalReviewed = false;
+			}
 		} catch (error) {
-			notice = error instanceof Error ? error.message : String(error);
-			noticeLevel = "error";
-		} finally {
-			saving = false;
+			if (selectedPath === target.path) { notice = String(error); noticeLevel = "error"; }
+		} finally { checkingExternal = false; }
+	}
+
+	function reloadExternal(keepDraft = false) {
+		if (!externalFile || (keepDraft && !externalReviewed)) return;
+		acceptFile(externalFile, !keepDraft);
+		if (keepDraft) {
+			notice = "The reviewed disk version is now the baseline. Review the draft before saving.";
+			noticeLevel = "success";
 		}
 	}
 
@@ -564,6 +638,8 @@
 	}
 </script>
 
+<svelte:window onfocus={() => void checkExternal()} />
+
 <section class="space-y-6">
 	<div class="flex flex-col justify-between gap-4 lg:flex-row lg:items-end">
 		<div>
@@ -571,7 +647,7 @@
 			<h1 class="mt-2 text-3xl font-semibold tracking-normal text-foreground">Configure Server</h1>
 			<p class="mt-2 max-w-2xl text-sm leading-6 text-muted-foreground">Edit the `.cfg` files from the server data path resolved through your selected txData profile.</p>
 		</div>
-		<Button variant="outline" onclick={loadConfig} disabled={busy || !dataPath.trim() || !profile.trim()} title="Reload config files from disk">
+		<Button variant="outline" onclick={loadConfig} disabled={busy || saving || !dataPath.trim() || !profile.trim()} title="Reload config files from disk">
 			<RefreshCwIcon class={busy ? "animate-spin" : undefined} />
 			Reload
 		</Button>
@@ -587,8 +663,8 @@
 					</Card.Description>
 				</div>
 				<div class="grid gap-2 sm:grid-cols-[minmax(0,22rem)_auto]">
-					<Input bind:value={dataPath} onchange={handleTxDataChange} placeholder="C:\FiveM\txData" title="Folder containing txAdmin profile folders." class="rounded-sm font-mono text-xs" />
-					<Button variant="outline" onclick={chooseTxDataFolder} title="Browse for the txData folder">
+					<Input bind:value={dataPath} onchange={handleTxDataChange} disabled={busy || saving} placeholder="C:\FiveM\txData" title="Folder containing txAdmin profile folders." class="rounded-sm font-mono text-xs" />
+					<Button variant="outline" onclick={chooseTxDataFolder} disabled={busy || saving} title="Browse for the txData folder">
 						<FolderOpenIcon />
 						Browse
 					</Button>
@@ -599,7 +675,7 @@
 			<div class="grid gap-3 lg:grid-cols-[minmax(0,0.55fr)_minmax(0,1fr)_auto] lg:items-end">
 				<label class="grid gap-2">
 					<span class="text-xs font-medium text-muted-foreground">Profile</span>
-					<Select.Root bind:value={profile} type="single" items={profileOptions} onValueChange={handleProfileChange}>
+					<Select.Root bind:value={profile} type="single" items={profileOptions} onValueChange={handleProfileChange} disabled={busy || saving}>
 						<Select.Trigger title="Choose the txData profile folder" class="w-full rounded-sm font-mono text-xs">
 							{profile || "Choose profile"}
 						</Select.Trigger>
@@ -766,6 +842,7 @@
 									type="button"
 									class={`flex w-full items-start gap-3 border-b border-border/70 px-3 py-3 text-left transition-colors last:border-b-0 hover:bg-accent ${selectedPath === file.path ? "bg-accent text-accent-foreground" : ""}`}
 									onclick={() => selectFile(file.path)}
+									disabled={saving || busy}
 									title={file.path}
 								>
 									<FileTextIcon class={`mt-0.5 size-4 shrink-0 ${file.hasRconPassword || file.hasRconlog ? "text-amber-200" : "text-muted-foreground"}`} />
@@ -799,7 +876,7 @@
 								<Undo2Icon />
 								Revert
 							</Button>
-							<Button onclick={saveFile} disabled={!selectedFile || !dirty || saving} title="Save this config file">
+							<Button onclick={saveFile} disabled={!selectedFile || !dirty || saving || busy || Boolean(externalFile)} title="Save this config file">
 								<SaveIcon />
 								{saving ? "Saving" : "Save"}
 							</Button>
@@ -843,7 +920,7 @@
 								<textarea
 									bind:this={editorElement}
 									bind:value={editorContent}
-									disabled={!selectedFile}
+									disabled={!selectedFile || saving || busy}
 									spellcheck="false"
 									wrap="off"
 									onkeydown={handleEditorKeydown}
@@ -855,6 +932,22 @@
 							</div>
 						</div>
 					</div>
+					{#if externalFile}
+						<div class="space-y-3 border-y border-amber-400/30 py-4">
+							<p class="text-sm font-medium text-amber-400">This file changed on disk. Saving is paused.</p>
+							<ConfigDiff before={externalFile.content} after={editorContent} beforeLabel="Current disk version" afterLabel="Your draft" />
+							<label class="flex items-center gap-2 text-xs"><Checkbox bind:checked={externalReviewed} />I reviewed the external changes and my draft.</label>
+							<div class="flex flex-wrap gap-2">
+								<Button size="sm" variant="outline" onclick={() => reloadExternal()}><RefreshCwIcon />Reload file and discard draft</Button>
+								<Button size="sm" variant="outline" disabled={!externalReviewed} onclick={() => reloadExternal(true)}>Keep reviewed draft</Button>
+							</div>
+						</div>
+					{/if}
+					{#if historyRequest && selectedFile}
+						{#key selectedFile.path}
+							<ConfigHistoryPanel request={historyRequest} currentContent={selectedFile.content} hasDraft={dirty} disabled={busy || saving || Boolean(externalFile)} onRestored={(file) => { acceptFile(file); notice = `${file.name} restored. The previous content is in history.`; noticeLevel = "success"; }} onBusy={(value) => saving = value} />
+						{/key}
+					{/if}
 				</Card.Content>
 			</Card.Root>
 		</div>

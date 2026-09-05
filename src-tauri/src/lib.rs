@@ -98,7 +98,13 @@ pub fn run() {
             commands::backup_manager::run_scheduled_backup_now,
             commands::backup_manager::preview_backup_restore,
             commands::backup_manager::restore_backup_snapshot,
+            commands::config_history::read_config_history_file,
+            commands::config_history::list_config_history,
+            commands::config_history::read_config_history_version,
+            commands::config_history::restore_config_history_version,
             commands::diagnostics::run_fxserver_preflight,
+            commands::diagnostics::guided::preview_diagnostic_config_patch,
+            commands::diagnostics::guided::apply_diagnostic_config_patch,
             commands::diagnostics::preview_diagnostic_export,
             commands::diagnostics::export_diagnostic_zip,
             commands::health::get_health_status,
@@ -167,6 +173,8 @@ pub fn run() {
                 )?;
             }
             setup_system_tray(app)?;
+            app.state::<commands::fxserver::FxserverManager>()
+                .start_incident_events(app.handle().clone());
             app.state::<commands::backup_manager::BackupManager>()
                 .start(app.handle().clone());
             app.state::<commands::health::HealthMonitor>()
