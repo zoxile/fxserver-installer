@@ -162,13 +162,15 @@
 				"User grants",
 				"Query helpers",
 				"SQL console",
-				"Database backups",
+				"Scheduled backups and restore tests",
+				"Table browser and CSV export",
 				"Version detection",
 			]}
 			actions={[
 				{ label: "Manage", onclick: () => onNavigate("mariadb") },
 				{ label: "Queries & Files", onclick: () => onNavigate("sql-runner") },
 				{ label: "Backups & Restore", onclick: () => onNavigate("backup-manager") },
+				{ label: "Browse Data", onclick: () => onNavigate("database-browser") },
 			]}
 			onclick={() => onNavigate("mariadb")}
 		/>
@@ -185,12 +187,12 @@
 		/>
 		<HomeBentoCard
 			title="Artifacts"
-			description="Download the recommended FXServer artifact, inspect version metadata, and keep the server runtime pointed at the right folder."
+			description="Browse official Windows builds with JG Scripts recommendations and reported issues."
 			icon={ArchiveIcon}
 			size="feature"
 			className="md:[grid-area:artifacts]"
 			kicker="Runtime builds"
-			highlights={["Installer", "Version metadata", "Known build notes"]}
+			highlights={["Official build catalog", "Recommended builds", "Reported issue warnings"]}
 			actionLabel="Install Artifact"
 			onclick={() => onNavigate("artifact-install")}
 		/>
@@ -205,6 +207,7 @@
 			actions={[
 				{ label: "Manage", onclick: () => onNavigate("server-manage") },
 				{ label: "Resources", onclick: () => onNavigate("resource-manager") },
+				{ label: "Live Bridge", onclick: () => onNavigate("live-bridge") },
 			]}
 			onclick={() => onNavigate("server-manage")}
 		/>
@@ -215,7 +218,7 @@
 			size="compact"
 			className="md:[grid-area:config]"
 			kicker="Configuration"
-			highlights={["Colored cfg editor", "Popular server.cfg values", "Permission helpers"]}
+			highlights={["Colored cfg editor", "Encrypted version history", "Diff and restore", "Permission helpers"]}
 			actionLabel="Configure"
 			onclick={() => onNavigate("server-configure")}
 		/>
@@ -231,6 +234,7 @@
 				{ label: "App Logs", onclick: () => onNavigate("logs") },
 				{ label: "Server Logs", onclick: () => onNavigate("server-logs") },
 				{ label: "Client Logs", onclick: () => onNavigate("client-logs") },
+				{ label: "Timeline", onclick: () => onNavigate("incidents") },
 			]}
 			onclick={() => onNavigate("client-logs")}
 		/>

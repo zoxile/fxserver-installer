@@ -19,6 +19,12 @@
 		onDismiss?: () => void;
 		class?: string;
 	} = $props();
+	let dismissed = $state("");
+	const noticeKey = $derived(JSON.stringify([tone, title, message]));
+	function dismiss() {
+		dismissed = noticeKey;
+		onDismiss?.();
+	}
 
 	const toneClass = $derived(
 		({
@@ -30,6 +36,7 @@
 	);
 </script>
 
+{#if dismissed !== noticeKey}
 <div class={`rounded-sm border px-3 py-2 text-xs ${toneClass} ${className}`} role={tone === "error" ? "alert" : "status"}>
 	<div class="flex items-center gap-2">
 		{#if tone === "success"}
@@ -43,10 +50,9 @@
 			{/if}
 			<p class="wrap-break-word">{message}</p>
 		</div>
-		{#if onDismiss}
-			<Button variant="ghost" size="icon-xs" onclick={onDismiss} title="Dismiss notification">
+			<Button variant="ghost" size="icon-xs" onclick={dismiss} title="Dismiss notification" aria-label={title ? `Dismiss ${title}` : "Dismiss notification"}>
 				<XIcon />
 			</Button>
-		{/if}
 	</div>
 </div>
+{/if}

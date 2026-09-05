@@ -17,6 +17,7 @@ import ServerCogIcon from "@lucide/svelte/icons/server-cog";
 import ShieldIcon from "@lucide/svelte/icons/shield";
 import TablePropertiesIcon from "@lucide/svelte/icons/table-properties";
 import TerminalIcon from "@lucide/svelte/icons/terminal";
+import PlugIcon from "@lucide/svelte/icons/plug";
 import WrenchIcon from "@lucide/svelte/icons/wrench";
 import type { Component } from "svelte";
 
@@ -27,6 +28,9 @@ export type PageId =
 	| "backup-manager"
 	| "diagnostics"
 	| "health"
+	| "live-bridge"
+	| "database-browser"
+	| "incidents"
 	| "onboarding"
 	| "mariadb"
 	| "sql-runner"
@@ -85,6 +89,7 @@ export const navigation: NavigationItem[] = [
 				icon: TablePropertiesIcon,
 			},
 			{ id: "backup-manager", label: "Backups & Restore", icon: ArchiveIcon },
+			{ id: "database-browser", label: "Database Browser", icon: TablePropertiesIcon },
 		],
 	},
 	{
@@ -126,6 +131,7 @@ export const navigation: NavigationItem[] = [
 			},
 			{ id: "diagnostics", label: "Diagnostics", icon: ClipboardCheckIcon },
 			{ id: "health", label: "Health & Recovery", icon: ActivityIcon },
+			{ id: "live-bridge", label: "Live Bridge", icon: PlugIcon },
 		],
 	},
 	{
@@ -133,6 +139,7 @@ export const navigation: NavigationItem[] = [
 		label: "Logs",
 		icon: LogsIcon,
 		children: [
+			{ id: "incidents", label: "Incident Timeline", icon: ActivityIcon },
 			{
 				id: "server-logs",
 				label: "Server Logs",

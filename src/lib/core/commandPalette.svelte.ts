@@ -26,6 +26,9 @@ export const commandPaletteSettings = $state<CommandPaletteSettings>({
 });
 
 export const commandDefinitions: CommandDefinition[] = [
+	{ id: "open-live-bridge", title: "Live Server Bridge", description: "Install the optional bridge and view live resources and players.", category: "FXServer", page: "live-bridge", keywords: ["players", "runtime", "bridge"] },
+	{ id: "open-database-browser", title: "Database Browser", description: "Browse tables, filter rows, export CSV, and review row changes.", category: "Database", page: "database-browser", keywords: ["tables", "rows", "data"] },
+	{ id: "open-incidents", title: "Incident Timeline", description: "Search server incidents and maintenance history.", category: "Logs", page: "incidents", keywords: ["history", "errors", "events"] },
 	{ id: "open-workspaces", title: "Open Workspaces", description: "Switch saved server setups.", category: "Setup", page: "workspaces", keywords: ["profile", "staging", "production"] },
 	{ id: "open-tasks", title: "Open Task Center", description: "View background operations and session history.", category: "Tools", page: "tasks", keywords: ["progress", "jobs"] },
 	{ id: "open-backup-manager", title: "Open Backups & Restore", description: "Schedule database backups and preview restores.", category: "Database", page: "backup-manager", keywords: ["schedule", "retention", "restore"] },
@@ -35,7 +38,7 @@ export const commandDefinitions: CommandDefinition[] = [
 	{ id: "open-onboarding", title: "Open First Run Wizard", description: "Walk through first-time setup checks.", category: "Setup", page: "onboarding", keywords: ["wizard", "setup", "first run"] },
 	{ id: "open-mariadb", title: "Manage MariaDB", description: "Install, manage, and inspect MariaDB.", category: "Database", page: "mariadb", keywords: ["database", "mysql", "users"] },
 	{ id: "open-sql-runner", title: "Open Queries & Files", description: "Run .sql files, create backups, and use the query console.", category: "Database", page: "sql-runner", keywords: ["import", "migration", "sql", "backup"] },
-	{ id: "open-artifact-install", title: "Install FXServer Artifact", description: "Download and extract a recommended artifact.", category: "FXServer", page: "artifact-install", keywords: ["artifact", "download"] },
+	{ id: "open-artifact-install", title: "Install FXServer Artifact", description: "Browse official builds with recommendations and reported issues.", category: "FXServer", page: "artifact-install", keywords: ["artifact", "download"] },
 	{ id: "open-artifact-info", title: "Open Artifact Info", description: "Inspect FXServer artifact metadata.", category: "FXServer", page: "artifact-info", keywords: ["artifact", "version"] },
 	{ id: "open-manage-server", title: "Manage FXServer", description: "Start, stop, monitor, and use RCON.", category: "FXServer", page: "server-manage", keywords: ["start", "console", "rcon"] },
 	{ id: "open-resource-manager", title: "Open Resource Manager", description: "Start, stop, restart, and ensure resources over RCON.", category: "FXServer", page: "resource-manager", keywords: ["resource", "ensure", "restart"] },

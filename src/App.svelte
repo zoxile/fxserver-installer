@@ -31,7 +31,10 @@
 	import { getPageLabel } from "$lib/navigation";
 	import { initializeLogger, log } from "$lib/core/logger.svelte";
 	import { commandDefinitions, commandEnabled, commandPaletteSettings, loadCommandPaletteSettings, shortcutMatchesEvent } from "$lib/core/commandPalette.svelte";
-	import { onMount } from "svelte";
+	import { onMount, untrack } from "svelte";
+	import { initializeIncidents } from "$lib/core/incidents.svelte";
+	import { bridgeSession, syncBridge } from "$lib/core/liveBridge.svelte";
+	import { fxserverSettings } from "$lib/features/fxserver/fxserverSettings.svelte";
 
 	let scrollContainer: HTMLElement;
 	let isNearBottom = $state(false);
@@ -49,6 +52,9 @@
 			| "backup-manager"
 			| "diagnostics"
 			| "health"
+			| "live-bridge"
+			| "database-browser"
+			| "incidents"
 			| "onboarding"
 			| "mariadb"
 			| "sql-runner"
@@ -71,11 +77,18 @@
 
 	onMount(() => {
 		initializeWorkspaces();
+		initializeIncidents();
 		loadCommandPaletteSettings();
 		void (async () => {
 			await initializeLogger();
 			log("Application shell mounted.", { level: "debug", scope: "app" });
 		})();
+	});
+
+	$effect(() => {
+		const target = { workspaceId: workspaceSession.activeId, txDataPath: fxserverSettings.txDataPath, profile: fxserverSettings.profile };
+		bridgeSession.preferenceRevision;
+		untrack(() => { void syncBridge(target); });
 	});
 
 	function navigate(page: PageId) {
@@ -172,9 +185,15 @@
 				{:else if activePage === "backup-manager"}
 					{#await import("$lib/features/mariadb/BackupManagerPage.svelte")}<p role="status" class="text-sm text-muted-foreground">Loading backups...</p>{:then { default: Page }}<Page />{/await}
 				{:else if activePage === "diagnostics"}
-					{#await import("$lib/features/diagnostics/DiagnosticsPage.svelte")}<p role="status" class="text-sm text-muted-foreground">Loading diagnostics...</p>{:then { default: Page }}<Page />{/await}
+					{#await import("$lib/features/diagnostics/DiagnosticsPage.svelte")}<p role="status" class="text-sm text-muted-foreground">Loading diagnostics...</p>{:then { default: Page }}<Page onNavigate={navigate} />{/await}
 				{:else if activePage === "health"}
 					{#await import("$lib/features/fxserver/HealthPage.svelte")}<p role="status" class="text-sm text-muted-foreground">Loading health settings...</p>{:then { default: Page }}<Page />{/await}
+				{:else if activePage === "live-bridge"}
+					{#await import("$lib/features/fxserver/LiveBridgePage.svelte")}<p role="status" class="text-sm text-muted-foreground">Loading live bridge...</p>{:then { default: Page }}<Page />{/await}
+				{:else if activePage === "database-browser"}
+					{#await import("$lib/features/mariadb/DatabaseBrowserPage.svelte")}<p role="status" class="text-sm text-muted-foreground">Loading database browser...</p>{:then { default: Page }}<Page />{/await}
+				{:else if activePage === "incidents"}
+					{#await import("$lib/features/incidents/IncidentTimelinePage.svelte")}<p role="status" class="text-sm text-muted-foreground">Loading incident timeline...</p>{:then { default: Page }}<Page onNavigate={navigate} />{/await}
 				{:else if activePage === "onboarding"}
 					<OnboardingPage onNavigate={navigate} />
 				{:else if activePage === "mariadb"}
