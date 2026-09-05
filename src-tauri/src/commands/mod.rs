@@ -6,6 +6,7 @@ pub mod diagnostics;
 pub mod fxserver;
 pub mod health;
 pub mod jooat;
+pub mod live_bridge;
 pub mod logs;
 pub mod mariadb;
 pub mod resource_updates;

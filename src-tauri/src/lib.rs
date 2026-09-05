@@ -87,6 +87,7 @@ pub fn run() {
         .manage(commands::fxserver::FxserverManager::default())
         .manage(commands::backup_manager::BackupManager::default())
         .manage(commands::health::HealthMonitor::default())
+        .manage(commands::live_bridge::LiveBridge::default())
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             commands::artifact::get_windows_artifact_metadata,
@@ -114,6 +115,12 @@ pub fn run() {
             commands::workspace_clone::preview_workspace_clone,
             commands::workspace_clone::discard_workspace_clone_preview,
             commands::workspace_clone::execute_workspace_clone,
+            commands::live_bridge::get_live_bridge_installation,
+            commands::live_bridge::preview_live_bridge_change,
+            commands::live_bridge::apply_live_bridge_change,
+            commands::live_bridge::configure_live_bridge,
+            commands::live_bridge::get_live_bridge_status,
+            commands::live_bridge::send_live_bridge_action,
             commands::diagnostics::run_fxserver_preflight,
             commands::diagnostics::guided::preview_diagnostic_config_patch,
             commands::diagnostics::guided::apply_diagnostic_config_patch,
@@ -187,6 +194,8 @@ pub fn run() {
             setup_system_tray(app)?;
             app.state::<commands::fxserver::FxserverManager>()
                 .start_incident_events(app.handle().clone());
+            app.state::<commands::live_bridge::LiveBridge>()
+                .start(app.handle().clone());
             app.state::<commands::backup_manager::BackupManager>()
                 .start(app.handle().clone());
             app.state::<commands::health::HealthMonitor>()
@@ -283,6 +292,7 @@ fn request_app_quit<R: Runtime>(app: &tauri::AppHandle<R>) {
     }
 
     commands::begin_shutdown();
+    app.state::<commands::live_bridge::LiveBridge>().stop();
     app.state::<commands::fxserver::FxserverManager>()
         .begin_shutdown();
 
