@@ -39,6 +39,7 @@ async (page) => {
           case "save_fxserver_rcon_password": state.passwords[args.workspaceId] = args.password; sessionStorage.setItem("passwords", JSON.stringify(state.passwords)); return;
           case "clear_fxserver_rcon_password": delete state.passwords[args.workspaceId]; sessionStorage.setItem("passwords", JSON.stringify(state.passwords)); return;
           case "initialize_health_workspace": state.workspaceId = args.workspaceId; return;
+          case "configure_live_bridge": return { workspaceId: args.target.workspaceId, enabled: false, connected: false, snapshot: null };
           case "prepare_workspace_switch": if (state.running) throw new Error("Stop FXServer before switching workspaces."); state.workspaceId = args.workspaceId; return;
           case "get_windows_artifact_metadata": return { recommendedArtifact: "10000", windowsDownloadLink: "https://example.invalid/artifact.zip", brokenArtifacts: [] };
           case "get_installed_windows_artifact_info": return { installed: true, version: "10000", destination: args.destination, markerPath: "", hasFxserverExecutable: true, detectionSource: "marker" };
@@ -50,7 +51,7 @@ async (page) => {
           case "stop_fxserver": state.running = false; return;
           case "get_health_status": return { workspaceId: state.workspaceId || "default", config: state.health, sample: null, events: [], recoveryArmed: false, recoveryBlocked: false, recoveryAttempts: 0, nextRecoverySeconds: null };
           case "configure_health": state.health = args.config; return { workspaceId: args.workspaceId, config: state.health, sample: null, events: [], recoveryArmed: false, recoveryBlocked: false, recoveryAttempts: 0, nextRecoverySeconds: null };
-          case "get_backup_manager": return { schedules: state.schedules.filter((item) => item.config.workspaceId === args.workspaceId), snapshots: [], busy: false };
+          case "get_backup_manager": return { schedules: state.schedules.filter((item) => item.config.workspaceId === args.workspaceId), snapshots: [], restoreTests: [], busy: false };
           case "remove_backup_schedule": state.schedules = state.schedules.filter((item) => item.config.id !== args.scheduleId || item.config.workspaceId !== args.workspaceId); return;
           case "preview_diagnostic_export": return { id: "preview", createdAt: Math.floor(Date.now() / 1000), expiresAt: Math.floor(Date.now() / 1000) + 900, entries: [{ name: "manifest.json", content: '{"appVersion":"0.3.2","rcon_password":"[redacted]"}' }], totalBytes: 64 };
           default: state.unknown.push(command); throw new Error(`Unmocked command: ${command}`);
@@ -136,7 +137,7 @@ async (page) => {
     window.managerTest.emit("backup-manager-progress", { workspaceId: "default", scheduleId: "hourly", stage: "error", timestamp: Date.now() });
   });
   await page.getByText("Mock scheduled backup failure", { exact: true }).waitFor();
-  await page.getByRole("button", { name: "Dismiss notification" }).last().click();
+  await page.getByLabel("Background notifications").getByTitle("Dismiss notification").click();
   await page.getByTitle(/^Task Center/).click();
   await page.getByText("Scheduled database backup", { exact: true }).waitFor();
   await page.screenshot({ path: "output/playwright/tasks-narrow.png", fullPage: true });

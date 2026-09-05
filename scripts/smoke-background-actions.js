@@ -26,6 +26,7 @@ async (page) => {
           case "get_fxserver_rcon_password": return "mock-password";
           case "save_fxserver_rcon_password": return;
           case "initialize_health_workspace": return;
+          case "configure_live_bridge": return { workspaceId: args.target.workspaceId, enabled: false, connected: false, snapshot: null };
           case "run_fxserver_preflight": return { checkedAt: Date.now(), blocking: false, errorCount: 0, warningCount: 0, resourceCount: 0, configCount: 0, checks: [] };
           case "get_windows_artifact_metadata": return { recommendedArtifact: "10000", windowsDownloadLink: "https://example.invalid/artifact.zip", brokenArtifacts: [] };
           case "get_installed_windows_artifact_info": return { installed: true, version: "10000", destination: "C:/mock/artifacts", markerPath: "", hasFxserverExecutable: true, detectionSource: "marker" };
@@ -77,6 +78,10 @@ async (page) => {
   };
 
   await manage();
+  await page.evaluate(() => {
+    window.uiLongTasks = [];
+    new PerformanceObserver((list) => window.uiLongTasks.push(...list.getEntries().map((entry) => entry.duration))).observe({ type: "longtask" });
+  });
   for (const [label, command] of [["Start", "start_fxserver"], ["Restart", "restart_fxserver"], ["Stop", "stop_fxserver"]]) {
     await page.getByRole("button", { name: label, exact: true }).click();
     await waitPending(command);
@@ -88,7 +93,9 @@ async (page) => {
     await assertDisabled("Restart");
     await assertDisabled("Stop");
     if (await page.evaluate((name) => window.testDesktop.calls.filter((call) => call === name).length, command) !== 1) throw new Error("Duplicate lifecycle request");
-    console.log(`${label}: navigation remained available during pending work (${Date.now() - started} ms round trip)`);
+    const navigationTime = Date.now() - started;
+    if (navigationTime > 5000) throw new Error(`${label}: navigation took ${navigationTime} ms during background work`);
+    console.log(`${label}: navigation remained available during pending work (${navigationTime} ms round trip)`);
     await complete(command);
     await page.waitForFunction(() => !Object.keys(window.testDesktop.pending).length);
   }
@@ -125,5 +132,8 @@ async (page) => {
   if (errors.length) throw new Error(errors.join("\n"));
   const unknown = await page.evaluate(() => window.testDesktop.unknown);
   if (unknown.length) throw new Error(`Missing desktop mocks: ${unknown.join(", ")}`);
+  const longestTask = await page.evaluate(() => Math.max(0, ...window.uiLongTasks));
+  if (longestTask >= 500) throw new Error(`UI stalled for ${longestTask} ms`);
+  console.log(`Longest UI task: ${longestTask} ms (500 ms regression ceiling)`);
   console.log("PASS: start/restart/stop, RCON success/failure, 1000 console entries, MariaDB progress across navigation; no page errors.");
 }

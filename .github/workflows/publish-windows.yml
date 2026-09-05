@@ -47,6 +47,21 @@ jobs:
       - name: Check app
         run: npm run check
 
+      - name: Test frontend logic
+        run: npm test
+
+      - name: Test native safeguards
+        run: cargo test --manifest-path src-tauri/Cargo.toml --locked
+
+      - name: Build frontend for browser checks
+        run: npm run build
+
+      - name: Install test browser
+        run: npx playwright install chromium
+
+      - name: Check UI workflows and responsiveness
+        run: npm run test:ui
+
       - name: Extract release version
         id: release_version
         run: |

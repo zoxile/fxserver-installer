@@ -8,6 +8,8 @@
     "build": "vite build",
     "preview": "vite preview",
     "check": "svelte-check --tsconfig ./tsconfig.app.json && tsc -p tsconfig.node.json",
+    "test": "node --test scripts/test-*.mjs",
+    "test:ui": "node scripts/run-ui-checks.mjs",
     "version:bump": "node scripts/bump-version.mjs",
     "tauri": "tauri"
   },
@@ -23,6 +25,7 @@
     "autoprefixer": "^10.5.0",
     "bits-ui": "^2.18.1",
     "clsx": "^2.1.1",
+    "playwright": "1.63.0",
     "postcss": "^8.5.14",
     "shadcn-svelte": "^1.2.7",
     "svelte": "^5.55.4",

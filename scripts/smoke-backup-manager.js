@@ -24,11 +24,12 @@ async (page) => {
           case "read_app_logs": return { path: "mock.log", entries: [] };
           case "append_app_log": return;
           case "initialize_health_workspace": return;
+          case "configure_live_bridge": return { workspaceId: args.target.workspaceId, enabled: false, connected: false, snapshot: null };
           case "get_windows_artifact_metadata": return { recommendedArtifact: "10000", windowsDownloadLink: "https://example.invalid/artifact.zip", brokenArtifacts: [] };
           case "get_installed_windows_artifact_info": return { installed: false };
           case "validate_mariadb_credentials": return;
           case "list_mariadb_databases": return ["mysql", "information_schema", "qbx", "qb"];
-          case "get_backup_manager": return structuredClone({ schedules: state.schedules, snapshots: state.snapshots, busy: state.busy });
+          case "get_backup_manager": return structuredClone({ schedules: state.schedules, snapshots: state.snapshots, restoreTests: [], busy: state.busy });
           case "save_backup_schedule":
             state.schedules = [{ config: structuredClone(args.config), enabled: args.enabled, running: false, nextRun: args.enabled ? Date.now() + 3600000 : null, lastRun: null, lastError: null }];
             return;
