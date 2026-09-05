@@ -160,8 +160,8 @@ pub(crate) fn query_json<T: DeserializeOwned>(
         }
         let client = find_mariadb_client().ok_or("MariaDB client is unavailable.")?;
         let mut command = Command::new(client);
-        command.no_window().arg("--no-defaults");
-        apply_credentials_args(&mut command, credentials);
+        command.no_window();
+        let _credentials_file = apply_credentials_args(&mut command, credentials)?;
         command
             .args([
                 "--batch",
@@ -175,9 +175,7 @@ pub(crate) fn query_json<T: DeserializeOwned>(
                 "--default-character-set=utf8mb4",
                 "--init-command=SET SESSION sql_mode=''",
             ])
-            .arg("-e")
-            .arg(sql)
-            .stdin(Stdio::null())
+            .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         let mut child = command
@@ -190,6 +188,10 @@ pub(crate) fn query_json<T: DeserializeOwned>(
             .ok_or("MariaDB error output unavailable.")?;
         let output = thread::spawn(move || bounded_read(stdout));
         let errors = thread::spawn(move || bounded_read(stderr));
+        let mut stdin = child.stdin.take().ok_or("MariaDB input unavailable.")?;
+        let sql = sql.to_owned();
+        // SQL can contain row data or ownership secrets; keep it out of process arguments.
+        let input = thread::spawn(move || stdin.write_all(sql.as_bytes()));
         let started = Instant::now();
         let status = loop {
             match child.try_wait() {
@@ -209,12 +211,13 @@ pub(crate) fn query_json<T: DeserializeOwned>(
         };
         let stdout = output.join().map_err(|_| "Query output worker failed.")??;
         let stderr = errors.join().map_err(|_| "Query error worker failed.")??;
+        let input_result = input.join().map_err(|_| "Query input worker failed.")?;
         if !status?.success() {
-            return Err(String::from_utf8_lossy(&stderr)
-                .chars()
-                .take(4000)
-                .collect());
+            return Err(super::backup_manager::storage::client_failure(
+                &String::from_utf8_lossy(&stderr),
+            ));
         }
+        input_result.map_err(|_| "Could not send the complete database query.")?;
         let text = String::from_utf8(stdout).map_err(|_| "MariaDB output was not UTF-8.")?;
         text.lines()
             .filter(|line| !line.is_empty())
@@ -224,13 +227,17 @@ pub(crate) fn query_json<T: DeserializeOwned>(
             })
             .collect()
     })();
-    result.map_err(|error: String| {
-        if credentials.password.is_empty() {
-            error
-        } else {
-            error.replace(&credentials.password, "[redacted]")
-        }
-    })
+    result.map_err(|error: String| redacted_error(&error, &credentials.password))
+}
+
+fn redacted_error(error: &str, password: &str) -> String {
+    // Redact before bounding, including a password crossing the display boundary.
+    let error = if password.is_empty() {
+        error.to_owned()
+    } else {
+        error.replace(password, "[redacted]")
+    };
+    error.chars().take(4000).collect()
 }
 
 fn metadata(
@@ -297,6 +304,24 @@ fn schema_hash(database: &str, table: &str) -> String {
     format!("SHA2(CONCAT(COALESCE((SELECT GROUP_CONCAT(JSON_ARRAY(COLUMN_NAME,COLUMN_TYPE,IS_NULLABLE,COLUMN_DEFAULT,EXTRA,COLLATION_NAME) ORDER BY ORDINAL_POSITION) FROM information_schema.COLUMNS WHERE {scope}),''),COALESCE((SELECT GROUP_CONCAT(JSON_ARRAY(INDEX_NAME,COLUMN_NAME,SEQ_IN_INDEX,SUB_PART,NON_UNIQUE) ORDER BY INDEX_NAME,SEQ_IN_INDEX) FROM information_schema.STATISTICS WHERE {scope}),'')),256)")
 }
 
+fn read_schema_hash(
+    credentials: &MariaDBCredentials,
+    database: &str,
+    table: &str,
+) -> Result<String, String> {
+    let hash: Vec<String> = query_json(
+        credentials,
+        &format!(
+            "SET SESSION group_concat_max_len=1048576; SELECT JSON_QUOTE({});",
+            schema_hash(database, table)
+        ),
+    )?;
+    if hash.len() != 1 {
+        return Err("Table schema fingerprint unavailable.".into());
+    }
+    Ok(hash.into_iter().next().unwrap())
+}
+
 fn numeric_column(column: &BrowserColumn) -> bool {
     [
         "tinyint",
@@ -346,7 +371,7 @@ fn edit_columns(metadata: &BrowserMetadata) -> Result<Vec<String>, String> {
     if primary.is_empty()
         || primary.iter().any(|index| {
             index.prefix_length.is_some()
-                || index.column.as_deref().map_or(true, |name| {
+                || index.column.as_deref().is_none_or(|name| {
                     !metadata
                         .columns
                         .iter()
@@ -436,7 +461,7 @@ fn validate_change_permit(
 
 fn change_transaction(permit: &ChangePermit, mutation: &str, locking: &str) -> String {
     let gate = format!("{}={} AND ({}) AND (SELECT COUNT(*) FROM mysql.user WHERE CONCAT(User,'@',Host)=CURRENT_USER() AND Select_priv='Y' AND Trigger_priv='Y')=1", schema_hash(&permit.change.database, &permit.change.table), sql_text(&permit.schema_hash), safe_table(&permit.change.database, &permit.change.table));
-    format!("SET SESSION sql_mode='STRICT_ALL_TABLES,NO_AUTO_VALUE_ON_ZERO',group_concat_max_len=1048576,innodb_lock_wait_timeout=5,max_statement_time=15; START TRANSACTION; {locking} SET @fx_safe=({gate}); SET @fx_change=IF(@fx_safe,{},'SELECT JSON_ARRAY()'); PREPARE fx_change FROM @fx_change; EXECUTE fx_change; SET @fx_affected=ROW_COUNT(); DEALLOCATE PREPARE fx_change; SET @fx_finish=IF(@fx_safe AND @fx_affected=1,'COMMIT','ROLLBACK'); PREPARE fx_finish FROM @fx_finish; EXECUTE fx_finish; DEALLOCATE PREPARE fx_finish; SELECT JSON_OBJECT('affected',IF(@fx_safe,@fx_affected,0));", sql_text(mutation.trim_end_matches(';')))
+    format!("SET SESSION sql_mode='STRICT_ALL_TABLES,NO_AUTO_VALUE_ON_ZERO',group_concat_max_len=1048576,innodb_lock_wait_timeout=5,lock_wait_timeout=5,max_statement_time=15; START TRANSACTION; {locking} SET @fx_safe=({gate}); SET @fx_change=IF(@fx_safe,{},'SELECT JSON_ARRAY()'); PREPARE fx_change FROM @fx_change; EXECUTE fx_change; GET DIAGNOSTICS @fx_warnings=NUMBER,@fx_affected=ROW_COUNT; DEALLOCATE PREPARE fx_change; SET @fx_commit=(@fx_safe AND @fx_affected=1 AND @fx_warnings=0); SET @fx_finish=IF(@fx_commit,'COMMIT','ROLLBACK'); PREPARE fx_finish FROM @fx_finish; EXECUTE fx_finish; DEALLOCATE PREPARE fx_finish; SELECT JSON_OBJECT('affected',IF(@fx_commit,1,0));", sql_text(mutation.trim_end_matches(';')))
 }
 
 fn input_sql(column: &BrowserColumn, input: &CellInput) -> Result<String, String> {
@@ -588,6 +613,7 @@ pub async fn preview_database_browser_change(
         let _guard = super::mariadb::database_access()?;
         validate_id(&change.workspace_id)?;
         edit_visibility(&credentials)?;
+        let schema_hash = read_schema_hash(&credentials, &change.database, &change.table)?;
         let metadata = metadata(&credentials, &change.database, &change.table)?;
         if !metadata.editable {
             return Err(metadata
@@ -600,17 +626,9 @@ pub async fn preview_database_browser_change(
                 "Change preview exceeds the safe CLI statement size. Edit a smaller row.".into(),
             );
         }
-        let hash: Vec<String> = query_json(
-            &credentials,
-            &format!(
-                "SET SESSION group_concat_max_len=1048576; SELECT JSON_QUOTE({});",
-                schema_hash(&change.database, &change.table)
-            ),
-        )?;
-        let schema_hash = hash
-            .into_iter()
-            .next()
-            .ok_or("Table schema fingerprint unavailable.")?;
+        if read_schema_hash(&credentials, &change.database, &change.table)? != schema_hash {
+            return Err("Table schema changed during preview. Refresh and review again.".into());
+        }
         let preview = ChangePreview {
             token: secure_token()?,
             sql,
@@ -667,7 +685,7 @@ pub async fn apply_database_browser_change(
         let sql = change_transaction(&permit, &mutation, &locking);
         let result: Vec<serde_json::Value> = query_json(&permit.credentials, &sql).map_err(|error| format!("Change did not return a confirmed result. Refresh the row before retrying; a lost connection can make commit status uncertain. {error}"))?;
         let affected = result.last().and_then(|value| value.get("affected")).and_then(serde_json::Value::as_u64).unwrap_or(0);
-        if affected != 1 { return Err("No change committed: the row or schema changed, or the new values were identical. Refresh and review again.".into()); }
+        if affected != 1 { return Err("No change committed: the row or schema changed, values were identical, or MariaDB reported a conversion warning. Refresh and review again.".into()); }
         Ok(affected)
     }).await
 }
@@ -831,6 +849,7 @@ pub async fn export_database_browser_csv(
     super::run_blocking(move || {
         let _guard = super::mariadb::database_access()?;
         let path = Path::new(&output_path);
+        super::backup_manager::storage::validate_local_path(path)?;
         if !path.is_absolute()
             || !path
                 .extension()
@@ -861,6 +880,9 @@ pub async fn export_database_browser_csv(
                 return Err("CSV exceeds 8 MiB. Narrow the filters; no file was written.".into());
             }
         }
+        let _handles = super::backup_manager::storage::pin_directories(
+            path.parent().ok_or("Missing CSV parent.")?,
+        )?;
         let mut file = OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -890,6 +912,16 @@ mod tests {
         for columns in 1..=128 {
             assert!(bounded_page_size(200, columns) * columns <= MAX_PAGE_CELLS);
         }
+    }
+
+    #[test]
+    fn diagnostic_redaction_precedes_display_truncation() {
+        let password = "fixture-sensitive-value";
+        let error = format!("{}{password}", "x".repeat(3990));
+        let clean = redacted_error(&error, password);
+        assert!(clean.len() <= 4000);
+        assert!(!clean.contains("fixture"));
+        assert!(clean.contains("[redacted]"));
     }
 
     fn edit_fixture() -> (BrowserChange, BrowserMetadata) {
@@ -1033,7 +1065,9 @@ mod tests {
         assert!(validate_change_permit(&permit, "fixture", "players", 99).is_err());
         let transaction = change_transaction(&permit, &sql, &locking);
         assert!(transaction.contains("START TRANSACTION;"));
-        assert!(transaction.contains("@fx_affected=1,'COMMIT','ROLLBACK'"));
+        assert!(transaction.contains("@fx_affected=1 AND @fx_warnings=0"));
+        assert!(transaction.contains("GET DIAGNOSTICS @fx_warnings=NUMBER,@fx_affected=ROW_COUNT"));
+        assert!(transaction.contains("IF(@fx_commit,'COMMIT','ROLLBACK')"));
         assert!(transaction.contains("PREPARE fx_change"));
         assert!(transaction.contains("information_schema.TRIGGERS"));
         assert!(

@@ -27,7 +27,7 @@ pub fn list_users(credentials: MariaDBCredentials) -> Result<Vec<MariaDBUser>, S
         .into_iter()
         .filter(|row| {
             row.first()
-                .map_or(true, |username| !username.eq_ignore_ascii_case("PUBLIC"))
+                .is_none_or(|username| !username.eq_ignore_ascii_case("PUBLIC"))
         })
         .map(|row| MariaDBUser {
             username: row.first().cloned().unwrap_or_default(),

@@ -12,7 +12,7 @@ use crate::{
     process::CommandNoWindowExt,
     services::mariadb::{
         detect::get_install_path,
-        query::{apply_credentials_args, find_mariadb_client},
+        query::{apply_credentials_args, find_mariadb_client, validate_database_argument},
     },
 };
 
@@ -30,7 +30,7 @@ pub fn create_backup(
 
     let mut command = Command::new(dump_client);
     command.no_window();
-    apply_credentials_args(&mut command, &credentials);
+    let _credentials_file = apply_credentials_args(&mut command, &credentials)?;
     command
         .arg("--result-file")
         .arg(&output_path)
@@ -78,6 +78,7 @@ pub fn create_backup(
         let database = normalized_optional(&options.database)
             .or_else(|| normalized_optional(&credentials.database))
             .ok_or_else(|| "Choose a database or enable all-databases backup.".to_string())?;
+        validate_database_argument(&database)?;
         command.arg(database);
 
         for table in options
@@ -85,6 +86,7 @@ pub fn create_backup(
             .iter()
             .filter_map(|table| normalized_str(table))
         {
+            validate_database_argument(&table)?;
             command.arg(table);
         }
     }

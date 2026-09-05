@@ -1033,7 +1033,9 @@ fn validate_database(credentials: &MariaDBCredentials) -> Result<String, &'stati
         .ok_or("MariaDB client was not found. Verify the connection in Manage MariaDB.")?;
     let mut command = Command::new(client);
     command.no_window();
-    apply_credentials_args(&mut command, credentials);
+    let _credentials_file = apply_credentials_args(&mut command, credentials).map_err(|_| {
+        "Could not prepare protected MariaDB credentials. Validate them in Manage MariaDB."
+    })?;
     command
         .args([
             "--connect-timeout=3",

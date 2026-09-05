@@ -485,6 +485,7 @@ pub fn preflight(sql: &str) -> Result<DumpPlan, String> {
     let input = tokens(sql)?;
     let mut created = BTreeSet::new();
     let mut touched = BTreeSet::new();
+    let mut dropped = BTreeSet::new();
     let mut statements = 0;
     for (index, statement) in input.split(|t| *t == Token::Symbol(';')).enumerate() {
         if statement.is_empty() {
@@ -509,6 +510,12 @@ pub fn preflight(sql: &str) -> Result<DumpPlan, String> {
                 return Err(refusal());
             }
             expanded = tokens(body[count..].trim())?;
+            // Version comments may not execute on this server. They cannot establish
+            // table ownership or contain data mutations relied on by the plan.
+            if !matches!(expanded.first(), Some(Token::Word(word)) if word == "SET" || word == "ALTER")
+            {
+                return Err(refusal());
+            }
             expanded.as_slice()
         } else {
             statement
@@ -522,13 +529,19 @@ pub fn preflight(sql: &str) -> Result<DumpPlan, String> {
         };
         if parser.eat("CREATE") {
             let table = parser.create()?;
-            if !created.insert(table.to_ascii_lowercase()) {
+            if table.eq_ignore_ascii_case("__fx_restore_owner")
+                || !created.insert(table.to_ascii_lowercase())
+            {
                 return Err(refusal());
             }
             touched.insert(table.to_ascii_lowercase());
         } else if parser.eat("INSERT") {
             parser.word("INTO")?;
-            touched.insert(parser.name()?.to_ascii_lowercase());
+            let table = parser.name()?.to_ascii_lowercase();
+            if !created.contains(&table) {
+                return Err(refusal());
+            }
+            touched.insert(table);
             if parser.input.get(parser.pos) == Some(&Token::Symbol('(')) {
                 parser.names()?;
             }
@@ -550,11 +563,19 @@ pub fn preflight(sql: &str) -> Result<DumpPlan, String> {
             parser.word("TABLE")?;
             parser.word("IF")?;
             parser.word("EXISTS")?;
-            touched.insert(parser.name()?.to_ascii_lowercase());
+            let table = parser.name()?.to_ascii_lowercase();
+            if created.contains(&table) || !dropped.insert(table.clone()) {
+                return Err(refusal());
+            }
+            touched.insert(table);
         } else if parser.eat("LOCK") {
             parser.word("TABLES")?;
             loop {
-                touched.insert(parser.name()?.to_ascii_lowercase());
+                let table = parser.name()?.to_ascii_lowercase();
+                if !created.contains(&table) {
+                    return Err(refusal());
+                }
+                touched.insert(table);
                 parser.word("WRITE")?;
                 if !parser.symbol(',') {
                     break;
@@ -564,7 +585,11 @@ pub fn preflight(sql: &str) -> Result<DumpPlan, String> {
             parser.word("TABLES")?;
         } else if parser.eat("ALTER") {
             parser.word("TABLE")?;
-            touched.insert(parser.name()?.to_ascii_lowercase());
+            let table = parser.name()?.to_ascii_lowercase();
+            if !created.contains(&table) {
+                return Err(refusal());
+            }
+            touched.insert(table);
             if !parser.eat("DISABLE") {
                 parser.word("ENABLE")?;
             }
@@ -632,5 +657,27 @@ mod tests {
                 "accepted {value}"
             );
         }
+    }
+
+    #[test]
+    fn table_lifecycle_cannot_destroy_imported_data_or_touch_preexisting_rows() {
+        let create = "CREATE TABLE `x` (`id` int) ENGINE=InnoDB;";
+        for sql in [
+            format!("{create} INSERT INTO `x` VALUES (1); DROP TABLE IF EXISTS `x`;"),
+            format!("INSERT INTO `x` VALUES (1); {create}"),
+            format!("ALTER TABLE `x` DISABLE KEYS; {create}"),
+            format!("LOCK TABLES `x` WRITE; {create}"),
+            format!("DROP TABLE IF EXISTS `x`; DROP TABLE IF EXISTS `x`; {create}"),
+            "/*!99999 CREATE TABLE `x` (`id` int) ENGINE=InnoDB */; INSERT INTO `x` VALUES(1);"
+                .into(),
+            format!("{create} /*!99999 DROP TABLE IF EXISTS `x` */;"),
+            "CREATE TABLE `__FX_RESTORE_OWNER` (`owner_id` varchar(32)) ENGINE=InnoDB;".into(),
+        ] {
+            assert!(preflight(&sql).is_err(), "accepted {sql}");
+        }
+        assert!(preflight(&format!(
+            "DROP TABLE IF EXISTS `x`; {create} INSERT INTO `x` VALUES (1);"
+        ))
+        .is_ok());
     }
 }

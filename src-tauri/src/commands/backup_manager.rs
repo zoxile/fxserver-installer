@@ -346,6 +346,7 @@ impl BackupManager {
         assert_database_exists(credentials, &config.database)?;
         let directory =
             storage::owned_directory(&config.output_dir, &config.workspace_id, &config.id)?;
+        let _directory_handles = storage::pin_directories(&directory)?;
         let previous_size = self
             .lock()?
             .registry
@@ -491,7 +492,8 @@ fn apply_retention(registry: &mut Registry, config: &BackupSchedule) -> Result<(
         .filter(|s| {
             s.workspace_id == config.workspace_id
                 && s.schedule_id == config.id
-                && s.kind != "recovery"
+                && s.database == config.database
+                && ["scheduled", "manual"].contains(&s.kind.as_str())
         })
         .cloned()
         .collect();
@@ -508,14 +510,7 @@ fn apply_retention(registry: &mut Registry, config: &BackupSchedule) -> Result<(
             continue;
         }
         let path = storage::snapshot_path(&snapshot.directory, &snapshot.id)?;
-        let mut file = storage::open_snapshot(&path)?;
-        if storage::sha256(&mut file)? != snapshot.sha256 {
-            return Err(
-                "Retention skipped a backup whose contents changed outside the app.".into(),
-            );
-        }
-        drop(file);
-        fs::remove_file(path).map_err(|e| {
+        storage::remove_snapshot(&path, &snapshot.sha256).map_err(|e| {
             format!("Backup was created, but an older owned file could not be removed: {e}")
         })?;
         registry
@@ -724,28 +719,35 @@ pub async fn preview_backup_restore(
             .find(|s| s.workspace_id == workspace_id && s.id == snapshot_id).cloned()
             .ok_or("Backup snapshot not found in this workspace.")?;
         let result = (|| {
-            assert_database_exists(&credentials, &snapshot.database)?;
+            recovery_config(&snapshot)?;
             let path = storage::snapshot_path(&snapshot.directory, &snapshot.id)?;
             let mut file = storage::open_snapshot(&path)?;
             if storage::sha256(&mut file)? != snapshot.sha256 { return Err("Backup checksum changed. Restore has been blocked.".into()); }
+            assert_database_exists(&credentials, &snapshot.database)?;
             let mut scoped = credentials.clone();
             scoped.database = Some(snapshot.database.clone());
             let existing_tables = list_tables(scoped.clone(), snapshot.database.clone())?.len();
             check_disk(&credentials, &snapshot.database, &PathBuf::from(&snapshot.directory), snapshot.size_bytes)?;
             let preview = RestorePreview {
-                token: unique_id(), target_host: credentials.host.clone(), target_port: credentials.port,
+                token: storage::secure_token()?, target_host: credentials.host.clone(), target_port: credentials.port,
                 target_database: snapshot.database.clone(), snapshot, existing_tables, expires_at: now_ms() + 300_000,
                 warnings: vec![
                     "Existing tables and data can be replaced. Stop FXServer and other database writers first.".into(),
                     "A recovery backup must succeed before the restore starts. Recovery backups are never deleted by schedule retention.".into(),
                     "SQL restores are not atomic. A failure can leave partial changes. Review the recovery backup before retrying.".into(),
-                    "Stored routines, triggers and events may reference other schemas; use a database-scoped account to limit access.".into(),
+                    "Restore executes trusted SQL, not sandboxed SQL. Routines, triggers, events and qualified statements can affect other schemas; review the backup and use a database-scoped account.".into(),
                 ],
             };
             let mut inner = manager.lock()?;
             inner.previews.retain(|_, permit| permit.preview.expires_at > now_ms());
-            if inner.previews.len() >= 20 { inner.previews.clear(); }
+            if inner.previews.len() >= 20 { return Err("Too many restore previews. Wait for previews to expire.".into()); }
             inner.previews.insert(preview.token.clone(), RestorePermit { preview: preview.clone(), credentials: scoped });
+            let token = preview.token.clone();
+            let worker = manager.clone();
+            tauri::async_runtime::spawn(async move {
+                tokio::time::sleep(Duration::from_secs(300)).await;
+                if let Ok(mut inner) = worker.lock() { inner.previews.remove(&token); }
+            });
             Ok(preview)
         })();
         result.map_err(|e| redact_error(e, &credentials))
@@ -770,10 +772,10 @@ pub async fn restore_backup_snapshot(
         let snapshot = &permit.preview.snapshot;
         let config = recovery_config(snapshot)?;
         let result = (|| {
-            assert_database_exists(&permit.credentials, &snapshot.database)?;
             let path = storage::snapshot_path(&snapshot.directory, &snapshot.id)?;
             let mut file = storage::open_snapshot(&path)?;
             if storage::sha256(&mut file)? != snapshot.sha256 { return Err("Backup changed after preview. Restore has been blocked.".into()); }
+            assert_database_exists(&permit.credentials, &snapshot.database)?;
             publish(&app, &config, "running", "Creating a recovery backup before restoring the selected snapshot.");
             let recovery = manager.capture(&config, &permit.credentials, "recovery")?;
             {
@@ -785,11 +787,11 @@ pub async fn restore_backup_snapshot(
             let client = find_mariadb_client().ok_or("MariaDB client is unavailable.")?;
             let mut command = Command::new(client);
             command.no_window();
-            apply_credentials_args(&mut command, &permit.credentials);
-            command.arg("--binary-mode").arg("--connect-timeout=10").arg("--default-character-set=utf8mb4")
+            let _credentials_file = apply_credentials_args(&mut command, &permit.credentials)?;
+            command.arg("--binary-mode").arg("--skip-reconnect").arg("--local-infile=0").arg("--connect-timeout=10").arg("--default-character-set=utf8mb4")
                 .arg("--one-database").arg(format!("--database={}", snapshot.database)).stdin(Stdio::from(file));
             if let Err(error) = run_backup_client(&mut command, "MariaDB restore") {
-                return Err(format!("Restore failed and may have applied partial changes. Recovery backup: {}/{}.sql. {error}", recovery.directory, recovery.id));
+                return Err(format!("Restore failed and may have applied partial changes. Recovery backup: {}/{}.sql. {}", recovery.directory, recovery.id, storage::client_failure(&error)));
             }
             Ok(RestoreResult { recovery_snapshot: recovery, message: "Database restore completed. Review the server before resuming writes.".into() })
         })().map_err(|error| redact_error(error, &permit.credentials));
@@ -1124,7 +1126,12 @@ pub async fn cleanup_backup_restore_test(
 }
 
 fn recovery_config(snapshot: &BackupSnapshot) -> Result<BackupSchedule, String> {
+    validate_id(&snapshot.id)?;
+    validate_id(&snapshot.workspace_id)?;
+    validate_id(&snapshot.schedule_id)?;
+    validate_database(&snapshot.database)?;
     let directory = std::path::Path::new(&snapshot.directory);
+    storage::validate_local_path(directory)?;
     let workspace = directory
         .parent()
         .ok_or("Backup directory has no workspace parent.")?;

@@ -115,11 +115,12 @@ pub fn import_dump(
         let _: Vec<serde_json::Value> = query_json(credentials, &format!("CREATE TABLE {database}.`__fx_restore_owner` (`owner_id` varchar(32) NOT NULL PRIMARY KEY) ENGINE=InnoDB; INSERT INTO {database}.`__fx_restore_owner` VALUES ({});", sql_text(&target.marker_token)))?;
         let client = find_mariadb_client().ok_or("MariaDB client is unavailable.")?;
         let mut command = Command::new(client);
-        command.no_window().arg("--no-defaults");
-        apply_credentials_args(&mut command, credentials);
+        command.no_window();
+        let _credentials_file = apply_credentials_args(&mut command, credentials)?;
         command.args(["--binary-mode", "--skip-reconnect", "--local-infile=0", "--connect-timeout=10", "--default-character-set=utf8mb4", "--init-command=SET SESSION sql_mode='NO_AUTO_VALUE_ON_ZERO', max_statement_time=60"])
             .arg(format!("--database={}", target.database)).stdin(Stdio::from(file.try_clone().map_err(|e| e.to_string())?));
-        run_backup_client(&mut command, "Owned database restore")?;
+        run_backup_client(&mut command, "Owned database restore")
+            .map_err(|error| storage::client_failure(&error))?;
         let restored: Vec<String> = query_json(credentials, &format!("SELECT JSON_QUOTE(TABLE_NAME) FROM information_schema.TABLES WHERE TABLE_SCHEMA={} AND TABLE_TYPE='BASE TABLE' AND TABLE_NAME <> '__fx_restore_owner';", sql_text(&target.database)))?;
         let mut inventory: Vec<_> = restored
             .iter()
@@ -154,16 +155,19 @@ pub fn cleanup_owned_database(
     if confirmation != target.database {
         return Err("Confirm the exact owned database name before cleanup.".into());
     }
-    let database = quote_identifier(&target.database)?;
-    let owner: Vec<String> = query_json(
-        credentials,
-        &format!("SELECT JSON_QUOTE(owner_id) FROM {database}.`__fx_restore_owner` LIMIT 2;"),
-    )?;
-    if owner != [target.marker_token.clone()] {
+    let result: Vec<u8> = query_json(credentials, &cleanup_sql(target)?)?;
+    if result != [1] {
         return Err("Ownership marker mismatch. No database was dropped.".into());
     }
-    let _: Vec<serde_json::Value> = query_json(credentials, &format!("DROP DATABASE {database};"))?;
     Ok(())
+}
+
+fn cleanup_sql(target: &OwnedDatabase) -> Result<String, String> {
+    let database = quote_identifier(&target.database)?;
+    // Keep the check and conditional drop on one connection (including failover).
+    // DDL implicitly commits; this does not protect against an external DDL writer.
+    Ok(format!("SET SESSION lock_wait_timeout=5; SET @fx_owned=(SELECT COUNT(*)=1 AND COALESCE(SUM(BINARY owner_id=BINARY {}),0)=1 FROM {database}.`__fx_restore_owner`); SET @fx_cleanup=IF(@fx_owned,{},'DO 0'); PREPARE fx_cleanup FROM @fx_cleanup; EXECUTE fx_cleanup; DEALLOCATE PREPARE fx_cleanup; SELECT JSON_EXTRACT(IF(@fx_owned,'1','0'),'$');",
+        sql_text(&target.marker_token), sql_text(&format!("DROP DATABASE {database}"))))
 }
 
 #[cfg(test)]
@@ -225,5 +229,24 @@ mod tests {
         target.database = format!("fxsi_clone_{id}");
         let result = import_dump(&credentials, &mut file, "wrong", &target);
         assert!(!result.created && result.error.unwrap().contains("checksum"));
+    }
+
+    #[test]
+    fn cleanup_checks_exact_ownership_on_the_same_connection_as_the_drop() {
+        let target = OwnedDatabase {
+            id: "0123456789abcdef0123456789abcdef".into(),
+            database: "fxsi_clone_0123456789abcdef0123456789abcdef".into(),
+            host: "fixture.invalid".into(),
+            port: 3306,
+            purpose: OwnedDatabasePurpose::Clone,
+            marker_token: "fedcba9876543210fedcba9876543210".into(),
+        };
+        let sql = cleanup_sql(&target).unwrap();
+        assert!(sql.contains("COUNT(*)=1"));
+        assert!(sql.contains("SUM(BINARY owner_id=BINARY"));
+        assert!(sql.contains("IF(@fx_owned,"));
+        assert!(sql.find("SET @fx_owned").unwrap() < sql.find("EXECUTE fx_cleanup").unwrap());
+        assert!(!sql.contains(&target.marker_token));
+        assert!(!sql.contains("SELECT JSON_QUOTE(owner_id)"));
     }
 }
