@@ -11,7 +11,7 @@
 	import SaveIcon from "@lucide/svelte/icons/save";
 	import SearchIcon from "@lucide/svelte/icons/search";
 	import Undo2Icon from "@lucide/svelte/icons/undo-2";
-	import { onMount } from "svelte";
+	import { onDestroy, onMount } from "svelte";
 	import { confirm } from "@tauri-apps/plugin-dialog";
 	import * as Card from "$lib/components/ui/card/index.js";
 	import { Button } from "$lib/components/ui/button/index.js";
@@ -36,6 +36,8 @@
 	let editorContent = $state("");
 	let query = $state("");
 	let busy = $state(false);
+	let active = true;
+	onDestroy(() => { active = false; });
 	let saving = $state(false);
 	let externalFile = $state<ServerConfigFile | null>(null);
 	let externalReviewed = $state(false);
@@ -83,7 +85,8 @@
 	const serverCfgSelected = $derived(selectedFileName === "server.cfg");
 	const permissionsCfgSelected = $derived(selectedFileName === "permissions.cfg");
 	const dirty = $derived(Boolean(selectedFile && editorContent !== selectedFile.content));
-	const lineNumbers = $derived(Array.from({ length: Math.max(editorContent.split("\n").length, 1) }, (_, index) => index + 1));
+	const richEditor = $derived(editorContent.length <= 200_000 && editorContent.split("\n", 2001).length <= 2000);
+	const lineNumbers = $derived(richEditor ? Array.from({ length: Math.max(editorContent.split("\n").length, 1) }, (_, index) => index + 1) : []);
 	const editorContentHeight = $derived(`${Math.max(640, lineNumbers.length * 20 + 24)}px`);
 	const rconLineInSelectedFile = $derived(selectedFile && result?.rconPasswordFile === selectedFile.name ? (result.rconPasswordLine ?? null) : null);
 	const rconlogLineInSelectedFile = $derived(selectedFile?.name.toLowerCase() === "server.cfg" ? (result?.rconlogLine ?? null) : null);
@@ -92,7 +95,7 @@
 		lines: editorContent ? editorContent.split("\n").length : 0,
 		chars: editorContent.length,
 	});
-	const highlightedLines = $derived(editorContent.split("\n").map((line) => highlightCfgLine(line)));
+	const highlightedLines = $derived(richEditor ? editorContent.split("\n").map((line) => highlightCfgLine(line)) : []);
 	const rconReady = $derived(Boolean(result?.rconPasswordFound && result?.rconlogFound));
 	const dbConnectionString = $derived(dbCredentialsReady ? formatMariaDBConnectionString({ ...dbCredentials, database: selectedFxDatabase }) : databaseSession.connectionString);
 	const fxDatabaseOptions = $derived(fxDatabases.map((database) => ({ value: database, label: database })));
@@ -122,11 +125,13 @@
 		profile = fxserverSettings.profile;
 		void (async () => {
 			await refreshTxDataProfiles();
+			if (!active) return;
 			dataPath = fxserverSettings.txDataPath;
 			profile = fxserverSettings.profile;
 			if (databaseSession.credentials) {
 				await validateFxDatabaseCredentials(false);
 			}
+			if (!active) return;
 			if (dataPath.trim() && profile.trim()) {
 				await loadConfig();
 			}
@@ -134,9 +139,11 @@
 	});
 
 	async function loadConfig() {
-		if (busy || saving) return;
+		if (!active || busy || saving) return;
 		busy = true;
-		if (!await confirmDiscardDrafts()) {
+		const discard = await confirmDiscardDrafts();
+		if (!active) return;
+		if (!discard) {
 			dataPath = result?.txDataPath ?? dataPath;
 			profile = result?.profile ?? profile;
 			setTxDataPath(dataPath);
@@ -170,16 +177,20 @@
 	}
 
 	async function validateFxDatabaseCredentials(showNotice = true) {
+		if (!active) return;
+		const original = { ...dbCredentials };
+		const revision = databaseSession.revision;
 		dbCredentialsReady = false;
 		if (showNotice) dbNotice = "";
 		fxDatabases = [];
 
 		try {
-			await validateMariaDBCredentials(dbCredentials);
-			fxDatabases = await listMariaDBDatabases(dbCredentials);
+			await validateMariaDBCredentials(original);
+			const databases = await listMariaDBDatabases(original);
+			if (!active || JSON.stringify(original) !== JSON.stringify(dbCredentials) || !rememberDatabaseCredentials(original, revision)) return;
+			fxDatabases = databases;
 			dbCredentialsReady = true;
 			dbCredentials.database = selectedFxDatabase;
-			rememberDatabaseCredentials(dbCredentials);
 			if (!selectedFxDatabase && fxDatabases.length) {
 				selectedFxDatabase = fxDatabases[0];
 				dbCredentials.database = selectedFxDatabase;
@@ -206,8 +217,8 @@
 	async function chooseTxDataFolder() {
 		notice = "";
 		const selectedFolder = await chooseFolder();
-		if (!selectedFolder) return;
-		if (!await confirmDiscardDrafts()) return;
+		if (!selectedFolder || !active) return;
+		if (!await confirmDiscardDrafts() || !active) return;
 
 		dataPath = selectedFolder;
 		profile = "";
@@ -220,6 +231,7 @@
 	async function handleTxDataChange(event: Event) {
 		const nextPath = (event.currentTarget as HTMLInputElement).value;
 		if (!await confirmDiscardDrafts()) { dataPath = result?.txDataPath ?? dataPath; return; }
+		if (!active) return;
 		dataPath = nextPath;
 		profile = "";
 		clearLoadedConfig();
@@ -897,6 +909,9 @@
 							<span class="rounded-sm border border-emerald-400/30 bg-emerald-400/10 px-2 py-1 text-emerald-100">rconlog line {rconlogLineInSelectedFile}</span>
 						{/if}
 					</div>
+					{#if !richEditor}
+						<textarea bind:this={editorElement} bind:value={editorContent} disabled={!selectedFile || saving || busy} spellcheck="false" wrap="off" onkeydown={handleEditorKeydown} title="Server config editor" class="h-160 w-full resize-none overflow-auto rounded-sm border border-border bg-background/70 p-3 font-mono text-xs leading-5"></textarea>
+					{:else}
 					<div class="h-160 overflow-auto rounded-sm border border-border bg-background/70 font-mono text-xs">
 						<div class="grid min-h-full grid-cols-[3.5rem_minmax(max-content,1fr)]">
 							<div class="border-r border-border bg-muted/30 py-3 text-right text-muted-foreground select-none" style={`height: ${editorContentHeight};`}>
@@ -932,6 +947,7 @@
 							</div>
 						</div>
 					</div>
+					{/if}
 					{#if externalFile}
 						<div class="space-y-3 border-y border-amber-400/30 py-4">
 							<p class="text-sm font-medium text-amber-400">This file changed on disk. Saving is paused.</p>

@@ -1,5 +1,6 @@
 import { log } from "$lib/core/logger.svelte";
 import { listTxDataProfiles } from "$lib/modules/fxserver";
+import { publicEnvironment } from "$lib/core/workspaceSettings";
 
 const envStorageKey = "fxserver.manage.env";
 const profileStorageKey = "fxserver.manage.serverProfile";
@@ -23,6 +24,7 @@ export function loadFxserverSettings() {
 
 	try {
 		const savedEnv = readSavedEnvironment();
+		localStorage.setItem(envStorageKey, JSON.stringify(savedEnv));
 		fxserverSettings.txDataPath = typeof savedEnv.TXHOST_DATA_PATH === "string" ? savedEnv.TXHOST_DATA_PATH : "";
 		fxserverSettings.profile = localStorage.getItem(profileStorageKey) ?? localStorage.getItem(legacyLogProfileStorageKey) ?? "";
 	} catch {
@@ -35,19 +37,20 @@ export function readSavedEnvironment() {
 	try {
 		const value = JSON.parse(localStorage.getItem(envStorageKey) || "{}");
 		if (!value || typeof value !== "object" || Array.isArray(value)) return {};
-		return Object.fromEntries(Object.entries(value).filter((entry): entry is [string, string] => typeof entry[1] === "string"));
+		return publicEnvironment(value);
 	} catch {
 		return {};
 	}
 }
 
 export function writeSavedEnvironment(values: Record<string, string>) {
-	localStorage.setItem(envStorageKey, JSON.stringify(values));
+	localStorage.setItem(envStorageKey, JSON.stringify(publicEnvironment(values)));
 	window.dispatchEvent(new Event("workspace-settings-changed"));
 }
 
 export function setTxDataPath(path: string) {
 	loadFxserverSettings();
+	if (fxserverSettings.txDataPath !== path.trim()) resetTxDataProfiles();
 	fxserverSettings.txDataPath = path.trim();
 	const savedEnvironment = readSavedEnvironment();
 	if (fxserverSettings.txDataPath) {
@@ -56,6 +59,14 @@ export function setTxDataPath(path: string) {
 		delete savedEnvironment.TXHOST_DATA_PATH;
 	}
 	writeSavedEnvironment(savedEnvironment);
+}
+
+export function resetTxDataProfiles() {
+	profileRequest += 1;
+	fxserverSettings.profiles = [];
+	fxserverSettings.hasRootLogs = false;
+	fxserverSettings.profileError = "";
+	fxserverSettings.loadingProfiles = false;
 }
 
 export function setServerProfile(profile: string) {

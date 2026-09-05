@@ -7,7 +7,7 @@
 	import FileCheck2Icon from "@lucide/svelte/icons/file-check-2";
 	import XIcon from "@lucide/svelte/icons/x";
 	import { save } from "@tauri-apps/plugin-dialog";
-	import { onMount } from "svelte";
+	import { onDestroy, onMount } from "svelte";
 	import * as Card from "$lib/components/ui/card/index.js";
 	import * as Select from "$lib/components/ui/select/index.js";
 	import { Checkbox } from "$lib/components/ui/checkbox/index.js";
@@ -43,6 +43,8 @@
 	let patchRevealed = $state(false);
 	let patchReviewed = $state(false);
 	let patchContext = "";
+	let active = true;
+	onDestroy(() => { active = false; });
 	const context = $derived(JSON.stringify([getInstallPath(), fxserverSettings.txDataPath, fxserverSettings.profile]));
 	const activeEntry = $derived(preview?.entries.find((entry) => entry.name === selectedEntry));
 	$effect(() => { includeApplicationLog; includeServerLog; useDatabase; preview = null; });
@@ -62,7 +64,7 @@
 	}
 
 	async function runChecks() {
-		if (checking || patchBusy) return;
+		if (!active || checking || patchBusy) return;
 		checking = true;
 		error = "";
 		patch = null;
@@ -70,15 +72,16 @@
 		const target = request();
 		try {
 			const status = await getFxserverStatus();
+			if (!active || targetContext !== context) return;
 			target.checkPorts = !status.running;
 			const result = await runPreflight(target);
-			if (targetContext === context) { report = result; reportRequest = { ...target, credentials: null, checkPorts: false }; }
+			if (active && targetContext === context) { report = result; reportRequest = { ...target, credentials: null, checkPorts: false }; }
 		} catch (caught) { error = String(caught); }
 		finally { checking = false; }
 	}
 
 	async function reviewPatch() {
-		if (!reportRequest || patchBusy || checking) return;
+		if (!active || !reportRequest || patchBusy || checking) return;
 		patchBusy = true;
 		error = "";
 		message = "";
@@ -87,13 +90,13 @@
 		const targetContext = context;
 		try {
 			const result = await previewDiagnosticConfigPatch({ ...reportRequest });
-			if (targetContext === context) { patchContext = targetContext; patch = result; }
+			if (active && targetContext === context) { patchContext = targetContext; patch = result; }
 		} catch (caught) { error = String(caught); }
 		finally { patchBusy = false; }
 	}
 
 	async function applyPatch() {
-		if (!patch || !patchReviewed || !patchRevealed || patchBusy || patchContext !== context) return;
+		if (!active || !patch || !patchReviewed || !patchRevealed || patchBusy || patchContext !== context) return;
 		const reviewed = patch;
 		patchBusy = true;
 		error = "";
@@ -108,7 +111,7 @@
 	}
 
 	async function prepareExport() {
-		if (preparing) return;
+		if (!active || preparing) return;
 		preparing = true;
 		error = "";
 		message = "";
@@ -116,7 +119,7 @@
 		const target = JSON.stringify([context, includeApplicationLog, includeServerLog, useDatabase]);
 		try {
 			const result = await previewDiagnosticExport({ preflight: request(), includeApplicationLog, includeServerLog });
-			if (target !== JSON.stringify([context, includeApplicationLog, includeServerLog, useDatabase])) return;
+			if (!active || target !== JSON.stringify([context, includeApplicationLog, includeServerLog, useDatabase])) return;
 			preview = result;
 			selectedEntry = preview.entries[0]?.name ?? "";
 		} catch (caught) { error = String(caught); }
@@ -124,13 +127,13 @@
 	}
 
 	async function exportZip() {
-		if (!preview || exporting) return;
+		if (!active || !preview || exporting) return;
 		const reviewed = preview;
 		exporting = true;
 		error = "";
 		try {
 			const path = await save({ title: "Export reviewed diagnostics", defaultPath: `fxserver-diagnostics-${new Date(reviewed.createdAt * 1000).toISOString().replace(/[:.]/g, "-")}.zip`, filters: [{ name: "Diagnostic archive", extensions: ["zip"] }] });
-			if (!path) return;
+			if (!path || !active || preview?.id !== reviewed.id) return;
 			const result = await exportDiagnosticZip(reviewed.id, path);
 			message = `Diagnostic ZIP created: ${result.path}`;
 			preview = null;

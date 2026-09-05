@@ -3,7 +3,7 @@ import { databaseSession, rememberDatabaseCredentials } from "./databaseSession.
 import type { MariaDBCredentials } from "$lib/modules/mariadb";
 import { getInstallPath, setInstallPath } from "./paths.svelte";
 import { hasRunningTasks, taskSession, trackTask } from "./tasks.svelte";
-import { fxserverSettings, loadFxserverSettings, readSavedEnvironment, setServerProfile, setTxDataPath, writeSavedEnvironment } from "$lib/features/fxserver/fxserverSettings.svelte";
+import { fxserverSettings, loadFxserverSettings, readSavedEnvironment, resetTxDataProfiles, setServerProfile, setTxDataPath, writeSavedEnvironment } from "$lib/features/fxserver/fxserverSettings.svelte";
 import { emptyWorkspace, parseWorkspaces, publicEnvironment, type Workspace } from "./workspaceSettings";
 
 const storageKey = "fxserver-installer.workspaces.v1";
@@ -26,6 +26,7 @@ export function initializeWorkspaces() {
 		workspaceSession.items = saved.items;
 		workspaceSession.activeId = saved.activeId;
 		applySettings(saved.items.find((item) => item.id === saved.activeId)!);
+		persist();
 	} else {
 		workspaceSession.items = [emptyWorkspace("default", "Default")];
 		captureActiveWorkspace();
@@ -50,7 +51,8 @@ export function captureActiveWorkspace() {
 	current.txDataPath = fxserverSettings.txDataPath;
 	current.profile = fxserverSettings.profile;
 	current.environment = publicEnvironment(readSavedEnvironment());
-	current.database = { ...databaseSession.defaults };
+	const { host, port, username, database } = databaseSession.defaults;
+	current.database = { host, port, username, database };
 	persist();
 }
 
@@ -61,10 +63,9 @@ function applySettings(workspace: Workspace) {
 		writeSavedEnvironment(publicEnvironment(workspace.environment));
 		setTxDataPath(workspace.txDataPath);
 		setServerProfile(workspace.profile);
-		fxserverSettings.profiles = [];
-		fxserverSettings.hasRootLogs = false;
-		fxserverSettings.profileError = "";
+		resetTxDataProfiles();
 		databaseSession.defaults = { ...workspace.database };
+		databaseSession.revision += 1;
 		databaseSession.credentials = null;
 		databaseSession.connectionString = "";
 		const credentials = databaseCredentials.get(workspace.id);
@@ -75,11 +76,14 @@ function applySettings(workspace: Workspace) {
 }
 
 export async function saveWorkspace(workspace: Workspace) {
-	const name = workspace.name.trim();
+	if (taskSession.switching) throw new Error("Wait for the workspace switch to finish.");
+	const name = workspace.name.trim().slice(0, 80);
 	if (!name) throw new Error("Enter a workspace name.");
 	if (workspaceSession.items.some((item) => item.id !== workspace.id && item.name.toLowerCase() === name.toLowerCase())) throw new Error("A workspace with that name already exists.");
 	if (!Number.isInteger(workspace.database.port) || workspace.database.port < 1 || workspace.database.port > 65535) throw new Error("Enter a database port between 1 and 65535.");
-	const saved = { ...workspace, name: name.slice(0, 80), environment: publicEnvironment(workspace.environment) };
+	const { host, port, username, database } = workspace.database;
+	const saved: Workspace = { id: workspace.id, name, artifactPath: workspace.artifactPath, txDataPath: workspace.txDataPath, profile: workspace.profile,
+		environment: publicEnvironment(workspace.environment), database: { host, port, username, database } };
 	const index = workspaceSession.items.findIndex((item) => item.id === workspace.id);
 	if (index < 0 && workspaceSession.items.length >= 50) throw new Error("Up to 50 workspaces can be saved.");
 	const active = workspace.id === workspaceSession.activeId;

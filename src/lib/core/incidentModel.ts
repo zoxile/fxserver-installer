@@ -25,11 +25,12 @@ export function redactIncidentText(value: string, limit = 2000): string {
 		.replace(/-----BEGIN [^-]*PRIVATE KEY-----[\s\S]*?(?:-----END [^-]*PRIVATE KEY-----|$)/gi, "[redacted private key]")
 		.replace(/\b(?:mysql|mariadb|postgres(?:ql)?):\/\/[^\s"'<>]+/gi, "[redacted database URL]")
 		.replace(/https?:\/\/[^\s"'<>]+/gi, (url) => {
-			try { const parsed = new URL(url); return `${parsed.protocol}//${parsed.host}/[redacted URL]`; }
+			try { const parsed = new URL(url); return `${parsed.protocol}//${parsed.host}/[redacted-url]`; }
 			catch { return "[redacted URL]"; }
 		})
 		.replace(/\b(?:cfxk_[\w-]+|gh[pousr]_[\w]+|github_pat_[\w]+|sk-[\w-]{12,}|eyJ[\w-]+\.[\w-]+\.[\w-]+)\b/g, "[redacted]")
-		.replace(/(?:["']?[\w.-]*(?:password|passwd|pwd|secret|token|license.?key|api.?key|connection.?string|authorization|cookie|webhook|credential)[\w.-]*["']?\s*(?::|=|\s)\s*)(?:"[^"\n]*"|'[^'\n]*'|[^\r\n;,}]+)/gi, "[redacted credential]")
+		.replace(/(?:["']?[\w.-]*(?:password|passwd|dbpass|pwd|secret|token|license.?key|api.?key|connection.?string|authorization|cookie|webhook|credential|default_account)[\w.-]*["']?\s*(?::|=|\s)\s*)(?:"(?:\\.|""|[^"\\\n])*"|'(?:\\.|''|[^'\\\n])*'|[^\r\n;,}]+)/gi, "[redacted credential]")
+		.replace(/\bIDENTIFIED\s+BY\s+(?:PASSWORD\s+)?(?:'(?:''|\\.|[^'\\])*'|"(?:""|\\.|[^"\\])*"|[^\s;]+)/gi, "IDENTIFIED BY [redacted]")
 		.replace(/\bBearer\s+[^\s"',;]+/gi, "Bearer [redacted]")
 		.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g, "")
 		.slice(0, limit);

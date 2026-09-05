@@ -287,12 +287,14 @@
 		message = "";
 
 		try {
-			await validateMariaDBCredentials(credentials);
-			const [loadedUsers, loadedDatabases] = await Promise.all([listMariaDBUsers(credentials), listMariaDBDatabases(credentials)]);
+			const original = { ...credentials };
+			const revision = databaseSession.revision;
+			await validateMariaDBCredentials(original);
+			const [loadedUsers, loadedDatabases] = await Promise.all([listMariaDBUsers(original), listMariaDBDatabases(original)]);
+			if (!rememberDatabaseCredentials(original, revision)) return;
 			users = loadedUsers;
 			databases = loadedDatabases;
 			credentialsReady = true;
-			rememberDatabaseCredentials(credentials);
 			message = "Admin credentials applied.";
 			await refreshUserAccess();
 		} catch (caught) {

@@ -2,7 +2,7 @@
 	import DatabaseIcon from "@lucide/svelte/icons/database";
 	import FolderOpenIcon from "@lucide/svelte/icons/folder-open";
 	import PlayIcon from "@lucide/svelte/icons/play";
-	import { onMount } from "svelte";
+	import { onDestroy, onMount, untrack } from "svelte";
 	import BackupCard from "./BackupCard.svelte";
 	import ConnectionCard from "./ConnectionCard.svelte";
 	import QueryConsole from "./QueryConsole.svelte";
@@ -52,9 +52,9 @@
 	let backupMode = $state<"database" | "tables" | "all">("database");
 	let backupDatabaseName = $state(databaseSession.credentials?.database ?? "");
 	let selectedBackupTable = $state("");
-	let loadedBackupTablesFor = $state("");
-	let loadingBackupTablesFor = $state("");
 	let backupTableRequestId = 0;
+	let active = true;
+	onDestroy(() => { active = false; backupTableRequestId += 1; });
 	let backupOptions = $state<MariaDBBackupOptions>({
 		outputDir: "",
 		fileName: "",
@@ -91,18 +91,16 @@
 	$effect(() => {
 		const database = backupDatabaseName.trim();
 		const canLoadTables = credentialsReady && backupMode === "tables" && database;
+		JSON.stringify(credentials);
+		backupTableRequestId += 1;
 
 		if (!canLoadTables) {
 			backupTables = [];
 			selectedBackupTable = "";
-			loadedBackupTablesFor = "";
-			loadingBackupTablesFor = "";
 			return;
 		}
 
-		if (loadedBackupTablesFor === database || loadingBackupTablesFor === database) return;
-
-		void refreshBackupTables(database);
+		untrack(() => void refreshBackupTables(database));
 	});
 
 	async function initializeBackupOutputDir() {
@@ -124,15 +122,19 @@
 	}
 
 	async function validateAndLoadDatabases(showLoadedMessage = true) {
+		if (busy || !active) return;
+		const original = { ...credentials };
+		const revision = databaseSession.revision;
 		busy = true;
 		error = "";
 		message = "";
 		connectionError = "";
 		try {
-			await validateMariaDBCredentials(credentials);
-			rememberDatabaseCredentials(credentials);
+			await validateMariaDBCredentials(original);
+			if (!active || !rememberDatabaseCredentials(original, revision)) return;
 			credentialsReady = true;
-			databases = await listMariaDBDatabases(credentials);
+			databases = await listMariaDBDatabases(original);
+			if (!active) return;
 			selectedScope = credentials.database && databases.includes(credentials.database) ? credentials.database : selectedScope;
 			queryDatabase = credentials.database && databases.includes(credentials.database) ? credentials.database : queryDatabase;
 			backupDatabaseName ||= credentials.database && databases.includes(credentials.database) ? credentials.database : databases[0] || "";
@@ -193,24 +195,18 @@
 
 	async function refreshBackupTables(database: string) {
 		const requestId = ++backupTableRequestId;
-		loadingBackupTablesFor = database;
 
 		try {
-			const tables = await listMariaDBTables(credentials, database);
-			if (requestId !== backupTableRequestId || backupDatabaseName.trim() !== database) return;
+			const tables = await listMariaDBTables({ ...credentials }, database);
+			if (!active || requestId !== backupTableRequestId || backupDatabaseName.trim() !== database) return;
 
 			backupTables = tables;
 			backupOptions.tables = backupOptions.tables.filter((table) => tables.includes(table));
 			if (selectedBackupTable && !tables.includes(selectedBackupTable)) selectedBackupTable = "";
-			loadedBackupTablesFor = database;
 		} catch (caught) {
+			if (!active || requestId !== backupTableRequestId) return;
 			error = caught instanceof Error ? caught.message : String(caught);
 			backupTables = [];
-			loadedBackupTablesFor = "";
-		} finally {
-			if (requestId === backupTableRequestId && loadingBackupTablesFor === database) {
-				loadingBackupTablesFor = "";
-			}
 		}
 	}
 

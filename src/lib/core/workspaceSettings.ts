@@ -12,7 +12,7 @@ export interface Workspace {
 
 export function publicEnvironment(values: Record<string, string>) {
 	return Object.fromEntries(Object.entries(values).filter(([key, value]) =>
-		typeof value === "string" && !sensitiveTxHostKeys.has(key) && !/password|secret|token|license.?key/i.test(key),
+		typeof value === "string" && !sensitiveTxHostKeys.has(key.toUpperCase()) && !/password|passwd|dbpass|secret|token|license.?key|api.?key|connection.?string|authorization|cookie|credential|private.?key/i.test(key),
 	));
 }
 

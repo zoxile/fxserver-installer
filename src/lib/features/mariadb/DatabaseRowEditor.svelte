@@ -21,6 +21,7 @@
 	onDestroy(() => { active = false; });
 	function numeric(type: string) { return /^(tinyint|smallint|mediumint|int|integer|bigint|decimal|numeric|float|double)(\(|\s|$)/.test(type); }
 	async function review() {
+		if (busy || !active) return;
 		busy = true; onBusy(true); error = "";
 		try {
 			const values: ColumnInput[] = kind === "delete" ? [] : fields.flatMap((field, index) => {
@@ -30,16 +31,16 @@
 			const result = await previewBrowserChange({ ...credentials }, { workspaceId, database, table, kind, values, original: original ? [...original] : null });
 			if (active) { preview = result; confirmation = ""; }
 		} catch (caught) { if (active) error = String(caught); }
-		finally { busy = false; onBusy(false); }
+		finally { busy = false; if (active) onBusy(false); }
 	}
 	async function apply() {
-		if (!preview || confirmation !== preview.confirmation) return;
+		if (busy || !active || !preview || confirmation !== preview.confirmation) return;
 		const selected = preview; busy = true; onBusy(true); error = "";
 		try {
 			await applyBrowserChange(workspaceId, selected.token, confirmation);
 			if (active) { onBusy(false); await onApplied(); }
 		} catch (caught) { if (active) { preview = null; error = String(caught); } }
-		finally { busy = false; onBusy(false); }
+		finally { busy = false; if (active) onBusy(false); }
 	}
 </script>
 

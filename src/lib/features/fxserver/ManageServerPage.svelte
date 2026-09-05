@@ -266,7 +266,7 @@
 		rconPort;
 
 		if (storageReady) {
-			saveEnvironment();
+			untrack(saveEnvironment);
 		}
 	});
 
@@ -301,6 +301,7 @@
 		artifactPath = getInstallPath();
 		loadSavedEnvironment();
 		await loadSecureRconPassword();
+		if (!pageActive) return;
 		storageReady = true;
 		void refreshAll();
 		void refreshTxDataProfiles();
@@ -327,6 +328,7 @@
 	async function loadSecureRconPassword() {
 		try {
 			const password = await getSavedFxserverRconPassword(workspaceId);
+			if (!pageActive) return;
 			rconPassword = password;
 			lastSavedRconPassword = password;
 		} catch (caught) {

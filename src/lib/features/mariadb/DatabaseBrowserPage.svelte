@@ -63,7 +63,7 @@
 	onMount(() => { active = true; if (databaseSession.credentials) void connect(); return () => { active = false; }; });
 
 	async function action(work: () => Promise<void>) {
-		if (busy) return;
+		if (busy || !active) return;
 		busy = true; error = ""; message = "";
 		try { await work(); } catch (caught) { if (active) error = String(caught); }
 		finally { if (active) busy = false; }
@@ -123,7 +123,7 @@
 		await action(async () => {
 			const query = request(); const original = { ...credentials };
 			const outputPath = await save({ defaultPath: `${table.replace(/[^a-zA-Z0-9_-]/g, "_")}.csv`, filters: [{ name: "CSV", extensions: ["csv"] }] });
-			if (!outputPath) return;
+			if (!outputPath || !active || JSON.stringify(query) !== JSON.stringify(request()) || JSON.stringify(original) !== JSON.stringify(credentials)) return;
 			const result = await exportBrowserCsv(original, query, outputPath);
 			if (active) message = `${result.rows} rows exported${result.hasMore ? " (5,000-row limit reached)" : ""}: ${result.path}. SQL NULL is \\N; spreadsheet formulas are prefixed with an apostrophe.`;
 		});

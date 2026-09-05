@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { redactIncidentText } from "./incidentModel";
 
 export type LogLevel = "debug" | "info" | "success" | "warn" | "error";
 
@@ -41,9 +42,9 @@ function createLogEntry(message: string, options: LogOptions = {}): AppLogEntry 
 		id: `${timestamp}-${Math.random().toString(16).slice(2)}`,
 		timestamp,
 		level: options.level ?? "info",
-		scope: options.scope ?? "app",
-		message,
-		detail: options.detail,
+		scope: redactIncidentText(options.scope ?? "app", 120),
+		message: redactIncidentText(message),
+		detail: options.detail === undefined ? undefined : redactIncidentText(options.detail, 8000),
 	};
 }
 
@@ -57,21 +58,24 @@ function persistEntry(entry: AppLogEntry) {
 	const line = JSON.stringify(entry);
 
 	if (!hasTauriRuntime()) {
-		const nextLogs = [...readBrowserLogs(), line].slice(-maxVisibleLogs);
-		localStorage.setItem(browserLogKey, JSON.stringify(nextLogs));
+		try {
+			const history = readBrowserLogs().map(parseLogLine).filter((item): item is AppLogEntry => item !== null).map((item) => JSON.stringify(item));
+			localStorage.setItem(browserLogKey, JSON.stringify([...history, line].slice(-maxVisibleLogs)));
+		} catch { console.error("Could not persist app log entry."); }
 		return;
 	}
 
 	persistQueue = persistQueue
 		.then(() => invoke<void>("append_app_log", { entry: line }))
-		.catch((error) => {
-			console.error("Could not persist app log entry.", error);
+		.catch(() => {
+			console.error("Could not persist app log entry.");
 		});
 }
 
 function readBrowserLogs() {
 	try {
-		return JSON.parse(localStorage.getItem(browserLogKey) || "[]") as string[];
+		const parsed: unknown = JSON.parse(localStorage.getItem(browserLogKey) || "[]");
+		return Array.isArray(parsed) ? parsed.slice(-maxVisibleLogs).filter((line): line is string => typeof line === "string") : [];
 	} catch {
 		return [];
 	}
@@ -80,15 +84,17 @@ function readBrowserLogs() {
 function parseLogLine(line: string, index = 0): AppLogEntry | null {
 	try {
 		const parsed = JSON.parse(line) as Partial<AppLogEntry>;
-		if (!parsed.timestamp || !parsed.level || !parsed.scope || !parsed.message) return null;
+		if (!parsed || typeof parsed.scope !== "string" || typeof parsed.message !== "string" || !["debug", "info", "success", "warn", "error"].includes(parsed.level ?? "")) return null;
+		const timestamp = new Date(parsed.timestamp ?? "");
+		if (!Number.isFinite(timestamp.getTime())) return null;
 
 		return {
-			id: parsed.id ?? `${parsed.timestamp}-${parsed.scope}-${index}`,
-			timestamp: typeof parsed.timestamp === "number" ? new Date(parsed.timestamp).toISOString() : parsed.timestamp,
-			level: parsed.level,
-			scope: parsed.scope,
-			message: parsed.message,
-			detail: parsed.detail,
+			id: typeof parsed.id === "string" ? redactIncidentText(parsed.id, 240) : `${timestamp.toISOString()}-${index}`,
+			timestamp: timestamp.toISOString(),
+			level: parsed.level!,
+			scope: redactIncidentText(parsed.scope, 120),
+			message: redactIncidentText(parsed.message),
+			detail: typeof parsed.detail === "string" ? redactIncidentText(parsed.detail, 8000) : undefined,
 		};
 	} catch {
 		return null;
@@ -146,7 +152,7 @@ export async function initializeLogger() {
 				};
 
 		logFilePath.value = stored.path;
-		const parsedLogs = stored.entries.map(parseLogLine).filter((entry): entry is AppLogEntry => Boolean(entry));
+		const parsedLogs = stored.entries.slice(-maxVisibleLogs).map(parseLogLine).filter((entry): entry is AppLogEntry => Boolean(entry));
 		logs.splice(0, logs.length, ...normalizeLogEntries(parsedLogs.slice(-maxVisibleLogs)));
 		log("Logger initialized.", { level: "debug", scope: "core.logger", detail: logFilePath.value });
 	} catch (error) {
@@ -167,12 +173,13 @@ export async function refreshLogs() {
 			};
 
 	logFilePath.value = stored.path;
-	const parsedLogs = stored.entries.map(parseLogLine).filter((entry): entry is AppLogEntry => Boolean(entry));
+	const parsedLogs = stored.entries.slice(-maxVisibleLogs).map(parseLogLine).filter((entry): entry is AppLogEntry => Boolean(entry));
 	logs.splice(0, logs.length, ...normalizeLogEntries(parsedLogs.slice(-maxVisibleLogs)));
 }
 
 export async function clearLogs() {
 	if (hasTauriRuntime()) {
+		await persistQueue;
 		await invoke<void>("clear_app_logs");
 	} else {
 		localStorage.removeItem(browserLogKey);

@@ -1,5 +1,5 @@
 <script lang="ts">
-    import { untrack } from "svelte";
+    import { onDestroy, untrack } from "svelte";
     import HistoryIcon from "@lucide/svelte/icons/history";
     import RefreshCwIcon from "@lucide/svelte/icons/refresh-cw";
     import RotateCcwIcon from "@lucide/svelte/icons/rotate-ccw";
@@ -24,6 +24,8 @@
     let reviewed = $state(false);
     let error = $state("");
     let generation = 0;
+    let active = true;
+    onDestroy(() => { active = false; generation += 1; });
     const label = (version: ConfigHistoryVersion) => `${new Date(version.createdAt).toLocaleString()} / ${version.reason.replaceAll("-", " ")} / ${version.size} B`;
 
     $effect(() => { currentContent; request; untrack(() => { void refresh(); }); });
@@ -34,6 +36,8 @@
         busy = true;
         selected = null;
         selectedId = "";
+        revealed = false;
+        reviewed = false;
         error = "";
         try { const result = await listConfigHistory(request); if (id === generation) versions = result; }
         catch (caught) { if (id === generation) error = String(caught); }
@@ -41,7 +45,7 @@
     }
 
     async function choose(id: string) {
-        const requestGeneration = generation;
+        const requestGeneration = ++generation;
         selectedId = id;
         selected = null;
         revealed = false;
@@ -52,13 +56,17 @@
     }
 
     async function restore() {
-        if (!selected || !reviewed || !revealed || hasDraft || disabled || restoring) return;
+        if (!active || !selected || !reviewed || !revealed || hasDraft || disabled || restoring) return;
+        const target = JSON.stringify(request);
         restoring = true;
         onBusy(true);
         error = "";
-        try { onRestored(await restoreConfigHistoryVersion(request, selected.version.id, currentContent)); }
+        try {
+            const file = await restoreConfigHistoryVersion({ ...request }, selected.version.id, currentContent);
+            if (active && target === JSON.stringify(request)) onRestored(file);
+        }
         catch (caught) { error = String(caught); }
-        finally { restoring = false; onBusy(false); }
+        finally { restoring = false; if (active) onBusy(false); }
     }
 </script>
 

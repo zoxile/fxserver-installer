@@ -36,23 +36,23 @@
 		<div class="grid gap-4 sm:grid-cols-2">
 			<label class="grid gap-2">
 				<span class="text-xs font-medium text-muted-foreground">Host</span>
-				<Input bind:value={credentials.host} placeholder="127.0.0.1" title="MariaDB host for admin actions." />
+				<Input bind:value={credentials.host} disabled={busy} placeholder="127.0.0.1" title="MariaDB host for admin actions." />
 			</label>
 			<label class="grid gap-2">
 				<span class="text-xs font-medium text-muted-foreground">Port</span>
-				<Input type="number" bind:value={credentials.port} placeholder="3306" title="MariaDB port for admin actions." />
+				<Input type="number" bind:value={credentials.port} disabled={busy} placeholder="3306" title="MariaDB port for admin actions." />
 			</label>
 			<label class="grid gap-2">
 				<span class="text-xs font-medium text-muted-foreground">Admin Username</span>
-				<Input bind:value={credentials.username} placeholder="root" title="Admin username used to connect to MariaDB." />
+				<Input bind:value={credentials.username} disabled={busy} placeholder="root" title="Admin username used to connect to MariaDB." />
 			</label>
 			<label class="grid gap-2">
 				<span class="text-xs font-medium text-muted-foreground">Admin Password</span>
-				<PasswordInput bind:value={credentials.password} placeholder="Root/admin password" title="Admin password used to connect to MariaDB." />
+				<PasswordInput bind:value={credentials.password} disabled={busy} placeholder="Root/admin password" title="Admin password used to connect to MariaDB." />
 			</label>
 			<label class="grid gap-2 sm:col-span-2">
 				<span class="text-xs font-medium text-muted-foreground">Default Database</span>
-				<Input bind:value={credentials.database} placeholder="Optional default schema" title="Optional database to use when running queries." />
+				<Input bind:value={credentials.database} disabled={busy} placeholder="Optional default schema" title="Optional database to use when running queries." />
 			</label>
 		</div>
 		<Button class="w-full" onclick={onApply} disabled={busy} title="Apply admin credentials and refresh MariaDB status, users, and selected user details">
