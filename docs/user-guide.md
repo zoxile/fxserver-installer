@@ -195,7 +195,7 @@ Use that password in Manage Server or Resource Manager.
 
 Manage Server is the main runtime view. It includes:
 
-- Start, stop, and status controls.
+- Start, stop, restart, and status controls.
 - Optimized live console output.
 - RCON command input.
 - Secure saved RCON password.
@@ -203,6 +203,36 @@ Manage Server is the main runtime view. It includes:
 - Uptime, start time, thread count, and handle count.
 
 If the console is extremely busy, the app batches visible output so the UI remains responsive.
+
+Start and Restart run preflight checks first. Blocking errors prevent launch; warnings remain visible for review. Port checks are skipped during Restart because the current server still owns its ports. You can also run checks from **FXServer > Diagnostics**, which lists missing dependencies, duplicate resources, configuration references, and RCON warnings. Dynamically generated Lua configuration cannot be fully verified without executing it, so review those warnings manually.
+
+## Workspaces And Tasks
+
+The first saved workspace, **Default**, adopts your existing settings. Open **Workspaces** to save another server's artifact folder, txData folder, profile, RCON endpoint, and database defaults. Switching requires a stopped server and no running conflicting tasks. Only one FXServer is managed at a time.
+
+RCON passwords are encrypted separately for each workspace with Windows data protection. Database passwords stay in memory until the app closes; saved workspace metadata contains connection defaults but no database password. Sensitive TXHOST environment values are not included in saved workspace metadata. Removing a workspace removes its entry, backup schedules, and saved RCON password, not its server files, backup files, or databases.
+
+Open **Task Center** from the sidebar to inspect running operations and session history. Navigation remains available during background work. Closing a resource preview does not cancel an update that has already started. File and database writes are not forcibly cancelled; quitting hides the app immediately, stops new scheduled work, and waits for active writes to finish.
+
+## Scheduled Backups And Restore
+
+1. Open **MariaDB > Backups & Restore** and validate the connection.
+2. Create a schedule, select a non-system database and an existing output folder, and set its interval and retained backup count.
+3. Enable the schedule for the current app session, or leave it paused and use **Run now**.
+
+Schedules run while the app is open or in the tray, not while the app or PC is shut down. Saved schedules reopen paused because passwords are not stored. Validate credentials and enable them again after restarting the app. Missed intervals do not trigger a burst of catch-up backups. Retention only removes verified snapshots owned by that schedule, never unrelated SQL files.
+
+To restore, select an app-managed snapshot and review the target host, database, checksum, and warnings. Enter the requested database name to confirm. The app creates a recovery backup of the target before streaming the selected snapshot into it. Restore can replace tables and data, is not a single transaction, and should be done while FXServer and other database writers are stopped. A failed restore may require restoring the recovery snapshot. Keep an independent, off-machine backup as well.
+
+## Health And Recovery
+
+Open **FXServer > Health & Recovery** to enable CPU, RAM, or free-disk alerts. Monitoring runs in the backend at five-second intervals, including while the window is hidden. Thresholds must stay exceeded for the configured sustained period; cooldowns prevent repeated notifications. Alerts appear in Application Logs and in dismissible notifications.
+
+Automatic crash recovery is off by default and must be explicitly enabled for the current session. It only restarts a server launched successfully by this app. It waits between attempts and allows at most three attempts per ten-minute window. Manual Stop, workspace switching, and Quit disarm recovery. This is not a Windows service or a replacement for an external uptime monitor.
+
+## Diagnostic Export
+
+Use **FXServer > Diagnostics** to prepare a report. Application and server log excerpts are optional. Inspect the redacted preview before exporting the ZIP; the export uses that exact preview rather than rereading changing files. Previews expire after 15 minutes. Raw configuration files and database dumps are not included by default. Redaction is a safeguard, not a guarantee: review any logs you choose to share for personal information or unusual secret formats.
 
 ## Resource Manager
 
@@ -217,7 +247,11 @@ restart resource_name
 ensure resource_name
 ```
 
-The app does not show resource running/stopped state because the workflow does not have a reliable state source. Back up local resource configuration before updating or reinstalling a resource because upstream files may replace local changes.
+The app does not show resource running/stopped state because the workflow does not have a reliable state source. Stop the resource before replacing its files.
+
+Update and Re-install now prepare a downloaded file preview. Review added, changed, and removed files, and adjust which existing files should be protected. Common local configuration files are protected by default. Applying creates a verified snapshot, stages the replacement, and checks that local files have not changed since previewing. Configuration changes required by a new resource version may still need manual migration.
+
+Open a resource's snapshot history to restore an earlier file version. Restoring first snapshots the current resource. Snapshots cover resource files, not database migrations or external files. Storage is bounded to 20 snapshots or 10 GiB per resource; explicitly delete unwanted snapshots when the limit is reached. Keep independent backups outside the app.
 
 ## Logs
 

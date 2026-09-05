@@ -73,6 +73,21 @@ Quick note: The main purpose of this app was for me to learn how to build with T
 - First Run Wizard that checks setup status and auto-completes steps when MariaDB, artifacts, and FXServer data are already available.
 - Command palette shortcut hint in the sidebar.
 
+### Workspaces And Background Tasks
+
+- Separate saved artifact paths, txAdmin profiles, environment settings, and database defaults.
+- Per-workspace encrypted RCON passwords; database passwords remain session-only.
+- One active server at a time, with guarded workspace switching.
+- Task Center with running operations and bounded session history, available from the sidebar.
+
+### Backups, Diagnostics, And Health
+
+- Opt-in scheduled database backups while the app is open or in the tray, with retention and disk-space checks.
+- Verified restore previews, explicit database confirmation, and a recovery backup before restoring.
+- Preflight checks before starting or restarting, including paths, resources, dependencies, RCON, and optional database validation.
+- Previewable, redacted diagnostic ZIP exports.
+- Opt-in CPU, RAM, and disk alerts, with bounded crash recovery and backoff.
+
 ### Manage MariaDB
 
 - Detect MariaDB installation and service status.
@@ -107,7 +122,7 @@ Quick note: The main purpose of this app was for me to learn how to build with T
 
 ### Manage Server
 
-- Start, stop, and check FXServer status.
+- Start, stop, restart, and check FXServer status without blocking navigation.
 - Optimized console output for busy servers.
 - Send RCON commands with a saved RCON password protected by Windows data protection.
 - CPU and RAM performance charts with selectable time ranges.
@@ -119,6 +134,7 @@ Quick note: The main purpose of this app was for me to learn how to build with T
 - Read `fxmanifest.lua` metadata, local versions, and repository URLs.
 - Check GitHub repositories for available updates.
 - Update or reinstall resources that expose a repository in their manifest.
+- Preview file changes, protect local configuration, and create verified rollback snapshots before replacement.
 - Run `start`, `stop`, `restart`, and `ensure` through RCON.
 - Exclude CitizenFX and `[cfx-default]` resources from update checks.
 - Avoid runtime state badges because FXServer does not expose a reliable resource-state command through this workflow.
@@ -142,6 +158,7 @@ Quick note: The main purpose of this app was for me to learn how to build with T
 
 - Current-user Windows installer.
 - Close-to-tray behavior for background use.
+- Quit stops monitoring and lets in-flight writes finish before the process exits.
 - Custom titlebar and disabled browser context menu in production builds.
 - Hidden child-process consoles for background PowerShell/system calls where possible.
 
