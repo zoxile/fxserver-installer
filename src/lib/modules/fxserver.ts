@@ -1,5 +1,6 @@
-import { invoke } from "@tauri-apps/api/core";
+import { taskInvoke as invoke } from "$lib/core/tasks.svelte";
 import { log } from "$lib/core/logger.svelte";
+import { taskSession } from "$lib/core/tasks.svelte";
 
 export interface FxserverEnvironmentVariable {
 	key: string;
@@ -131,19 +132,6 @@ export interface ResourceScanResult {
 	resources: FxserverResourceInfo[];
 }
 
-export interface ResourceUpdateRequest {
-	resourcePath: string;
-	repository: string;
-	branch: string;
-}
-
-export interface ResourceUpdateResult {
-	resourcePath: string;
-	repository: string;
-	branch: string;
-	updatedAt: string;
-}
-
 function hasTauriRuntime() {
 	return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 }
@@ -258,19 +246,19 @@ function withRconPasswordStore<T>(task: () => Promise<T>): Promise<T> {
 	return pending;
 }
 
-export async function getSavedFxserverRconPassword() {
+export async function getSavedFxserverRconPassword(workspaceId = taskSession.workspaceId) {
 	if (!hasTauriRuntime()) return "";
-	return (await withRconPasswordStore(() => invoke<string | null>("get_fxserver_rcon_password"))) ?? "";
+	return (await withRconPasswordStore(() => invoke<string | null>("get_fxserver_rcon_password", { workspaceId }))) ?? "";
 }
 
-export async function saveFxserverRconPassword(password: string) {
+export async function saveFxserverRconPassword(password: string, workspaceId = taskSession.workspaceId) {
 	if (!hasTauriRuntime()) return;
-	await withRconPasswordStore(() => invoke<void>("save_fxserver_rcon_password", { password }));
+	await withRconPasswordStore(() => invoke<void>("save_fxserver_rcon_password", { password, workspaceId }));
 }
 
-export async function clearFxserverRconPassword() {
+export async function clearFxserverRconPassword(workspaceId = taskSession.workspaceId) {
 	if (!hasTauriRuntime()) return;
-	await withRconPasswordStore(() => invoke<void>("clear_fxserver_rcon_password"));
+	await withRconPasswordStore(() => invoke<void>("clear_fxserver_rcon_password", { workspaceId }));
 }
 
 export async function sendFxserverCommand(command: string, rcon: FxserverRconConfig) {
@@ -335,27 +323,6 @@ export async function scanFxserverResources(request: ResourceScanRequest) {
 		return result;
 	} catch (error) {
 		log("FXServer resource scan failed.", {
-			level: "error",
-			scope: "fxserver.resources",
-			detail: errorMessage(error),
-		});
-		throw error;
-	}
-}
-
-export async function updateGithubResource(request: ResourceUpdateRequest) {
-	if (!hasTauriRuntime()) return unavailableOutsideTauri<ResourceUpdateResult>();
-
-	try {
-		const result = await invoke<ResourceUpdateResult>("update_github_resource", { request });
-		log(`Updated resource from ${result.repository}.`, {
-			level: "success",
-			scope: "fxserver.resources",
-			detail: result.resourcePath,
-		});
-		return result;
-	} catch (error) {
-		log("FXServer resource update failed.", {
 			level: "error",
 			scope: "fxserver.resources",
 			detail: errorMessage(error),

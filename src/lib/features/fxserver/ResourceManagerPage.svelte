@@ -2,6 +2,7 @@
 	import DownloadIcon from "@lucide/svelte/icons/download";
 	import ExternalLinkIcon from "@lucide/svelte/icons/external-link";
 	import GitBranchIcon from "@lucide/svelte/icons/git-branch";
+	import HistoryIcon from "@lucide/svelte/icons/history";
 	import LoaderCircleIcon from "@lucide/svelte/icons/loader-circle";
 	import PlayIcon from "@lucide/svelte/icons/play";
 	import RefreshCwIcon from "@lucide/svelte/icons/refresh-cw";
@@ -16,13 +17,14 @@
 	import { Notice } from "$lib/components/ui/notice/index.js";
 	import PasswordInput from "$lib/components/ui/password-input.svelte";
 	import { openExternalUrl } from "$lib/core/openExternal";
+	import { getWorkspaceId } from "$lib/core/workspaces.svelte";
+	import ResourceUpdateDialog from "./ResourceUpdateDialog.svelte";
 	import {
 		clearFxserverRconPassword,
 		getSavedFxserverRconPassword,
 		saveFxserverRconPassword,
 		scanFxserverResources,
 		sendFxserverRconCommand,
-		updateGithubResource,
 		type FxserverRconConfig,
 		type FxserverResourceInfo,
 		type ResourceScanResult,
@@ -67,6 +69,8 @@
 	let showUpdateBackupNotice = $state(true);
 	let contextMenuResource = $state<ResourceView | null>(null);
 	let contextMenuPosition = $state({ x: 0, y: 0 });
+	let updateDialog = $state<{ resource: ResourceView; reinstall: boolean; history: boolean } | null>(null);
+	const workspaceId = getWorkspaceId();
 
 	const latestManifestCache = new Map<string, Promise<LatestManifest>>();
 	const repositoryMetadataCache = new Map<string, Promise<{ defaultBranch: string; webUrl: string }>>();
@@ -101,7 +105,7 @@
 		rcon = {
 			host: saved.TXHOST_RCON_HOST || "127.0.0.1",
 			port: Number.parseInt(saved.TXHOST_RCON_PORT || "30120", 10) || 30120,
-			password: await getSavedFxserverRconPassword(),
+			password: await getSavedFxserverRconPassword(workspaceId),
 		};
 
 		if (fxserverSettings.txDataPath && fxserverSettings.profile) {
@@ -219,34 +223,25 @@
 			return;
 		}
 
-		const actionLabel = force ? "Re-install" : "Update";
-		const confirmed = window.confirm(`${actionLabel} ${resource.name} from ${target.repositoryWebUrl || resource.repository}? Existing files with the same names will be overwritten.`);
-		if (!confirmed) return;
+		updateDialog = { resource: target, reinstall: force, history: false };
+	}
 
-		patchResource(resource.path, { updating: true });
-		error = "";
-		message = "";
-		try {
-			await updateGithubResource({
-				resourcePath: resource.path,
-				repository,
-				branch: target.defaultBranch,
-			});
-			message = force ? `${resource.name} re-installed from GitHub.` : `${resource.name} updated from GitHub.`;
-			await scanResources(false);
-			const refreshed = resources.find((entry) => entry.path === resource.path);
-			if (refreshed) await checkResourceUpdate(refreshed);
-		} catch (caught) {
-			error = caught instanceof Error ? caught.message : String(caught);
-		} finally {
-			patchResource(resource.path, { updating: false });
-		}
+	function openSnapshots(resource: ResourceView) {
+		closeResourceContextMenu();
+		updateDialog = { resource, reinstall: false, history: true };
+	}
+
+	async function onUpdateComplete(result: string) {
+		updateDialog = null;
+		latestManifestCache.clear();
+		await scanResources(false);
+		message = result;
 	}
 
 	function openResourceContextMenu(event: MouseEvent, resource: ResourceView) {
 		event.preventDefault();
 		const menuWidth = 360;
-		const menuHeight = 340;
+		const menuHeight = 410;
 		const padding = 12;
 		contextMenuResource = resource;
 		contextMenuPosition = {
@@ -284,7 +279,7 @@
 		error = "";
 		message = "";
 		try {
-			if (rcon.password.trim()) await saveFxserverRconPassword(rcon.password);
+			if (rcon.password.trim()) await saveFxserverRconPassword(rcon.password, workspaceId);
 			await sendFxserverRconCommand(command, rcon);
 			recentCommands = [command, ...recentCommands].slice(0, 8);
 			message = `Sent RCON command: ${command.replace("\n", " then ")}`;
@@ -297,7 +292,7 @@
 
 	async function clearPassword() {
 		rcon = { ...rcon, password: "" };
-		await clearFxserverRconPassword();
+		await clearFxserverRconPassword(workspaceId);
 		message = "Saved RCON password cleared.";
 	}
 
@@ -585,7 +580,7 @@
 		<Notice
 			tone="warn"
 			title="Back up resource configs"
-			message="Update and re-install actions can replace existing files. Back up older configuration files before running them."
+			message="Updates include a file preview, configuration protection, and a rollback snapshot. Keep an independent backup of resource configurations and databases before updating."
 			onDismiss={() => (showUpdateBackupNotice = false)}
 		/>
 	{/if}
@@ -777,6 +772,7 @@
 											{/if}
 											{githubActionLabel(resource)}
 										</Button>
+										<Button size="xs" variant="outline" onclick={() => openSnapshots(resource)} disabled={isCfxDefaultResource(resource)} title="View resource snapshots and roll back"><HistoryIcon />Snapshots</Button>
 									</div>
 								</div>
 							</div>
@@ -793,7 +789,7 @@
 
 	{#if contextMenuResource}
 		<div
-			class="fixed z-[110] w-[min(22rem,calc(100vw-1.5rem))] rounded-md border border-border bg-popover p-3 text-popover-foreground shadow-2xl animate-in fade-in-0 zoom-in-95 duration-100"
+			class="fixed z-[110] max-h-[calc(100vh-1.5rem)] w-[min(22rem,calc(100vw-1.5rem))] overflow-y-auto rounded-md border border-border bg-popover p-3 text-popover-foreground shadow-2xl animate-in fade-in-0 zoom-in-95 duration-100"
 			style={`left: ${contextMenuPosition.x}px; top: ${contextMenuPosition.y}px;`}
 			role="menu"
 			tabindex="-1"
@@ -844,6 +840,7 @@
 							{/if}
 							{githubActionLabel(contextMenuResource)}
 						</Button>
+						<Button class="col-span-2" size="lg" variant="outline" onclick={() => openSnapshots(contextMenuResource!)} disabled={isCfxDefaultResource(contextMenuResource)}><HistoryIcon />Snapshots</Button>
 					</div>
 				</div>
 			</div>
@@ -868,3 +865,15 @@
 		</Card.Content>
 	</Card.Root>
 </section>
+
+{#if updateDialog}
+	<ResourceUpdateDialog
+		target={{ workspaceId, txDataPath: fxserverSettings.txDataPath, profile: fxserverSettings.profile, resourcePath: updateDialog.resource.path }}
+		branch={updateDialog.resource.defaultBranch}
+		name={updateDialog.resource.name}
+		reinstall={updateDialog.reinstall}
+		history={updateDialog.history}
+		onclose={() => (updateDialog = null)}
+		oncomplete={onUpdateComplete}
+	/>
+{/if}
