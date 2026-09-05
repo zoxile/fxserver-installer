@@ -125,13 +125,16 @@ The output folder will contain `manifest.json` and the `shards/` folder. The gen
 
 ## Host A Pack
 
-The manifest URL entered in the app can point at any static host as long as the shard paths resolve beside it. Good options are:
+Use a static HTTPS host with direct responses and shard paths on the same origin as the manifest. Supported examples are:
 
 - A raw GitHub branch, for example `https://raw.githubusercontent.com/zoxile/fxserver-installer/jooat-db/manifest.json`.
-- A GitHub release asset setup with stable direct URLs.
-- Any CDN or static web host that serves JSON and TSV files without authentication.
+- A CDN or static web host that serves JSON and TSV files without authentication or redirects.
 
 The app fetches the manifest first, validates that all 256 shards are listed, writes the local manifest, then downloads each shard relative to the manifest URL.
+
+Downloads omit cookies and referrers. Embedded URL credentials, HTTP, redirects, and cross-origin shard URLs are rejected. GitHub release download URLs normally redirect and are not supported here; use the raw branch URL instead. The host must allow the app's browser-origin requests through CORS.
+
+The manifest is limited to 512 KiB, each shard to 16 MiB, and the full shard download to 512 MiB. Each request has a 30-second timeout within a 15-minute installation deadline. Concurrent resolver installs are refused.
 
 ## Updating A Pack
 

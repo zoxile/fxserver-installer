@@ -50,6 +50,55 @@ export interface JooatInstallProgress {
 }
 
 const completeShardCount = 256;
+const maxManifestBytes = 512 * 1024;
+const maxShardBytes = 16 * 1024 * 1024;
+const maxDatabaseBytes = 512 * 1024 * 1024;
+let installing = false;
+
+function resolverUrl(value: string, base?: URL) {
+	let url: URL;
+	try { url = new URL(value, base); }
+	catch { throw new Error("Resolver downloads require a valid HTTPS URL."); }
+	if (url.protocol !== "https:" || url.username || url.password || (base && url.origin !== base.origin)) {
+		throw new Error("Resolver downloads require credential-free HTTPS URLs on the manifest origin.");
+	}
+	return url;
+}
+
+async function downloadResolverText(url: URL, limit: number, deadline: number) {
+	const remaining = Math.min(30_000, deadline - Date.now());
+	if (remaining <= 0) throw new Error("Resolver installation timed out. Try again.");
+	const controller = new AbortController();
+	const timer = setTimeout(() => controller.abort(), remaining);
+	let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+	try {
+		const response = await fetch(url, { signal: controller.signal, credentials: "omit", referrerPolicy: "no-referrer", redirect: "error" });
+		if (!response.ok) throw new Error(`Resolver download failed (HTTP ${response.status}).`);
+		if (Number(response.headers.get("content-length")) > limit) throw new Error("Resolver download exceeds the size limit.");
+		if (!response.body) throw new Error("Resolver download returned no readable body.");
+		reader = response.body.getReader();
+		const decoder = new TextDecoder("utf-8", { fatal: true });
+		const chunks: string[] = [];
+		let bytes = 0;
+		while (true) {
+			const { done, value } = await reader.read();
+			if (done) break;
+			bytes += value.byteLength;
+			if (bytes > limit) throw new Error("Resolver download exceeds the size limit.");
+			chunks.push(decoder.decode(value, { stream: true }));
+		}
+		chunks.push(decoder.decode());
+		return { content: chunks.join(""), bytes };
+	} catch (error) {
+		if (controller.signal.aborted) throw new Error("Resolver download timed out. Try again.");
+		if (error instanceof Error && /^Resolver download /.test(error.message)) throw error;
+		throw new Error("Resolver download failed. Check the HTTPS source and connection.");
+	} finally {
+		clearTimeout(timer);
+		controller.abort();
+		await reader?.cancel().catch(() => {});
+	}
+}
 
 function hasTauriRuntime() {
 	return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -124,40 +173,40 @@ export function removeJooatResolverDatabase() {
 
 export async function installJooatResolverDatabase({ manifestUrl, onProgress }: InstallJooatResolverOptions) {
 	if (!hasTauriRuntime()) return unavailableOutsideTauri<JooatResolverStatus>();
+	if (installing) throw new Error("A resolver installation is already in progress.");
+	installing = true;
+	try {
+		const source = resolverUrl(manifestUrl);
+		const deadline = Date.now() + 15 * 60_000;
+		log("JOOAT resolver database install started.", { scope: "jooat" });
+		const downloaded = await downloadResolverText(source, maxManifestBytes, deadline);
+		let manifest: JooatResolverManifest;
+		try { manifest = JSON.parse(downloaded.content); }
+		catch { throw new Error("Resolver manifest must contain valid JSON."); }
+		validateManifest(manifest);
+		const baseUrl = new URL(".", source);
+		const shardUrls = manifest.shards.map((shard) => resolverUrl(shard.path, baseUrl));
+		log(`JOOAT resolver manifest validated with ${manifest.shards.length} shards.`, { level: "success", scope: "jooat", detail: manifest.version });
 
-	log("JOOAT resolver database install started.", { scope: "jooat", detail: manifestUrl });
-	const manifestResponse = await fetch(manifestUrl);
-	if (!manifestResponse.ok) {
-		log("JOOAT resolver manifest download failed.", { level: "error", scope: "jooat", detail: `${manifestResponse.status}` });
-		throw new Error(`Could not download resolver manifest: ${manifestResponse.status}`);
-	}
+		let status = await invoke<JooatResolverStatus>("prepare_jooat_resolver_database", { manifest });
+		let totalBytes = 0;
 
-	const manifest = (await manifestResponse.json()) as JooatResolverManifest;
-	validateManifest(manifest);
-	log(`JOOAT resolver manifest validated with ${manifest.shards.length} shards.`, { level: "success", scope: "jooat", detail: manifest.version });
+		for (let index = 0; index < manifest.shards.length; index += 1) {
+			const shard = manifest.shards[index];
+			onProgress?.({ current: index + 1, total: manifest.shards.length, label: shard.prefix });
 
-	let status = await invoke<JooatResolverStatus>("prepare_jooat_resolver_database", { manifest });
-	const baseUrl = new URL(".", manifestUrl);
+			const downloaded = await downloadResolverText(shardUrls[index], Math.min(maxShardBytes, maxDatabaseBytes - totalBytes), deadline);
+			totalBytes += downloaded.bytes;
 
-	for (let index = 0; index < manifest.shards.length; index += 1) {
-		const shard = manifest.shards[index];
-		onProgress?.({ current: index + 1, total: manifest.shards.length, label: shard.prefix });
-
-		const shardUrl = new URL(shard.path, baseUrl);
-		const shardResponse = await fetch(shardUrl);
-		if (!shardResponse.ok) {
-			log(`JOOAT resolver shard ${shard.prefix} download failed.`, { level: "error", scope: "jooat", detail: `${shardResponse.status}` });
-			throw new Error(`Could not download JOOAT shard ${shard.prefix}: ${shardResponse.status}`);
+			status = await invoke<JooatResolverStatus>("save_jooat_resolver_shard", {
+				prefix: shard.prefix,
+				content: downloaded.content,
+			});
 		}
 
-		status = await invoke<JooatResolverStatus>("save_jooat_resolver_shard", {
-			prefix: shard.prefix,
-			content: await shardResponse.text(),
-		});
-	}
-
-	log(`JOOAT resolver database install completed with ${status.installedShards} shards.`, { level: "success", scope: "jooat" });
-	return status;
+		log(`JOOAT resolver database install completed with ${status.installedShards} shards.`, { level: "success", scope: "jooat" });
+		return status;
+	} finally { installing = false; }
 }
 
 function validateManifest(manifest: JooatResolverManifest) {
@@ -165,18 +214,17 @@ function validateManifest(manifest: JooatResolverManifest) {
 		throw new Error("Resolver manifest must be a JSON object.");
 	}
 
-	if (!manifest.version || !Array.isArray(manifest.shards) || manifest.shards.length === 0) {
+	if (typeof manifest.version !== "string" || !manifest.version || manifest.version.length > 200 || !Array.isArray(manifest.shards) || manifest.shards.length === 0) {
 		throw new Error("Resolver manifest must include a version and at least one shard.");
 	}
 
-	if (!isCompleteManifest(manifest)) {
-		throw new Error("Resolver manifest must include the complete 256-shard database from 00 through ff.");
-	}
-
 	for (const shard of manifest.shards) {
-		if (!/^[0-9a-f]{2}$/i.test(shard.prefix) || !shard.path) {
+		if (!shard || typeof shard.prefix !== "string" || !/^[0-9a-f]{2}$/i.test(shard.prefix) || typeof shard.path !== "string" || !shard.path || shard.path.length > 2048) {
 			throw new Error("Resolver manifest contains an invalid shard entry.");
 		}
+	}
+	if (!isCompleteManifest(manifest)) {
+		throw new Error("Resolver manifest must include the complete 256-shard database from 00 through ff.");
 	}
 }
 
