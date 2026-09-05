@@ -149,7 +149,7 @@ fn missing_started_dependencies_and_duplicates_block_start() {
 }
 
 #[cfg(windows)]
-fn link_directory(target: &Path, link: &Path) {
+pub(super) fn link_directory(target: &Path, link: &Path) {
     let output = Command::new("powershell.exe")
         .args(["-NoProfile", "-NonInteractive", "-Command",
             "$ErrorActionPreference = 'Stop'; New-Item -ItemType Junction -Path $env:FXSI_TEST_LINK -Target $env:FXSI_TEST_TARGET | Out-Null"])
@@ -166,7 +166,7 @@ fn link_directory(target: &Path, link: &Path) {
 }
 
 #[cfg(unix)]
-fn link_directory(target: &Path, link: &Path) {
+pub(super) fn link_directory(target: &Path, link: &Path) {
     std::os::unix::fs::symlink(target, link).unwrap();
 }
 
@@ -408,6 +408,137 @@ fn redacting_quoted_secret_values_does_not_corrupt_json() {
     )
     .unwrap();
     assert!(serde_json::from_str::<serde_json::Value>(&entry.content).is_ok());
+}
+
+#[test]
+fn resource_reads_and_config_parsing_share_a_bounded_budget() {
+    let fixture = Fixture::new();
+    let root = fixture.root.join("data").canonicalize().unwrap();
+    let mut inspection = Inspection {
+        scan_bytes: MAX_SCAN_BYTES,
+        ..Inspection::default()
+    };
+    scan_resources(
+        &root.join("resources"),
+        &root.join("resources"),
+        0,
+        &mut ResourceScan::default(),
+        &mut inspection,
+    );
+    assert!(inspection
+        .checks
+        .iter()
+        .any(|item| item.code == "scan-limit"));
+    read_config(
+        &root.join("server.cfg"),
+        &root,
+        &mut HashSet::new(),
+        &mut inspection,
+        true,
+    );
+    assert!(inspection.configs.is_empty());
+    assert_eq!(inspection.scan_bytes, MAX_SCAN_BYTES);
+
+    inspection.scan_bytes = MAX_SCAN_BYTES - 8;
+    fs::write(root.join("server.cfg"), "larger than the remaining budget").unwrap();
+    assert!(read_inspection_file(&root.join("server.cfg"), &mut inspection).is_err());
+    assert_eq!(inspection.scan_bytes, MAX_SCAN_BYTES);
+
+    fs::write(root.join("server.cfg"), "exec missing.cfg\n".repeat(10_000)).unwrap();
+    let inspection = inspect(&fixture.request());
+    assert!(inspection.executed_commands.len() <= 4096);
+    assert!(inspection.checks.len() <= MAX_CHECKS);
+    assert!(inspection
+        .checks
+        .iter()
+        .any(|item| item.code == "check-limit"));
+    assert!(inspection
+        .checks
+        .iter()
+        .any(|item| item.code == "config-parse-uncertain"));
+}
+
+#[test]
+fn key_redaction_happens_before_the_last_two_hundred_log_lines_are_selected() {
+    let fixture = Fixture::new();
+    let path = fixture.root.join("key.log");
+    fs::write(
+        &path,
+        format!(
+            "-----BEGIN RSA PRIVATE KEY-----\n{}-----END RSA PRIVATE KEY-----\nready",
+            "private-fragment\n".repeat(220)
+        ),
+    )
+    .unwrap();
+    let entry = log_entry("fixture.log", Some(&path), &[]);
+    assert!(entry.content.lines().count() <= 200);
+    assert!(!entry.content.contains("private-fragment"));
+    assert!(entry.content.ends_with("ready"));
+}
+
+#[test]
+fn linked_log_parents_and_export_directories_are_rejected() {
+    let fixture = Fixture::new();
+    let outside = fixture.root.join("outside");
+    fs::create_dir(&outside).unwrap();
+    fs::write(outside.join("fxserver.log"), "private fixture").unwrap();
+    let link = fixture.root.join("linked");
+    link_directory(&outside, &link);
+    assert!(latest_server_log(&link).is_none());
+    assert!(tail_log(&link.join("fxserver.log")).is_err());
+    assert!(write_archive(&link.join("export.zip"), &[]).is_err());
+    assert!(!outside.join("export.zip").exists());
+    #[cfg(windows)]
+    fs::remove_dir(link).unwrap();
+    #[cfg(unix)]
+    fs::remove_file(link).unwrap();
+}
+
+#[test]
+fn archive_targets_cannot_use_alternate_data_streams() {
+    let fixture = Fixture::new();
+    let path = fixture.root.join("host.txt:export.zip");
+    assert!(write_archive(&path, &[]).is_err());
+    assert!(!path.exists());
+}
+
+#[test]
+fn export_approvals_use_monotonic_expiry_and_are_claimed_once() {
+    let fixture = Fixture::new();
+    let request = DiagnosticPreviewRequest {
+        preflight: fixture.request(),
+        include_application_log: false,
+        include_server_log: false,
+    };
+    let preview = prepare_preview(&request, None, "fixture").unwrap();
+    previews()
+        .lock()
+        .unwrap()
+        .get_mut(&preview.id)
+        .unwrap()
+        .created -= PREVIEW_TTL;
+    assert!(export_preview(&preview.id, &fixture.root.join("expired.zip")).is_err());
+    assert!(!fixture.root.join("expired.zip").exists());
+
+    let preview = prepare_preview(&request, None, "fixture").unwrap();
+    let destinations = [
+        fixture.root.join("first.zip"),
+        fixture.root.join("second.zip"),
+    ];
+    let results = std::thread::scope(|scope| {
+        let workers: Vec<_> = destinations
+            .iter()
+            .map(|path| {
+                let id = &preview.id;
+                scope.spawn(move || export_preview(id, path).is_ok())
+            })
+            .collect();
+        workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap())
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(results.into_iter().filter(|success| *success).count(), 1);
 }
 
 #[test]

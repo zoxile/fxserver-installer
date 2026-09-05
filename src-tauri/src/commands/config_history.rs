@@ -23,6 +23,7 @@ const MAX_VERSIONS: usize = 20;
 const MAX_HISTORY_BYTES: usize = 4 * 1024 * 1024;
 const MAX_STORE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_HISTORY_FILES: usize = 256;
+const MAX_DIRECTORY_ENTRIES: usize = 4096;
 const HISTORY_ERROR: &str = "Configuration history is unreadable, altered, or belongs to another Windows account. The config was not changed.";
 const STALE_ERROR: &str = "CONFIG_CHANGED: This file changed outside this editor. Reload and review the current file before saving or restoring.";
 static HISTORY_LOCK: Mutex<()> = Mutex::new(());
@@ -177,6 +178,7 @@ fn restore_version(
     save_locked(
         store,
         request,
+        &target,
         expected_content,
         &version.content,
         ConfigChangeReason::Restore,
@@ -207,7 +209,15 @@ pub(crate) fn save_config_atomic(
     reason: ConfigChangeReason,
 ) -> Result<ServerConfigFile, String> {
     let _lock = HISTORY_LOCK.lock().map_err(|_| HISTORY_ERROR)?;
-    save_locked(history_root, request, expected_content, content, reason)
+    let target = resolve_target(request)?;
+    save_locked(
+        history_root,
+        request,
+        &target,
+        expected_content,
+        content,
+        reason,
+    )
 }
 
 pub(crate) fn save_config_with_revision(
@@ -223,12 +233,13 @@ pub(crate) fn save_config_with_revision(
     if digest(current.as_bytes()) != expected_revision {
         return Err(STALE_ERROR.into());
     }
-    save_locked(history_root, request, &current, content, reason)
+    save_locked(history_root, request, &target, &current, content, reason)
 }
 
 fn save_locked(
     store: &Path,
     request: &ConfigFileRequest,
+    target: &Target,
     expected: &str,
     content: &str,
     reason: ConfigChangeReason,
@@ -236,7 +247,9 @@ fn save_locked(
     if content.len() > MAX_CONFIG_BYTES || expected.len() > MAX_CONFIG_BYTES {
         return Err("Config files are limited to 512 KiB.".into());
     }
-    let target = resolve_target(request)?;
+    if resolve_target(request)?.identity != target.identity {
+        return Err(STALE_ERROR.into());
+    }
     let current = read_bounded_config(&target.path)?;
     if current != expected {
         return Err(STALE_ERROR.into());
@@ -252,24 +265,26 @@ fn save_locked(
             return Err("The encoded config is too large to retain both the previous and new version within 4 MiB. No config was changed.".into());
         }
     }
-    let mut journal = load_journal(store, &target)?;
+    let mut journal = load_journal(store, target)?;
     push_snapshot(
         &mut journal,
         &current,
         &format!("before-{}", reason.label()),
     );
     // Persist the recovery version before touching the live file.
-    persist_journal(store, &target, &mut journal)?;
+    persist_journal(store, target, &mut journal)?;
     let staged = stage_file(&target.path, content.as_bytes())?;
     let resolved_again = resolve_target(request)?;
-    if resolved_again.identity != target.identity || read_bounded_config(&target.path)? != expected
+    if resolved_again.identity != target.identity
+        || read_bounded_config(&target.path)? != expected
+        || read_limit(&staged.0, MAX_CONFIG_BYTES)? != content.as_bytes()
     {
         return Err(STALE_ERROR.into());
     }
     atomic_replace(&staged.0, &target.path)?;
     push_snapshot(&mut journal, content, reason.label());
     // The before-version is durable even if saving post-write metadata fails.
-    if persist_journal(store, &target, &mut journal).is_err() {
+    if persist_journal(store, target, &mut journal).is_err() {
         return Err("The config was saved, but its final history entry could not be recorded. The previous version is preserved; reload the file before continuing.".into());
     }
     config_file_metadata(&target.path)
@@ -280,12 +295,14 @@ fn resolve_target(request: &ConfigFileRequest) -> Result<Target, String> {
         resolve_profile_data_path(request.tx_data_path.clone(), request.profile.clone())?;
     let path = Path::new(&request.path);
     if !path.is_absolute()
-        || path
-            .components()
-            .any(|part| matches!(part, Component::ParentDir))
+        || path.components().any(|part| {
+            matches!(part, Component::ParentDir)
+                || matches!(part, Component::Normal(name) if name.to_string_lossy().contains(':'))
+        })
     {
         return Err("Choose an existing cfg inside the selected profile dataPath.".into());
     }
+    ensure_unlinked_path(path)?;
     let path = path.canonicalize().map_err(|_| {
         "The config file no longer exists. Reload the selected profile.".to_string()
     })?;
@@ -308,6 +325,13 @@ pub(crate) fn read_bounded_config(path: &Path) -> Result<String, String> {
 
 fn read_limit(path: &Path, limit: usize) -> Result<Vec<u8>, String> {
     let file = File::open(path).map_err(|_| "The file cannot be read.".to_string())?;
+    if !file
+        .metadata()
+        .map_err(|_| "The file cannot be inspected.")?
+        .is_file()
+    {
+        return Err("Choose a regular file.".into());
+    }
     let mut bytes = Vec::new();
     file.take(limit as u64 + 1)
         .read_to_end(&mut bytes)
@@ -323,7 +347,13 @@ pub(crate) fn read_profile_configs(root: &Path) -> Result<Vec<ServerConfigFile>,
         .canonicalize()
         .map_err(|_| "The dataPath cannot be opened.".to_string())?;
     let mut files = Vec::new();
-    for entry in fs::read_dir(&root).map_err(|_| "The dataPath cannot be read.".to_string())? {
+    for (index, entry) in fs::read_dir(&root)
+        .map_err(|_| "The dataPath cannot be read.".to_string())?
+        .enumerate()
+    {
+        if index >= MAX_DIRECTORY_ENTRIES {
+            return Err("The dataPath contains too many entries to inspect.".into());
+        }
         let entry = entry.map_err(|_| "A config entry cannot be read.".to_string())?;
         if !entry
             .path()
@@ -332,6 +362,7 @@ pub(crate) fn read_profile_configs(root: &Path) -> Result<Vec<ServerConfigFile>,
         {
             continue;
         }
+        ensure_unlinked_path(&entry.path())?;
         let path = entry
             .path()
             .canonicalize()
@@ -367,6 +398,7 @@ fn journal_path(store: &Path, target: &Target) -> PathBuf {
 
 fn load_journal(store: &Path, target: &Target) -> Result<Journal, String> {
     let path = journal_path(store, target);
+    ensure_unlinked_path(&path).map_err(|_| HISTORY_ERROR)?;
     if !path.try_exists().map_err(|_| HISTORY_ERROR)? {
         return Ok(Journal {
             format: 1,
@@ -377,6 +409,9 @@ fn load_journal(store: &Path, target: &Target) -> Result<Journal, String> {
     check_store_file(store, &path)?;
     let encrypted = read_limit(&path, MAX_HISTORY_BYTES).map_err(|_| HISTORY_ERROR)?;
     let decrypted = decrypt_secret(&encrypted).map_err(|_| HISTORY_ERROR)?;
+    if decrypted.len() > MAX_HISTORY_BYTES {
+        return Err(HISTORY_ERROR.into());
+    }
     let journal: Journal = serde_json::from_slice(&decrypted).map_err(|_| HISTORY_ERROR)?;
     if journal.format != 1
         || journal.identity != target.identity
@@ -440,23 +475,21 @@ fn push_snapshot(journal: &mut Journal, content: &str, reason: &str) {
 }
 
 fn check_store_file(store: &Path, path: &Path) -> Result<(), String> {
+    ensure_unlinked_path(path).map_err(|_| HISTORY_ERROR)?;
     let root = store.canonicalize().map_err(|_| HISTORY_ERROR)?;
     let resolved = path.canonicalize().map_err(|_| HISTORY_ERROR)?;
-    if resolved.parent() != Some(root.as_path())
-        || fs::symlink_metadata(path)
-            .map_err(|_| HISTORY_ERROR)?
-            .file_type()
-            .is_symlink()
-    {
+    if resolved.parent() != Some(root.as_path()) || !resolved.is_file() {
         return Err(HISTORY_ERROR.into());
     }
     Ok(())
 }
 
 fn persist_journal(store: &Path, target: &Target, journal: &mut Journal) -> Result<(), String> {
+    ensure_unlinked_path(store).map_err(|_| HISTORY_ERROR)?;
     fs::create_dir_all(store).map_err(|_| "Cannot create encrypted config history.".to_string())?;
     let path = journal_path(store, target);
-    if path.exists() {
+    ensure_unlinked_path(&path).map_err(|_| HISTORY_ERROR)?;
+    if path.try_exists().map_err(|_| HISTORY_ERROR)? {
         check_store_file(store, &path)?;
     }
     let encrypted = loop {
@@ -478,13 +511,19 @@ fn persist_journal(store: &Path, target: &Target, journal: &mut Journal) -> Resu
     };
     let mut total = encrypted.len() as u64;
     let mut count = 1;
-    for entry in fs::read_dir(store).map_err(|_| HISTORY_ERROR)? {
+    for (index, entry) in fs::read_dir(store).map_err(|_| HISTORY_ERROR)?.enumerate() {
+        if index >= MAX_DIRECTORY_ENTRIES {
+            return Err("Encrypted configuration history contains too many entries.".into());
+        }
         let entry = entry.map_err(|_| HISTORY_ERROR)?;
-        if entry.path() == path || !entry.path().extension().is_some_and(|ext| ext == "dpapi") {
+        if entry.path() == path || entry.path().extension().is_none_or(|ext| ext != "dpapi") {
             continue;
         }
         total = total.saturating_add(entry.metadata().map_err(|_| HISTORY_ERROR)?.len());
         count += 1;
+        if total > MAX_STORE_BYTES || count > MAX_HISTORY_FILES {
+            break;
+        }
     }
     if total > MAX_STORE_BYTES || count > MAX_HISTORY_FILES {
         return Err(
@@ -504,6 +543,7 @@ impl Drop for StagedFile {
 }
 
 fn stage_file(destination: &Path, bytes: &[u8]) -> Result<StagedFile, String> {
+    ensure_unlinked_path(destination)?;
     let path = destination.with_file_name(format!(
         ".config-{}-{}.tmp",
         std::process::id(),
@@ -525,8 +565,42 @@ fn stage_file(destination: &Path, bytes: &[u8]) -> Result<StagedFile, String> {
     Ok(staged)
 }
 
+pub(crate) fn ensure_unlinked_path(path: &Path) -> Result<(), String> {
+    if path.components().any(|part| {
+        matches!(part, Component::ParentDir)
+            || matches!(part, Component::Normal(name) if name.to_string_lossy().contains(':'))
+    }) {
+        return Err("File paths cannot contain traversal or alternate data streams.".into());
+    }
+    for ancestor in path.ancestors() {
+        match fs::symlink_metadata(ancestor) {
+            Ok(metadata) => {
+                #[cfg(windows)]
+                {
+                    use std::os::windows::fs::MetadataExt;
+                    if metadata.file_attributes() & 0x400 != 0 {
+                        return Err(
+                            "Configuration and diagnostic files cannot use reparse points.".into(),
+                        );
+                    }
+                }
+                if metadata.file_type().is_symlink() {
+                    return Err(
+                        "Configuration and diagnostic files cannot use symbolic links.".into(),
+                    );
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
+            Err(_) => return Err("The file path cannot be inspected.".into()),
+        }
+    }
+    Ok(())
+}
+
 #[cfg(windows)]
 fn atomic_replace(source: &Path, destination: &Path) -> Result<(), String> {
+    ensure_unlinked_path(source)?;
+    ensure_unlinked_path(destination)?;
     use std::{os::windows::ffi::OsStrExt, ptr};
     use windows_sys::Win32::Storage::FileSystem::{
         MoveFileExW, ReplaceFileW, MOVEFILE_WRITE_THROUGH,
@@ -562,6 +636,8 @@ fn atomic_replace(source: &Path, destination: &Path) -> Result<(), String> {
 
 #[cfg(not(windows))]
 fn atomic_replace(source: &Path, destination: &Path) -> Result<(), String> {
+    ensure_unlinked_path(source)?;
+    ensure_unlinked_path(destination)?;
     fs::rename(source, destination).map_err(|_| "Cannot atomically replace the file.".into())
 }
 
@@ -605,11 +681,100 @@ mod tests {
         fn content(&self) -> String {
             fs::read_to_string(&self.request.path).unwrap()
         }
+
+        fn link_directory(&self, target: &Path, link: &Path) {
+            #[cfg(windows)]
+            {
+                use crate::process::CommandNoWindowExt;
+                let output = std::process::Command::new("powershell.exe")
+                    .args(["-NoProfile", "-NonInteractive", "-Command",
+                        "$ErrorActionPreference = 'Stop'; New-Item -ItemType Junction -Path $env:FXSI_TEST_LINK -Target $env:FXSI_TEST_TARGET | Out-Null"])
+                    .env("FXSI_TEST_LINK", link)
+                    .env("FXSI_TEST_TARGET", target)
+                    .no_window().output().unwrap();
+                assert!(
+                    output.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(target, link).unwrap();
+        }
     }
     impl Drop for Fixture {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.root);
         }
+    }
+
+    #[test]
+    fn linked_history_stores_and_config_parents_are_rejected() {
+        let fixture = Fixture::new();
+        let original = fixture.content();
+        let outside = fixture.root.join("outside-history");
+        fs::create_dir(&outside).unwrap();
+        fixture.link_directory(&outside, &fixture.store);
+        let target = resolve_target(&fixture.request).unwrap();
+        assert!(load_journal(&fixture.store, &target).is_err());
+        assert!(save_config_atomic(
+            &fixture.store,
+            &fixture.request,
+            &original,
+            "new",
+            ConfigChangeReason::Save
+        )
+        .is_err());
+        assert_eq!(fs::read_dir(&outside).unwrap().count(), 0);
+        assert_eq!(fixture.content(), original);
+        #[cfg(windows)]
+        fs::remove_dir(&fixture.store).unwrap();
+        #[cfg(unix)]
+        fs::remove_file(&fixture.store).unwrap();
+
+        let alias = fixture.root.join("data/alias");
+        fixture.link_directory(&fixture.root.join("data"), &alias);
+        let mut request = fixture.request.clone();
+        request.path = alias.join("server.cfg").to_string_lossy().into();
+        assert!(resolve_target(&request).is_err());
+        #[cfg(windows)]
+        fs::remove_dir(alias).unwrap();
+        #[cfg(unix)]
+        fs::remove_file(alias).unwrap();
+    }
+
+    #[test]
+    fn changed_profile_identity_is_rejected_even_when_file_content_matches() {
+        let fixture = Fixture::new();
+        let target = resolve_target(&fixture.request).unwrap();
+        let original = fixture.content();
+        fs::write(
+            fixture.root.join("txData/profile/config.json"),
+            serde_json::to_vec(&serde_json::json!({ "dataPath": fixture.root })).unwrap(),
+        )
+        .unwrap();
+        assert!(save_locked(
+            &fixture.store,
+            &fixture.request,
+            &target,
+            &original,
+            "new",
+            ConfigChangeReason::Save
+        )
+        .unwrap_err()
+        .contains("CONFIG_CHANGED"));
+        assert!(!fixture.store.exists());
+        assert_eq!(fixture.content(), original);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn alternate_data_streams_are_not_config_targets() {
+        let fixture = Fixture::new();
+        let mut request = fixture.request.clone();
+        request.path.push_str(":hidden.cfg");
+        fs::write(&request.path, "hidden fixture").unwrap();
+        assert!(resolve_target(&request).is_err());
     }
 
     #[test]

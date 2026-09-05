@@ -183,6 +183,9 @@ pub(super) fn config_commands_checked(source: &str) -> (Vec<(usize, Vec<String>)
         let mut started = false;
         let mut chars = source.trim_start_matches('\u{feff}').chars().peekable();
         while let Some(character) = chars.next() {
+            if commands.len() >= 4096 || words.len() >= 256 {
+                return (commands, true);
+            }
             if let Some(delimiter) = quote {
                 if character == delimiter {
                     quote = None;
@@ -221,6 +224,9 @@ pub(super) fn config_commands_checked(source: &str) -> (Vec<(usize, Vec<String>)
         if !words.is_empty() {
             commands.push((line + 1, words));
         }
+        if commands.len() >= 4096 {
+            return (commands, true);
+        }
     }
     (commands, uncertain)
 }
@@ -255,6 +261,16 @@ mod tests {
         let result = manifest("dependency ('ox_' .. name)\ndependencies { 'real', 'qbx_' .. suffix, get_value('not-one', 'not-two') }");
         assert!(result.dynamic);
         assert_eq!(result.dependencies, vec!["real"]);
+    }
+
+    #[test]
+    fn cfg_command_and_argument_limits_mark_incomplete_parses() {
+        let (commands, uncertain) = config_commands_checked(&"echo x;".repeat(5000));
+        assert!(uncertain);
+        assert_eq!(commands.len(), 4096);
+        let (commands, uncertain) = config_commands_checked(&format!("echo {}", "x ".repeat(300)));
+        assert!(uncertain);
+        assert!(commands.is_empty());
     }
 
     #[test]

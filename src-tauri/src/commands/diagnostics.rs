@@ -27,6 +27,9 @@ const MAX_CONFIGS: usize = 128;
 const MAX_RESOURCES: usize = 5000;
 const MAX_RESOURCE_ENTRIES: usize = 20_000;
 const MAX_CHECKS: usize = 2000;
+const MAX_SCAN_BYTES: usize = 16 * 1024 * 1024;
+const MAX_CONFIG_COMMANDS: usize = 20_000;
+const MAX_PREVIEW_BYTES: usize = 4 * 1024 * 1024;
 const PREVIEW_TTL: Duration = Duration::from_secs(15 * 60);
 
 #[derive(Clone, Deserialize)]
@@ -122,6 +125,8 @@ struct Inspection {
     secrets: Vec<String>,
     data_root: Option<PathBuf>,
     database_version: Option<String>,
+    scan_bytes: usize,
+    checks_limited: bool,
 }
 
 struct Resource {
@@ -137,6 +142,11 @@ struct Config {
     path: PathBuf,
     commands: Vec<(usize, Vec<String>)>,
     source: String,
+}
+
+struct CachedPreview {
+    preview: DiagnosticPreview,
+    created: Instant,
 }
 
 #[tauri::command]
@@ -184,17 +194,32 @@ fn check(
     title: &str,
     detail: impl Into<String>,
 ) {
-    inspection.checks.push(DiagnosticCheck {
-        category: category.into(),
-        code: code.into(),
-        severity,
-        title: title.into(),
-        detail: detail.into(),
-        resource: None,
-        file: None,
-        line: None,
-        guidance: None,
-    });
+    push_check(
+        inspection,
+        DiagnosticCheck {
+            category: category.into(),
+            code: code.into(),
+            severity,
+            title: title.into(),
+            detail: detail.into(),
+            resource: None,
+            file: None,
+            line: None,
+            guidance: None,
+        },
+    );
+}
+
+fn push_check(inspection: &mut Inspection, item: DiagnosticCheck) {
+    if inspection.checks.len() >= MAX_CHECKS {
+        inspection.checks_limited = true;
+        if item.severity == Severity::Error {
+            inspection.checks.remove(MAX_CHECKS - 1);
+        } else {
+            return;
+        }
+    }
+    inspection.checks.push(item);
 }
 
 fn report(inspection: &Inspection) -> PreflightReport {
@@ -343,6 +368,19 @@ fn inspect(request: &PreflightRequest) -> Inspection {
         },
         None => check(&mut inspection, "Database", "database-skipped", Severity::Info, "Database connection not checked", "No session credentials were supplied. No connection string is extracted or executed from config files."),
     }
+    if inspection.checks_limited {
+        if let Some(index) = inspection
+            .checks
+            .iter()
+            .position(|item| item.severity != Severity::Error)
+        {
+            inspection.checks.remove(index);
+        } else {
+            inspection.checks.truncate(MAX_CHECKS - 1);
+        }
+        check(&mut inspection, "Configuration", "check-limit", Severity::Warning,
+            "Additional findings omitted", "The diagnostic finding limit was reached. Resolve findings and rerun checks before applying repairs.");
+    }
     inspection
         .secrets
         .sort_by(|left, right| right.len().cmp(&left.len()).then_with(|| left.cmp(right)));
@@ -355,15 +393,38 @@ fn safe_component(value: &str) -> bool {
 }
 
 fn read_bounded(path: &Path) -> Result<String, String> {
+    read_file_limit(path, MAX_FILE_BYTES)
+}
+
+fn read_file_limit(path: &Path, limit: u64) -> Result<String, String> {
     let file = File::open(path).map_err(|_| "File is unreadable.".to_string())?;
+    if !file
+        .metadata()
+        .map_err(|_| "File is unreadable.")?
+        .is_file()
+    {
+        return Err("Only regular files can be inspected.".into());
+    }
     let mut bytes = Vec::new();
-    file.take(MAX_FILE_BYTES + 1)
+    file.take(limit + 1)
         .read_to_end(&mut bytes)
         .map_err(|_| "File is unreadable.".to_string())?;
-    if bytes.len() as u64 > MAX_FILE_BYTES {
+    if bytes.len() as u64 > limit {
         return Err("File exceeds the diagnostic size limit.".into());
     }
     String::from_utf8(bytes).map_err(|_| "File is not valid UTF-8.".into())
+}
+
+fn read_inspection_file(path: &Path, inspection: &mut Inspection) -> Result<String, String> {
+    // Charge every attempt, including unreadable/oversized files, against a shared budget.
+    if inspection.scan_bytes >= MAX_SCAN_BYTES {
+        return Err("The aggregate diagnostic read limit was reached.".into());
+    }
+    let limit = (MAX_SCAN_BYTES - inspection.scan_bytes).min(MAX_FILE_BYTES as usize);
+    inspection.scan_bytes += limit;
+    let source = read_file_limit(path, limit as u64)?;
+    inspection.scan_bytes -= limit - source.len();
+    Ok(source)
 }
 
 #[derive(Default)]
@@ -380,6 +441,7 @@ fn scan_resources(
     inspection: &mut Inspection,
 ) {
     if depth > 12
+        || inspection.scan_bytes >= MAX_SCAN_BYTES
         || inspection.resources.len() >= MAX_RESOURCES
         || scan.entries >= MAX_RESOURCE_ENTRIES
     {
@@ -438,7 +500,7 @@ fn scan_resources(
                 );
                 return;
             }
-            match read_bounded(&manifest_path) {
+            match read_inspection_file(&manifest_path, inspection) {
                 Ok(source) => inspection.resources.push(Resource {
                     name: path
                         .file_name()
@@ -488,8 +550,11 @@ fn scan_resources(
     };
     // Track ancestors, not all visited targets: separate resource aliases remain valid.
     scan.ancestors.insert(resolved.clone());
-    for entry in entries.flatten() {
-        if inspection.resources.len() >= MAX_RESOURCES || scan.entries >= MAX_RESOURCE_ENTRIES {
+    for entry in entries {
+        if inspection.resources.len() >= MAX_RESOURCES
+            || scan.entries >= MAX_RESOURCE_ENTRIES
+            || inspection.scan_bytes >= MAX_SCAN_BYTES
+        {
             check(
                 inspection,
                 "Resources",
@@ -501,6 +566,17 @@ fn scan_resources(
             break;
         }
         scan.entries += 1;
+        let Ok(entry) = entry else {
+            check(
+                inspection,
+                "Resources",
+                "resource-unreadable",
+                Severity::Warning,
+                "Resource entry unreadable",
+                "Some resource entries could not be inspected.",
+            );
+            continue;
+        };
         let name = entry.file_name().to_string_lossy().into_owned();
         if name.starts_with('.')
             || matches!(
@@ -566,6 +642,17 @@ fn read_config(
     inspection: &mut Inspection,
     required: bool,
 ) {
+    if inspection.executed_commands.len() >= MAX_CONFIG_COMMANDS {
+        check(
+            inspection,
+            "Configuration",
+            "config-limit",
+            Severity::Warning,
+            "Config command limit reached",
+            "Additional includes were skipped after 20,000 commands.",
+        );
+        return;
+    }
     let Ok(path) = path.canonicalize() else {
         check(
             inspection,
@@ -593,7 +680,7 @@ fn read_config(
         );
         return;
     }
-    if !visited.insert(path.clone()) {
+    if visited.contains(&path) {
         check(
             inspection,
             "Configuration",
@@ -604,7 +691,7 @@ fn read_config(
         );
         return;
     }
-    if visited.len() > MAX_CONFIGS {
+    if visited.len() >= MAX_CONFIGS {
         check(
             inspection,
             "Configuration",
@@ -615,7 +702,8 @@ fn read_config(
         );
         return;
     }
-    let source = match read_bounded(&path) {
+    visited.insert(path.clone());
+    let source = match read_inspection_file(&path, inspection) {
         Ok(source) => source,
         Err(_) => {
             check(
@@ -636,17 +724,18 @@ fn read_config(
             return;
         }
     };
-    let (commands, uncertain) = parsing::config_commands_checked(&source);
+    let (mut commands, uncertain) = parsing::config_commands_checked(&source);
     if uncertain {
+        let index = inspection.checks.len();
         check(
             inspection,
             "Configuration",
             "config-parse-uncertain",
             Severity::Warning,
-            "Config quoting needs review",
-            "An unterminated quoted value prevents a complete static config review.",
+            "Config parsing needs review",
+            "Unterminated quoting or parser size limits prevent a complete static config review.",
         );
-        if let Some(check) = inspection.checks.last_mut() {
+        if let Some(check) = inspection.checks.get_mut(index) {
             check.file = Some(relative(&path, root));
         }
     }
@@ -657,22 +746,26 @@ fn read_config(
         ));
         if let (Some(name), Some(value)) = (words.get(offset), words.get(offset + 1)) {
             let lowered = name.to_ascii_lowercase();
-            if ["password", "secret", "token", "key", "connection_string"]
-                .iter()
-                .any(|key| lowered.contains(key))
-                && !value.is_empty()
-            {
+            if (redaction::sensitive(name) || lowered.contains("key")) && !value.is_empty() {
                 inspection.secrets.push(value.clone());
             }
         }
     }
+    let mut executed = 0;
     for (line, words) in &commands {
+        if inspection.executed_commands.len() >= MAX_CONFIG_COMMANDS {
+            check(inspection, "Configuration", "config-limit", Severity::Warning,
+                "Config command limit reached", "Additional commands were skipped after 20,000 commands. Review configuration manually.");
+            break;
+        }
+        executed += 1;
         inspection.executed_commands.push(words.clone());
         if words[0].eq_ignore_ascii_case("exec") {
             if let Some(reference) = words.get(1) {
                 if let Some(target) = config_target(reference, root, &inspection.resources) {
                     read_config(&target, root, visited, inspection, false);
                 } else {
+                    let index = inspection.checks.len();
                     check(
                         inspection,
                         "Configuration",
@@ -681,12 +774,13 @@ fn read_config(
                         "Included config not resolved",
                         "An exec target is missing, dynamic, or outside the server data directory.",
                     );
-                    if let Some(check) = inspection.checks.last_mut() {
+                    if let Some(check) = inspection.checks.get_mut(index) {
                         check.file = Some(relative(&path, root));
                         check.line = Some(*line);
                     }
                 }
             } else {
+                let index = inspection.checks.len();
                 check(
                     inspection,
                     "Configuration",
@@ -695,13 +789,14 @@ fn read_config(
                     "Included config not specified",
                     "An exec command has no target file.",
                 );
-                if let Some(check) = inspection.checks.last_mut() {
+                if let Some(check) = inspection.checks.get_mut(index) {
                     check.file = Some(relative(&path, root));
                     check.line = Some(*line);
                 }
             }
         }
     }
+    commands.truncate(executed);
     inspection.configs.push(Config {
         path,
         commands,
@@ -866,7 +961,9 @@ fn inspect_dependencies(root: &Path, inspection: &mut Inspection) {
         }
     }
     let limit_reached = checks.len() >= MAX_CHECKS;
-    inspection.checks.extend(checks);
+    for item in checks {
+        push_check(inspection, item);
+    }
     if limit_reached {
         check(inspection, "Resources", "check-limit", Severity::Warning, "Additional findings omitted", "Only the first 2,000 resource findings are shown. Resolve these findings and run the checks again.");
     }
@@ -961,7 +1058,17 @@ fn inspect_config(root: &Path, check_ports: bool, inspection: &mut Inspection) {
             "Review endpoint_add_tcp and endpoint_add_udp in the executed cfg files.",
         );
     } else {
-        for (protocol, endpoint) in endpoints {
+        if endpoints.len() > 128 {
+            check(
+                inspection,
+                "Ports",
+                "check-limit",
+                Severity::Warning,
+                "Port check limit reached",
+                "Only the first 128 distinct endpoints were checked.",
+            );
+        }
+        for (protocol, endpoint) in endpoints.into_iter().take(128) {
             let Ok(address) = endpoint.parse::<SocketAddr>() else {
                 check(
                     inspection,
@@ -1118,9 +1225,15 @@ fn redact_json_values(value: &mut serde_json::Value, secrets: &[String]) {
         serde_json::Value::Array(values) => values
             .iter_mut()
             .for_each(|value| redact_json_values(value, secrets)),
-        serde_json::Value::Object(values) => values
-            .values_mut()
-            .for_each(|value| redact_json_values(value, secrets)),
+        serde_json::Value::Object(values) => {
+            *values = std::mem::take(values)
+                .into_iter()
+                .map(|(key, mut value)| {
+                    redact_json_values(&mut value, secrets);
+                    (redact_known(&key, secrets), value)
+                })
+                .collect();
+        }
         _ => {}
     }
 }
@@ -1202,7 +1315,10 @@ fn prepare_preview(
         "diagnostics-{created_at}-{}",
         NEXT_ID.fetch_add(1, Ordering::Relaxed)
     );
-    let total_bytes = entries.iter().map(|entry| entry.content.len()).sum();
+    let total_bytes: usize = entries.iter().map(|entry| entry.content.len()).sum();
+    if total_bytes > MAX_PREVIEW_BYTES {
+        return Err("The diagnostic preview exceeds 4 MiB. Reduce the findings and retry.".into());
+    }
     let preview = DiagnosticPreview {
         id,
         created_at,
@@ -1213,28 +1329,36 @@ fn prepare_preview(
     let mut cache = previews()
         .lock()
         .map_err(|_| "Diagnostic preview cache is unavailable.".to_string())?;
-    cache.retain(|_, preview| preview.expires_at > now());
+    cache.retain(|_, item| item.created.elapsed() < PREVIEW_TTL);
     if cache.len() >= 4 {
         if let Some(id) = cache
             .values()
-            .min_by_key(|preview| preview.created_at)
-            .map(|preview| preview.id.clone())
+            .min_by_key(|item| item.created)
+            .map(|item| item.preview.id.clone())
         {
             cache.remove(&id);
         }
     }
-    cache.insert(preview.id.clone(), preview.clone());
+    cache.insert(
+        preview.id.clone(),
+        CachedPreview {
+            preview: preview.clone(),
+            created: Instant::now(),
+        },
+    );
     Ok(preview)
 }
 
-fn previews() -> &'static Mutex<BTreeMap<String, DiagnosticPreview>> {
-    static PREVIEWS: OnceLock<Mutex<BTreeMap<String, DiagnosticPreview>>> = OnceLock::new();
+fn previews() -> &'static Mutex<BTreeMap<String, CachedPreview>> {
+    static PREVIEWS: OnceLock<Mutex<BTreeMap<String, CachedPreview>>> = OnceLock::new();
     PREVIEWS.get_or_init(|| Mutex::new(BTreeMap::new()))
 }
 
 fn latest_server_log(directory: &Path) -> Option<PathBuf> {
+    super::config_history::ensure_unlinked_path(directory).ok()?;
     fs::read_dir(directory)
         .ok()?
+        .take(MAX_RESOURCE_ENTRIES)
         .filter_map(Result::ok)
         .filter(|entry| {
             let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
@@ -1256,7 +1380,11 @@ fn latest_server_log(directory: &Path) -> Option<PathBuf> {
 fn log_entry(name: &str, path: Option<&Path>, secrets: &[String]) -> DiagnosticEntry {
     let content = path
         .and_then(|path| tail_log(path).ok())
-        .map(|content| redaction::logs(&redact_known(&content, secrets)))
+        .map(|content| {
+            let redacted = redaction::logs(&content, secrets);
+            let lines: Vec<_> = redacted.lines().collect();
+            lines[lines.len().saturating_sub(200)..].join("\n")
+        })
         .unwrap_or_else(|| "Log unavailable; no file was included.".into());
     DiagnosticEntry {
         name: name.into(),
@@ -1265,8 +1393,13 @@ fn log_entry(name: &str, path: Option<&Path>, secrets: &[String]) -> DiagnosticE
 }
 
 fn tail_log(path: &Path) -> std::io::Result<String> {
+    super::config_history::ensure_unlinked_path(path).map_err(std::io::Error::other)?;
     let mut file = File::open(path)?;
-    let size = file.metadata()?.len();
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        return Err(std::io::Error::other("Only regular logs can be exported."));
+    }
+    let size = metadata.len();
     let start = size.saturating_sub(64 * 1024);
     file.seek(SeekFrom::Start(start))?;
     let mut content = Vec::new();
@@ -1276,11 +1409,14 @@ fn tail_log(path: &Path) -> std::io::Result<String> {
     if start > 0 && !lines.is_empty() {
         lines.remove(0);
     }
-    Ok(lines[lines.len().saturating_sub(200)..].join("\n"))
+    Ok(lines.join("\n"))
 }
 
 fn export_preview(id: &str, path: &Path) -> Result<DiagnosticExportResult, String> {
     if !path.is_absolute()
+        || path
+            .components()
+            .any(|part| matches!(part, Component::ParentDir))
         || !path
             .extension()
             .is_some_and(|extension| extension.eq_ignore_ascii_case("zip"))
@@ -1290,17 +1426,13 @@ fn export_preview(id: &str, path: &Path) -> Result<DiagnosticExportResult, Strin
     let preview = previews()
         .lock()
         .map_err(|_| "Diagnostic preview cache is unavailable.".to_string())?
-        .get(id)
-        .cloned()
-        .filter(|preview| preview.expires_at > now())
+        .remove(id)
+        .filter(|item| item.created.elapsed() < PREVIEW_TTL)
         .ok_or("The diagnostic preview expired. Generate and review a new preview.")?;
-    write_archive(path, &preview.entries)?;
+    write_archive(path, &preview.preview.entries)?;
     let size_bytes = fs::metadata(path)
         .map_err(|_| "Could not verify the diagnostic archive.".to_string())?
         .len();
-    if let Ok(mut cache) = previews().lock() {
-        cache.remove(id);
-    }
     Ok(DiagnosticExportResult {
         path: path.to_string_lossy().into_owned(),
         size_bytes,
@@ -1308,6 +1440,7 @@ fn export_preview(id: &str, path: &Path) -> Result<DiagnosticExportResult, Strin
 }
 
 fn write_archive(path: &Path, entries: &[DiagnosticEntry]) -> Result<(), String> {
+    super::config_history::ensure_unlinked_path(path)?;
     let file = OpenOptions::new().write(true).create_new(true).open(path)
         .map_err(|_| "Could not create the ZIP. Choose a new file name in a writable directory; existing files are never overwritten.".to_string())?;
     let result = (|| -> Result<(), String> {

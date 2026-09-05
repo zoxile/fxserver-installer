@@ -149,6 +149,40 @@ fn config_include_and_manifest_changes_invalidate_the_reviewed_patch() {
 }
 
 #[test]
+fn retargeted_resource_links_invalidate_identical_manifest_evidence() {
+    let fixture = Fixture::new();
+    for name in ["first", "second"] {
+        fs::create_dir(fixture.root.join(name)).unwrap();
+        fs::write(
+            fixture.root.join(name).join("fxmanifest.lua"),
+            "fx_version 'cerulean'",
+        )
+        .unwrap();
+    }
+    let link = fixture.root.join("data/resources/rconlog");
+    super::super::tests::link_directory(&fixture.root.join("first"), &link);
+    let preview = prepare_patch(fixture.request()).unwrap();
+    #[cfg(windows)]
+    fs::remove_dir(&link).unwrap();
+    #[cfg(unix)]
+    fs::remove_file(&link).unwrap();
+    super::super::tests::link_directory(&fixture.root.join("second"), &link);
+    let store = fixture.root.join("history");
+    assert!(apply_patch(&store, &preview.id)
+        .unwrap_err()
+        .contains("CONFIG_CHANGED"));
+    assert!(!store.exists());
+    assert_eq!(
+        read_bounded(&fixture.root.join("data/server.cfg")).unwrap(),
+        ""
+    );
+    #[cfg(windows)]
+    fs::remove_dir(link).unwrap();
+    #[cfg(unix)]
+    fs::remove_file(link).unwrap();
+}
+
+#[test]
 fn expired_and_unknown_reviews_never_write() {
     let fixture = installed();
     let preview = prepare_patch(fixture.request()).unwrap();

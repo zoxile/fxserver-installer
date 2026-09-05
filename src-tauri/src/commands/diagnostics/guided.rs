@@ -128,6 +128,8 @@ fn patch_target(inspection: &Inspection) -> Result<&Config, String> {
                         | "check-limit"
                         | "manifest-unreadable"
                         | "resource-unreadable"
+                        | "resource-link-cycle"
+                        | "resource-link-broken"
                         | "dynamic-resource-reference"
                 )
         })
@@ -179,9 +181,14 @@ fn evidence(inspection: &Inspection) -> Result<String, String> {
     let resources: BTreeMap<_, _> = inspection
         .resources
         .iter()
-        .map(|resource| (&resource.path, &resource.revision))
+        .map(|resource| {
+            (
+                &resource.path,
+                (&resource.resolved_path, &resource.revision),
+            )
+        })
         .collect();
-    serde_json::to_vec(&(configs, resources))
+    serde_json::to_vec(&(&inspection.data_root, configs, resources))
         .map(|bytes| digest(&bytes))
         .map_err(|_| "Cannot prepare diagnostic evidence.".into())
 }
