@@ -1,0 +1,21 @@
+USE production;
+CREATE DATABASE production;
+DROP DATABASE production;
+INSERT INTO `production`.`players` VALUES (1);
+INSERT INTO production.players VALUES (1);
+RENAME TABLE `players` TO `production`.`players`;
+CREATE TRIGGER bad AFTER INSERT ON `players` FOR EACH ROW DELETE FROM production.players;
+CREATE EVENT bad ON SCHEDULE EVERY 1 SECOND DO DELETE FROM production.players;
+CREATE VIEW `leak` AS SELECT * FROM production.players;
+CREATE PROCEDURE bad() SELECT 1;
+LOAD DATA LOCAL INFILE 'secret' INTO TABLE `players`;
+SELECT 'bad' INTO OUTFILE 'C:/bad';
+SET GLOBAL event_scheduler=ON;
+SET @OLD_SQL_MODE='NO_BACKSLASH_ESCAPES';
+SOURCE another.sql;
+DELIMITER $$
+\! echo unsafe
+/*M!100100 DROP DATABASE production */;
+CREATE TABLE `external` (`id` int) ENGINE=FEDERATED CONNECTION='mysql://production';
+CREATE TABLE `elsewhere` (`id` int) ENGINE=InnoDB DATA DIRECTORY='C:/production';
+CREATE TABLE `fk` (`id` int, FOREIGN KEY (`id`) REFERENCES `production`.`players` (`id`)) ENGINE=InnoDB;

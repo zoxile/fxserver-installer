@@ -39,6 +39,36 @@ export interface BackupOverview {
 	schedules: ScheduleStatus[];
 	snapshots: BackupSnapshot[];
 	busy: boolean;
+	restoreTests?: RestoreTestEvidence[];
+}
+
+export interface RestoreTestEvidence {
+	id: string;
+	workspaceId: string;
+	snapshotId: string;
+	snapshotSha256: string;
+	targetHost: string;
+	targetPort: number;
+	temporaryDatabase: string;
+	status: "running" | "interrupted" | "preflight_refused" | "passed" | "failed";
+	startedAt: number;
+	finishedAt: number | null;
+	tablesVerified: string[];
+	error: string | null;
+	cleanupError: string | null;
+	cleanedUp: boolean;
+	created: boolean;
+}
+
+export interface RestoreTestPreview {
+	token: string;
+	snapshotId: string;
+	targetHost: string;
+	targetPort: number;
+	temporaryDatabase: string;
+	tables: string[];
+	statements: number;
+	expiresAt: number;
 }
 
 export interface BackupEvent {
@@ -94,4 +124,16 @@ export function previewBackupRestore(workspaceId: string, snapshotId: string, cr
 
 export function restoreBackupSnapshot(workspaceId: string, token: string, confirmationDatabase: string) {
 	return run<RestoreResult>("restore_backup_snapshot", "Restore database snapshot", { workspaceId, token, confirmationDatabase });
+}
+
+export function previewBackupRestoreTest(workspaceId: string, snapshotId: string, credentials: MariaDBCredentials) {
+	return run<RestoreTestPreview>("preview_backup_restore_test", "Preflight isolated restore test", { workspaceId, snapshotId, credentials });
+}
+
+export function testBackupRestore(workspaceId: string, token: string, confirmationDatabase: string, confirmCleanup: boolean) {
+	return run<RestoreTestEvidence>("test_backup_restore", "Test isolated database restore", { workspaceId, token, confirmationDatabase, confirmCleanup });
+}
+
+export function cleanupBackupRestoreTest(workspaceId: string, testId: string, confirmationDatabase: string, credentials: MariaDBCredentials) {
+	return run<RestoreTestEvidence>("cleanup_backup_restore_test", "Clean up owned restore-test database", { workspaceId, testId, confirmationDatabase, credentials });
 }

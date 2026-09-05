@@ -24,8 +24,10 @@ use crate::{
     },
 };
 
+#[path = "../services/mariadb/owned_restore.rs"]
+pub(crate) mod owned_restore;
 #[path = "../services/mariadb/backup_storage.rs"]
-mod storage;
+pub(crate) mod storage;
 use storage::{now_ms, unique_id, validate_database, validate_id};
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -74,6 +76,10 @@ pub struct BackupSnapshot {
 struct Registry {
     schedules: Vec<ScheduleStatus>,
     snapshots: Vec<BackupSnapshot>,
+    #[serde(default)]
+    restore_tests: Vec<RestoreTestEvidence>,
+    #[serde(default)]
+    restore_owners: HashMap<String, String>,
 }
 
 #[derive(Serialize)]
@@ -82,6 +88,7 @@ pub struct BackupOverview {
     schedules: Vec<ScheduleStatus>,
     snapshots: Vec<BackupSnapshot>,
     busy: bool,
+    restore_tests: Vec<RestoreTestEvidence>,
 }
 
 #[derive(Clone, Serialize)]
@@ -125,6 +132,7 @@ struct Inner {
     registry: Registry,
     credentials: HashMap<String, MariaDBCredentials>,
     previews: HashMap<String, RestorePermit>,
+    test_previews: HashMap<String, RestoreTestPermit>,
 }
 
 #[derive(Clone, Default)]
@@ -198,6 +206,12 @@ impl BackupManager {
             inner.registry = serde_json::from_slice(&content).map_err(|e| {
                 format!("Backup registry could not be read; it has not been overwritten: {e}")
             })?;
+            for test in &mut inner.registry.restore_tests {
+                if test.status == "running" {
+                    test.status = "interrupted".into();
+                    test.error = Some("The app stopped before this test completed. Its owned database may still need cleanup.".into());
+                }
+            }
         }
         inner.path = Some(path);
         Ok(())
@@ -539,6 +553,14 @@ pub async fn get_backup_manager(
                 .cloned()
                 .collect(),
             busy: manager.is_busy(),
+            restore_tests: inner
+                .registry
+                .restore_tests
+                .iter()
+                .filter(|test| test.workspace_id == workspace_id)
+                .rev()
+                .cloned()
+                .collect(),
         })
     })
     .await
@@ -795,6 +817,310 @@ fn validate_restore_permit(
         return Err("Type the exact database name to confirm the restore.".into());
     }
     Ok(())
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RestoreTestEvidence {
+    id: String,
+    workspace_id: String,
+    snapshot_id: String,
+    snapshot_sha256: String,
+    target_host: String,
+    target_port: u16,
+    temporary_database: String,
+    status: String,
+    started_at: u64,
+    finished_at: Option<u64>,
+    tables_verified: Vec<String>,
+    error: Option<String>,
+    cleanup_error: Option<String>,
+    cleaned_up: bool,
+    created: bool,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RestoreTestPreview {
+    token: String,
+    snapshot_id: String,
+    target_host: String,
+    target_port: u16,
+    temporary_database: String,
+    tables: Vec<String>,
+    statements: usize,
+    expires_at: u64,
+}
+
+struct RestoreTestPermit {
+    preview: RestoreTestPreview,
+    snapshot: BackupSnapshot,
+    credentials: MariaDBCredentials,
+    workspace_id: String,
+}
+
+fn persist_test(manager: &BackupManager, evidence: &RestoreTestEvidence) -> Result<(), String> {
+    let mut inner = manager.lock()?;
+    if let Some(existing) = inner
+        .registry
+        .restore_tests
+        .iter_mut()
+        .find(|test| test.id == evidence.id)
+    {
+        *existing = evidence.clone();
+    } else {
+        if inner.registry.restore_tests.len() >= 1000 {
+            return Err(
+                "Restore-test evidence registry is full (1,000 entries); no new test was started."
+                    .into(),
+            );
+        }
+        inner.registry.restore_tests.push(evidence.clone());
+    }
+    BackupManager::persist(&inner)
+}
+
+fn test_database_name(id: &str) -> Result<String, String> {
+    if id.len() != 32 || !id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err("Invalid restore-test ownership identifier.".into());
+    }
+    Ok(format!("fxsi_restore_test_{id}"))
+}
+
+fn cleanup_test(
+    manager: &BackupManager,
+    credentials: &MariaDBCredentials,
+    evidence: &RestoreTestEvidence,
+    confirmation: &str,
+) -> Result<(), String> {
+    if (!evidence.created && !["running", "interrupted"].contains(&evidence.status.as_str()))
+        || evidence.cleaned_up
+        || test_database_name(&evidence.id)? != evidence.temporary_database
+        || confirmation != evidence.temporary_database
+        || credentials.host != evidence.target_host
+        || credentials.port != evidence.target_port
+    {
+        return Err(
+            "Cleanup requires the exact app-owned test database and original host/port.".into(),
+        );
+    }
+    owned_restore::cleanup_owned_database(
+        credentials,
+        &owned_restore::OwnedDatabase {
+            id: evidence.id.clone(),
+            database: evidence.temporary_database.clone(),
+            host: evidence.target_host.clone(),
+            port: evidence.target_port,
+            purpose: owned_restore::OwnedDatabasePurpose::RestoreTest,
+            marker_token: manager
+                .lock()?
+                .registry
+                .restore_owners
+                .get(&evidence.id)
+                .cloned()
+                .ok_or("Owned database marker is unavailable. Cleanup refused.")?,
+        },
+        confirmation,
+    )
+}
+
+#[tauri::command]
+pub async fn preview_backup_restore_test(
+    app: AppHandle,
+    manager: State<'_, BackupManager>,
+    workspace_id: String,
+    snapshot_id: String,
+    credentials: MariaDBCredentials,
+) -> Result<RestoreTestPreview, String> {
+    let manager = manager.inner().clone();
+    super::run_blocking(move || {
+        let _operation = manager
+            .operation
+            .try_lock()
+            .map_err(|_| "A backup or restore is in progress.")?;
+        manager.initialize(&app)?;
+        validate_id(&workspace_id)?;
+        let snapshot = manager
+            .lock()?
+            .registry
+            .snapshots
+            .iter()
+            .find(|s| s.workspace_id == workspace_id && s.id == snapshot_id)
+            .cloned()
+            .ok_or("Snapshot not found in this workspace.")?;
+        recovery_config(&snapshot)?;
+        let id = storage::secure_token()?;
+        let mut evidence = RestoreTestEvidence {
+            id: id.clone(),
+            workspace_id: workspace_id.clone(),
+            snapshot_id: snapshot_id.clone(),
+            snapshot_sha256: snapshot.sha256.clone(),
+            target_host: credentials.host.clone(),
+            target_port: credentials.port,
+            temporary_database: test_database_name(&id)?,
+            status: "preflight_refused".into(),
+            started_at: now_ms(),
+            finished_at: None,
+            tables_verified: vec![],
+            error: None,
+            cleanup_error: None,
+            cleaned_up: false,
+            created: false,
+        };
+        let checked = (|| {
+            let path = storage::snapshot_path(&snapshot.directory, &snapshot.id)?;
+            let mut file = storage::open_snapshot(&path)?;
+            if storage::sha256(&mut file)? != snapshot.sha256 {
+                return Err(
+                    "Checksum mismatch. Restore test refused before database access.".into(),
+                );
+            }
+            storage::constrained_dump(&mut file)
+        })();
+        let plan = match checked {
+            Ok(plan) => plan,
+            Err(error) => {
+                evidence.finished_at = Some(now_ms());
+                evidence.error = Some(error.clone());
+                persist_test(&manager, &evidence)?;
+                return Err(error);
+            }
+        };
+        let preview = RestoreTestPreview {
+            token: storage::secure_token()?,
+            snapshot_id,
+            target_host: credentials.host.clone(),
+            target_port: credentials.port,
+            temporary_database: evidence.temporary_database,
+            tables: plan.tables,
+            statements: plan.statements,
+            expires_at: now_ms() + 300_000,
+        };
+        let mut inner = manager.lock()?;
+        inner
+            .test_previews
+            .retain(|_, permit| permit.preview.expires_at > now_ms());
+        if inner.test_previews.len() >= 10 {
+            return Err("Too many pending restore tests. Wait for previews to expire.".into());
+        }
+        inner.test_previews.insert(
+            preview.token.clone(),
+            RestoreTestPermit {
+                preview: preview.clone(),
+                snapshot,
+                credentials,
+                workspace_id,
+            },
+        );
+        let token = preview.token.clone();
+        let worker = manager.clone();
+        tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(300)).await;
+            if let Ok(mut inner) = worker.lock() {
+                inner.test_previews.remove(&token);
+            }
+        });
+        Ok(preview)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn test_backup_restore(
+    app: AppHandle,
+    manager: State<'_, BackupManager>,
+    workspace_id: String,
+    token: String,
+    confirmation_database: String,
+    confirm_cleanup: bool,
+) -> Result<RestoreTestEvidence, String> {
+    let manager = manager.inner().clone();
+    super::run_blocking(move || {
+        let _operation = manager.operation.try_lock().map_err(|_| "A backup or restore is in progress.")?;
+        let _database = super::mariadb::maintenance_access()?;
+        manager.initialize(&app)?;
+        let permit = manager.lock()?.test_previews.remove(&token).ok_or("Restore test preview expired. Review it again.")?;
+        if permit.workspace_id != workspace_id || permit.preview.expires_at <= now_ms() || confirmation_database != permit.preview.temporary_database || !confirm_cleanup {
+            return Err("Confirm the exact temporary database and its automatic cleanup using a current preview.".into());
+        }
+        let temporary = &permit.preview.temporary_database;
+        let id = temporary.strip_prefix("fxsi_restore_test_").ok_or("Invalid temporary database.")?.to_string();
+        if test_database_name(&id)? != *temporary { return Err("Invalid temporary database ownership.".into()); }
+        let mut credentials = permit.credentials.clone(); credentials.database = None;
+        let marker_token = storage::secure_token()?;
+        let mut evidence = RestoreTestEvidence { id, workspace_id, snapshot_id: permit.snapshot.id.clone(), snapshot_sha256: permit.snapshot.sha256.clone(), target_host: credentials.host.clone(), target_port: credentials.port,
+            temporary_database: temporary.clone(), status: "running".into(), started_at: now_ms(), finished_at: None, tables_verified: vec![], error: None, cleanup_error: None, cleaned_up: false, created: false };
+        manager.lock()?.registry.restore_owners.insert(evidence.id.clone(), marker_token.clone());
+        persist_test(&manager, &evidence)?;
+        let config = recovery_config(&permit.snapshot)?;
+        publish(&app, &config, "running", "Preflighting an isolated backup restore test.");
+        let outcome = (|| {
+            let path = storage::snapshot_path(&permit.snapshot.directory, &permit.snapshot.id)?;
+            let mut file = storage::open_snapshot(&path)?;
+            let result = owned_restore::import_dump(&credentials, &mut file, &permit.snapshot.sha256, &owned_restore::OwnedDatabase {
+                id: evidence.id.clone(), database: temporary.clone(), host: credentials.host.clone(), port: credentials.port, purpose: owned_restore::OwnedDatabasePurpose::RestoreTest,
+                marker_token,
+            });
+            evidence.created = result.created;
+            evidence.tables_verified = result.tables_verified;
+            match result.error { Some(error) => Err(error), None => Ok(()) }
+        })();
+        evidence.status = if outcome.is_ok() { "passed" } else { "failed" }.into();
+        evidence.error = outcome.err().map(|error| redact_error(error, &credentials));
+        if evidence.created {
+            match cleanup_test(&manager, &credentials, &evidence, temporary) {
+                Ok(()) => evidence.cleaned_up = true,
+                Err(error) => evidence.cleanup_error = Some(redact_error(error, &credentials)),
+            }
+        }
+        evidence.finished_at = Some(now_ms());
+        persist_test(&manager, &evidence)?;
+        let success = evidence.status == "passed" && evidence.cleaned_up;
+        publish(&app, &config, if success { "completed" } else { "error" }, if success { "Restore test passed; temporary database removed. This is separate from checksum verification." } else { "Restore test failed or cleanup needs attention. Review the saved test evidence." });
+        Ok(evidence)
+    }).await
+}
+
+#[tauri::command]
+pub async fn cleanup_backup_restore_test(
+    app: AppHandle,
+    manager: State<'_, BackupManager>,
+    workspace_id: String,
+    test_id: String,
+    confirmation_database: String,
+    credentials: MariaDBCredentials,
+) -> Result<RestoreTestEvidence, String> {
+    let manager = manager.inner().clone();
+    super::run_blocking(move || {
+        let _operation = manager
+            .operation
+            .try_lock()
+            .map_err(|_| "A backup or restore is in progress.")?;
+        let _database = super::mariadb::maintenance_access()?;
+        manager.initialize(&app)?;
+        let mut evidence = manager
+            .lock()?
+            .registry
+            .restore_tests
+            .iter()
+            .find(|test| test.id == test_id && test.workspace_id == workspace_id)
+            .cloned()
+            .ok_or("Restore test not found in this workspace.")?;
+        match cleanup_test(&manager, &credentials, &evidence, &confirmation_database) {
+            Ok(()) => {
+                evidence.cleaned_up = true;
+                evidence.cleanup_error = None;
+            }
+            Err(error) => {
+                evidence.cleanup_error = Some(redact_error(error.clone(), &credentials));
+                persist_test(&manager, &evidence)?;
+                return Err(redact_error(error, &credentials));
+            }
+        }
+        persist_test(&manager, &evidence)?;
+        Ok(evidence)
+    })
+    .await
 }
 
 fn recovery_config(snapshot: &BackupSnapshot) -> Result<BackupSchedule, String> {

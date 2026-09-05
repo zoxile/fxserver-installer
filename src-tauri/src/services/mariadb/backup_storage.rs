@@ -9,6 +9,58 @@ use std::{
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
+#[path = "restore_guard.rs"]
+pub mod restore_guard;
+
+pub fn secure_token() -> Result<String, String> {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Security::Cryptography::{
+            BCryptGenRandom, BCRYPT_USE_SYSTEM_PREFERRED_RNG,
+        };
+        let mut bytes = [0u8; 16];
+        let status = unsafe {
+            BCryptGenRandom(
+                std::ptr::null_mut(),
+                bytes.as_mut_ptr(),
+                bytes.len() as u32,
+                BCRYPT_USE_SYSTEM_PREFERRED_RNG,
+            )
+        };
+        if status < 0 {
+            return Err("Secure random token generation failed.".into());
+        }
+        Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
+    }
+    #[cfg(not(windows))]
+    {
+        Err("Secure restore tests require Windows.".into())
+    }
+}
+
+pub fn constrained_dump(file: &mut File) -> Result<restore_guard::DumpPlan, String> {
+    if file.metadata().map_err(|e| e.to_string())?.len() > 32 * 1024 * 1024 {
+        return Err("Restore testing supports snapshots up to 32 MiB. No SQL was sent.".into());
+    }
+    file.seek(SeekFrom::Start(0)).map_err(|e| e.to_string())?;
+    let mut sql = String::new();
+    file.take(32 * 1024 * 1024 + 1)
+        .read_to_string(&mut sql)
+        .map_err(|e| format!("Restore test requires a UTF-8 SQL snapshot: {e}"))?;
+    file.seek(SeekFrom::Start(0)).map_err(|e| e.to_string())?;
+    let plan = restore_guard::preflight(&sql)?;
+    if plan
+        .tables
+        .iter()
+        .any(|table| table == "__fx_restore_owner")
+    {
+        return Err(
+            "Restore test refused a reserved ownership table name. No SQL was sent.".into(),
+        );
+    }
+    Ok(plan)
+}
+
 pub fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

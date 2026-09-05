@@ -13,6 +13,7 @@
 	import SaveIcon from "@lucide/svelte/icons/save";
 	import Trash2Icon from "@lucide/svelte/icons/trash-2";
 	import XIcon from "@lucide/svelte/icons/x";
+	import FlaskConicalIcon from "@lucide/svelte/icons/flask-conical";
 	import * as Card from "$lib/components/ui/card/index.js";
 	import * as Select from "$lib/components/ui/select/index.js";
 	import { Button } from "$lib/components/ui/button/index.js";
@@ -29,6 +30,7 @@
 		restoreBackupSnapshot, runBackupNow, saveBackupSchedule,
 		type BackupEvent, type BackupOverview, type BackupSchedule, type BackupSnapshot,
 		type RestorePreview, type ScheduleStatus,
+		previewBackupRestoreTest, testBackupRestore, cleanupBackupRestoreTest, type RestoreTestPreview, type RestoreTestEvidence,
 	} from "$lib/modules/backupManager";
 
 	const workspaceId = getWorkspaceId();
@@ -48,12 +50,17 @@
 	let noticeDismissed = $state(false);
 	let preview = $state<RestorePreview | null>(null);
 	let confirmation = $state("");
+	let testPreview = $state<RestoreTestPreview | null>(null);
+	let testConfirmation = $state("");
+	let confirmCleanup = $state(false);
 	let snapshotsShown = $state(25);
+	let testsShown = $state(25);
 	let active = true;
 	let refreshPending: Promise<void> | undefined;
 	const credentialsReady = $derived(Boolean(validated) && JSON.stringify(credentials) === validated);
 	const databaseOptions = $derived(databases.map((database) => ({ value: database, label: database })));
 	const working = $derived(busy || overview.busy);
+	const restoreTests = $derived(overview.restoreTests ?? []);
 
 	function newSchedule(): BackupSchedule {
 		return { id: crypto.randomUUID(), workspaceId, name: "", database: "", outputDir: "", intervalMinutes: 60, retainCount: 7 };
@@ -156,9 +163,37 @@
 
 	async function review(snapshot: BackupSnapshot) {
 		await action(async () => {
+			testPreview = null;
 			preview = null;
 			confirmation = "";
 			preview = await previewBackupRestore(workspaceId, snapshot.id, { ...credentials });
+		});
+	}
+
+	async function reviewTest(snapshot: BackupSnapshot) {
+		await action(async () => {
+			preview = null; testPreview = null; testConfirmation = ""; confirmCleanup = false;
+			testPreview = await previewBackupRestoreTest(workspaceId, snapshot.id, { ...credentials });
+		});
+	}
+
+	async function runTest() {
+		const selected = testPreview;
+		if (!selected || testConfirmation !== selected.temporaryDatabase || !confirmCleanup) return;
+		await action(async () => {
+			testPreview = null;
+			const result = await testBackupRestore(workspaceId, selected.token, testConfirmation, confirmCleanup);
+			if (result.status === "passed" && result.cleanedUp) message = `Restore test passed: ${result.tablesVerified.length} tables checked; temporary database removed.`;
+			else error = [result.error, result.cleanupError].filter(Boolean).join(" ") || "Restore test needs attention. Review the saved evidence.";
+		});
+	}
+
+	async function cleanupTest(test: RestoreTestEvidence) {
+		const typed = window.prompt(`Remove only the owned restore-test database? Type ${test.temporaryDatabase}`);
+		if (typed !== test.temporaryDatabase) return;
+		await action(async () => {
+			await cleanupBackupRestoreTest(workspaceId, test.id, typed, { ...credentials });
+			message = "Owned temporary database removed. Restore-test evidence retained.";
 		});
 	}
 
@@ -174,6 +209,7 @@
 	}
 
 	function date(value: number | null) { return value ? new Date(value).toLocaleString() : "Not yet"; }
+	function needsCleanup(test: RestoreTestEvidence) { return !test.cleanedUp && (test.created || ["running", "interrupted"].includes(test.status)); }
 	function size(value: number) { return `${(value / 1048576).toLocaleString(undefined, { maximumFractionDigits: 1 })} MiB`; }
 </script>
 
@@ -241,6 +277,15 @@
 			<div class="flex flex-wrap items-end gap-3"><label class="grid min-w-0 flex-1 gap-2 text-xs font-medium">Confirm database name: {preview.targetDatabase}<Input bind:value={confirmation} autocomplete="off" spellcheck="false" disabled={working} /></label><Button variant="destructive" onclick={restore} disabled={working || confirmation !== preview.targetDatabase}><RotateCcwIcon />Back Up & Restore</Button></div>
 		</section>
 	{/if}
+	{#if testPreview}
+		<section class="space-y-4 border-y border-amber-400/40 py-5" aria-label="Isolated restore test preview">
+			<div class="flex items-center justify-between gap-3"><h2 class="text-base font-semibold">Isolated Restore Test</h2><Button variant="ghost" size="icon-sm" disabled={working} onclick={() => testPreview = null} title="Close restore test preview" aria-label="Close restore test preview"><XIcon /></Button></div>
+			<dl class="grid gap-3 text-sm sm:grid-cols-2"><div><dt class="text-muted-foreground">Host</dt><dd class="wrap-anywhere font-mono">{testPreview.targetHost}:{testPreview.targetPort}</dd></div><div><dt class="text-muted-foreground">New temporary database</dt><dd class="wrap-anywhere font-mono">{testPreview.temporaryDatabase}</dd></div><div><dt class="text-muted-foreground">Preflight</dt><dd>{testPreview.tables.length} tables / {testPreview.statements} constrained statements</dd></div><div><dt class="text-muted-foreground">Expires</dt><dd>{date(testPreview.expiresAt)}</dd></div></dl>
+			<p class="text-sm text-amber-300">This test creates a separate database, imports the snapshot, checks its tables, then removes only that owned database. Existing databases are never restore targets.</p>
+			<label class="flex items-start gap-2 text-sm"><Checkbox bind:checked={confirmCleanup} disabled={working} />Confirm automatic cleanup of this temporary database after the test, including after import failure.</label>
+			<div class="flex flex-wrap items-end gap-3"><label class="grid min-w-0 flex-1 gap-2 text-xs font-medium wrap-anywhere">Confirm temporary database: {testPreview.temporaryDatabase}<Input bind:value={testConfirmation} disabled={working} autocomplete="off" spellcheck="false" /></label><Button variant="destructive" disabled={working || !confirmCleanup || testConfirmation !== testPreview.temporaryDatabase} onclick={runTest}><FlaskConicalIcon />Confirm & Test</Button></div>
+		</section>
+	{/if}
 
 	<section class="space-y-3" aria-label="Database backup snapshots">
 		<h2 class="text-base font-semibold">Snapshots <span class="ml-2 text-sm font-normal text-muted-foreground">{overview.snapshots.length}</span></h2>
@@ -249,10 +294,17 @@
 			{#each overview.snapshots.slice(0, snapshotsShown) as snapshot (snapshot.id)}
 				<div class="grid min-w-0 gap-3 py-4 sm:grid-cols-[minmax(0,1fr)_auto]">
 					<div class="min-w-0"><div class="flex flex-wrap items-center gap-2"><span class="font-medium">{snapshot.database}</span><span class="text-xs text-muted-foreground">{date(snapshot.createdAt)} / {size(snapshot.sizeBytes)}</span>{#if snapshot.kind === "recovery"}<span class="text-xs text-amber-300">Recovery / retained</span>{/if}</div><p class="mt-1 truncate font-mono text-xs text-muted-foreground" title={`${snapshot.directory}/${snapshot.id}.sql`}>{snapshot.directory}/{snapshot.id}.sql</p><p class="mt-1 text-xs text-muted-foreground">Source: {snapshot.sourceHost}:{snapshot.sourcePort}</p></div>
-					<Button variant="outline" size="sm" onclick={() => review(snapshot)} disabled={working || !credentialsReady} title="Verify this snapshot and preview the restore"><RotateCcwIcon />Review Restore</Button>
+					<div class="flex flex-wrap items-center gap-2"><span class="text-xs text-muted-foreground">Checksum verified at backup / {restoreTests.find((test) => test.snapshotId === snapshot.id)?.status.replaceAll("_", " ") ?? "Not restore tested"}</span><Button variant="outline" size="sm" onclick={() => reviewTest(snapshot)} disabled={working || !credentialsReady} title="Preflight a restore into a new isolated temporary database"><FlaskConicalIcon />Test Restore</Button><Button variant="outline" size="sm" onclick={() => review(snapshot)} disabled={working || !credentialsReady} title="Verify this snapshot and preview the restore"><RotateCcwIcon />Review Restore</Button></div>
 				</div>
 			{/each}
 		</div>
 		{#if overview.snapshots.length > snapshotsShown}<Button variant="outline" onclick={() => (snapshotsShown += 25)}><PlusIcon />More Snapshots</Button>{/if}
 	</section>
+	{#if restoreTests.length}
+		<section class="space-y-3" aria-label="Restore test evidence">
+			<h2 class="text-base font-semibold">Restore Test Evidence</h2>
+			<div class="divide-y divide-border border-y border-border">{#each restoreTests.slice(0, testsShown) as test (test.id)}<details class="py-3"><summary class="cursor-pointer text-sm"><span class="capitalize">{test.status.replaceAll("_", " ")}</span> / {date(test.startedAt)} / {test.tablesVerified.length} tables / {test.cleanedUp ? "Cleaned up" : needsCleanup(test) ? "Cleanup required" : "No database created"}</summary><div class="mt-3 space-y-2 text-xs"><p class="wrap-anywhere font-mono">{test.targetHost}:{test.targetPort} / {test.temporaryDatabase}</p><p class="wrap-anywhere">Snapshot: {test.snapshotId} / SHA-256: {test.snapshotSha256}</p>{#if test.tablesVerified.length}<p class="wrap-anywhere">Verified tables: {test.tablesVerified.join(", ")}</p>{/if}{#if test.error}<p class="wrap-anywhere text-destructive">{test.error}</p>{/if}{#if test.cleanupError}<p class="wrap-anywhere text-destructive">Cleanup: {test.cleanupError}</p>{/if}{#if needsCleanup(test)}<Button size="sm" variant="destructive" disabled={working || !credentialsReady} onclick={() => cleanupTest(test)}><Trash2Icon />Review Cleanup</Button>{/if}</div></details>{/each}</div>
+			{#if restoreTests.length > testsShown}<Button variant="outline" onclick={() => testsShown += 25}><PlusIcon />More Test Evidence</Button>{/if}
+		</section>
+	{/if}
 </section>
