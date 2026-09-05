@@ -72,7 +72,27 @@ Run Rust checks:
 
 ```bash
 cargo check --manifest-path src-tauri/Cargo.toml
+cargo test --manifest-path src-tauri/Cargo.toml --lib
+cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 ```
+
+For background-operation UI changes, start `npm run dev -- --port 4174 --strictPort` in a separate terminal, then run:
+
+```bash
+npx --yes --package @playwright/cli@0.1.19 playwright-cli -s=background open http://localhost:4174
+npx --yes --package @playwright/cli@0.1.19 playwright-cli -s=background run-code --filename scripts/smoke-background-actions.js
+npx --yes --package @playwright/cli@0.1.19 playwright-cli -s=background close
+```
+
+This smoke test mocks desktop commands. It checks navigation during pending FXServer actions, RCON success and failure, a populated console, and MariaDB installer progress across page changes. It never starts a real server or installs MariaDB. Screenshots and browser logs are ignored by Git.
+
+The optional live download test fetches and verifies the official MariaDB MSI without installing it:
+
+```bash
+cargo test --manifest-path src-tauri/Cargo.toml downloads_and_verifies_official_msi -- --ignored --nocapture
+```
+
+Test actual MariaDB installation, update, and preserved-data reattachment in a disposable Windows VM with backups, including the Windows Server version being supported. A mocked UI test or verified download does not validate service registration or an operating-system upgrade path.
 
 Build a release locally:
 
