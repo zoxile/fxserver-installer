@@ -130,8 +130,10 @@ pub async fn preview_resource_update(
 pub async fn apply_resource_update(
     app: tauri::AppHandle,
     request: ApplyRequest,
+    manager: tauri::State<'_, super::fxserver::FxserverManager>,
 ) -> Result<ResourceSnapshot, String> {
     let storage = storage_root(&app)?;
+    let manager = manager.inner().clone();
     super::run_blocking(move || {
         let _operation = OPERATION
             .try_lock()
@@ -142,7 +144,7 @@ pub async fn apply_resource_update(
         let prepared = previews
             .get(&request.preview_id)
             .ok_or("Preview expired. Preview the update again.")?;
-        let result = apply_prepared(&storage, prepared, &request);
+        let result = manager.with_stopped_server(|| apply_prepared(&storage, prepared, &request));
         if result.is_ok() {
             if let Some(prepared) = previews.remove(&request.preview_id) {
                 let _ = remove_owned(&storage, &prepared.directory);
@@ -208,13 +210,15 @@ pub async fn rollback_resource_update(
     app: tauri::AppHandle,
     target: ResourceTarget,
     snapshot_id: String,
+    manager: tauri::State<'_, super::fxserver::FxserverManager>,
 ) -> Result<ResourceSnapshot, String> {
     let storage = storage_root(&app)?;
+    let manager = manager.inner().clone();
     super::run_blocking(move || {
         let _operation = OPERATION
             .try_lock()
             .map_err(|_| "Another resource operation is in progress.")?;
-        rollback(&storage, &target, &snapshot_id)
+        manager.with_stopped_server(|| rollback(&storage, &target, &snapshot_id))
     })
     .await
 }
@@ -252,8 +256,7 @@ fn storage_root(app: &tauri::AppHandle) -> Result<PathBuf, String> {
         .app_local_data_dir()
         .map_err(io_error)?
         .join("resource-updates");
-    fs::create_dir_all(&root).map_err(io_error)?;
-    check_no_links(&root)?;
+    create_checked_directory(&root)?;
     root.canonicalize().map_err(io_error)
 }
 
@@ -269,8 +272,7 @@ fn prepare(storage: &Path, request: PreviewRequest) -> Result<ResourcePreview, S
     ensure_free_space(storage, MAX_ARCHIVE + MAX_TOTAL)?;
     let id = unique_id();
     let directory = storage.join("previews").join(&id);
-    fs::create_dir_all(&directory).map_err(io_error)?;
-    check_no_links(&directory)?;
+    create_checked_directory(&directory)?;
     let result = (|| {
         let archive = directory.join("download.zip");
         let archive_bytes = download(&owner, &repo, &request.branch, &archive)?;
@@ -443,8 +445,7 @@ fn create_snapshot(
     ensure_free_space(storage, files.values().map(|file| file.size).sum())?;
     let id = unique_id();
     let folder = snapshot_folder(storage, target, resource).join(&id);
-    fs::create_dir_all(&folder).map_err(io_error)?;
-    check_no_links(&folder)?;
+    create_checked_directory(&folder)?;
     let result = (|| {
         copy_inventory(resource, &folder.join("files"), files)?;
         if inventory(&folder.join("files"))? != *files {
@@ -504,7 +505,7 @@ fn replace_resource(
         for path in protected {
             let destination = staged.join(safe_relative(path)?);
             if let Some(parent) = destination.parent() {
-                fs::create_dir_all(parent).map_err(io_error)?;
+                create_checked_directory(parent)?;
             }
             check_no_links(&resource.join(path))?;
             if fs::symlink_metadata(&destination).is_ok() {
@@ -571,13 +572,17 @@ fn resource_root(target: &ResourceTarget) -> Result<PathBuf, String> {
         .join("config.json");
     check_no_links(&config_path)?;
     let config: serde_json::Value =
-        serde_json::from_reader(File::open(config_path).map_err(io_error)?).map_err(io_error)?;
+        serde_json::from_str(&super::config_history::read_bounded_config(&config_path)?)
+            .map_err(io_error)?;
     let data = config
         .pointer("/server/dataPath")
         .or_else(|| config.get("dataPath"))
         .and_then(|v| v.as_str())
         .filter(|v| !v.trim().is_empty())
         .ok_or("Profile is missing server.dataPath.")?;
+    if !Path::new(data).is_absolute() {
+        return Err("Profile dataPath must be an absolute directory path.".into());
+    }
     let root = Path::new(data).join("resources");
     check_no_links(&root)?;
     root.canonicalize().map_err(io_error)
@@ -731,7 +736,7 @@ fn extract_archive(archive: &Path, destination: &Path) -> Result<(), String> {
     if zip.len() > MAX_FILES {
         return Err("Resource archive contains too many entries.".into());
     }
-    fs::create_dir_all(destination).map_err(io_error)?;
+    create_checked_directory(destination)?;
     let mut root = None;
     let mut paths = BTreeSet::new();
     let mut casing = BTreeMap::new();
@@ -787,11 +792,11 @@ fn extract_archive(archive: &Path, destination: &Path) -> Result<(), String> {
         }
         let output = destination.join(relative);
         if entry.is_dir() {
-            fs::create_dir_all(&output).map_err(io_error)?;
+            create_checked_directory(&output)?;
             continue;
         }
         if let Some(parent) = output.parent() {
-            fs::create_dir_all(parent).map_err(io_error)?;
+            create_checked_directory(parent)?;
         }
         let mut file = File::options()
             .write(true)
@@ -818,10 +823,28 @@ fn safe_relative(value: &str) -> Result<PathBuf, String> {
     }
     for part in &parts {
         let stem = part.split('.').next().unwrap_or("").to_ascii_uppercase();
-        let reserved = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
-            || ((stem.starts_with("COM") || stem.starts_with("LPT"))
-                && stem.len() == 4
-                && matches!(stem.as_bytes()[3], b'1'..=b'9'));
+        let reserved = matches!(
+            stem.as_str(),
+            "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
+        ) || stem
+            .strip_prefix("COM")
+            .or_else(|| stem.strip_prefix("LPT"))
+            .is_some_and(|suffix| {
+                matches!(
+                    suffix,
+                    "1" | "2"
+                        | "3"
+                        | "4"
+                        | "5"
+                        | "6"
+                        | "7"
+                        | "8"
+                        | "9"
+                        | "\u{b9}"
+                        | "\u{b2}"
+                        | "\u{b3}"
+                )
+            });
         if part.is_empty()
             || *part == "."
             || *part == ".."
@@ -852,6 +875,25 @@ fn check_no_links(path: &Path) -> Result<(), String> {
                 );
             }
         }
+    }
+    Ok(())
+}
+
+fn create_checked_directory(path: &Path) -> Result<(), String> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            check_no_links(path)?;
+            if !metadata.is_dir() {
+                return Err("Resource directory path is not a directory.".into());
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let parent = path.parent().ok_or("Resource directory has no parent.")?;
+            create_checked_directory(parent)?;
+            fs::create_dir(path).map_err(io_error)?;
+            check_no_links(path)?;
+        }
+        Err(error) => return Err(io_error(error)),
     }
     Ok(())
 }
@@ -929,16 +971,14 @@ fn fingerprint(path: &Path) -> Result<Fingerprint, String> {
 }
 
 fn copy_inventory(source: &Path, destination: &Path, files: &Inventory) -> Result<(), String> {
-    fs::create_dir_all(destination).map_err(io_error)?;
-    check_no_links(destination)?;
+    create_checked_directory(destination)?;
     for path in files.keys() {
         let relative = safe_relative(path)?;
         let input = source.join(&relative);
         check_no_links(&input)?;
         let output = destination.join(relative);
         if let Some(parent) = output.parent() {
-            fs::create_dir_all(parent).map_err(io_error)?;
-            check_no_links(parent)?;
+            create_checked_directory(parent)?;
         }
         if fs::symlink_metadata(&output).is_ok() {
             check_no_links(&output)?;
@@ -991,11 +1031,13 @@ fn file_changes(local: &Inventory, remote: &Inventory) -> Vec<FileChange> {
 }
 
 fn require_manifest(resource: &Path) -> Result<PathBuf, String> {
-    ["fxmanifest.lua", "__resource.lua"]
+    let manifest = ["fxmanifest.lua", "__resource.lua"]
         .into_iter()
         .map(|name| resource.join(name))
         .find(|path| path.is_file())
-        .ok_or("Resource must contain a manifest at its root.".into())
+        .ok_or("Resource must contain a manifest at its root.")?;
+    check_no_links(&manifest)?;
+    Ok(manifest)
 }
 
 fn snapshot_folder(storage: &Path, target: &ResourceTarget, resource: &Path) -> PathBuf {
@@ -1221,6 +1263,9 @@ mod tests {
             "root//file",
             "./file",
             "CON",
+            "CONOUT$",
+            "root/COM\u{b9}.txt",
+            "root/LPT\u{b2}",
         ] {
             assert!(safe_relative(path).is_err(), "accepted {path}");
         }
@@ -1425,6 +1470,62 @@ mod tests {
         assert!(extract_archive(&input, &fixture.root.join("extracted"))
             .unwrap_err()
             .contains("link"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn archive_and_copy_reject_junctions_before_creating_children() {
+        use crate::process::CommandNoWindowExt;
+        let fixture = Fixture::new();
+        let outside = fixture.root.join("outside");
+        fs::create_dir(&outside).unwrap();
+        let linked = fixture.root.join("linked");
+        let script = format!(
+            "New-Item -ItemType Junction -Path '{}' -Target '{}' -ErrorAction Stop | Out-Null",
+            linked.to_string_lossy().replace('\'', "''"),
+            outside.to_string_lossy().replace('\'', "''"),
+        );
+        let status = std::process::Command::new("powershell")
+            .no_window()
+            .args(["-NoProfile", "-Command", &script])
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let input = fixture.root.join("junction.zip");
+        archive(&input, &[("repo/new/file.lua", "escape")]);
+        let extraction = extract_archive(&input, &linked.join("extracted"));
+        let copy = copy_inventory(
+            &fixture.resource,
+            &linked.join("copied"),
+            &inventory(&fixture.resource).unwrap(),
+        );
+        let writes = fs::read_dir(&outside).unwrap().count();
+        fs::remove_dir(&linked).unwrap();
+        assert!(extraction.is_err());
+        assert!(copy.is_err());
+        assert_eq!(writes, 0);
+    }
+
+    #[test]
+    fn conflicting_preserved_file_does_not_replace_user_data() {
+        let fixture = Fixture::new();
+        let mut prepared = fixture.prepared();
+        let remote = prepared.directory.join("remote");
+        fs::remove_file(remote.join("config.lua")).unwrap();
+        fs::create_dir(remote.join("config.lua")).unwrap();
+        fs::write(remote.join("config.lua/default.lua"), "new default").unwrap();
+        prepared.remote = inventory(&remote).unwrap();
+        let result = apply_prepared(
+            &fixture.storage,
+            &prepared,
+            &ApplyRequest {
+                target: fixture.target.clone(),
+                preview_id: "fixture".into(),
+                protected_paths: vec!["config.lua".into()],
+            },
+        );
+        assert!(result.is_err());
+        assert!(inventory(&fixture.resource).unwrap() == prepared.local);
     }
 
     #[test]

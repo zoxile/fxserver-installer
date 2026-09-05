@@ -261,6 +261,7 @@ impl FxserverManager {
                 return Err("Stop FXServer before changing managed server files.".to_string());
             }
         }
+        *process = None;
         drop(process);
         action()
     }
@@ -375,7 +376,10 @@ impl FxserverManager {
                     .lock()
                     .map(|intent| intent.expected_running && intent.generation == generation)
                     .unwrap_or(false);
-                if !still_expected || self.shutting_down.load(Ordering::Acquire) {
+                if !still_expected
+                    || !enabled.load(Ordering::Acquire)
+                    || self.shutting_down.load(Ordering::Acquire)
+                {
                     let _ = self.stop_process();
                     RecoveryOutcome::Cancelled
                 } else {
@@ -392,48 +396,50 @@ impl FxserverManager {
             .lock()
             .map_err(|_| "FXServer process state is unavailable.".to_string())?;
 
-        let Some(mut process) = guard.take() else {
+        let Some(process) = guard.as_mut() else {
             return Ok(());
         };
-        drop(guard);
 
-        if process_is_running(&mut process)? {
+        if process_is_running(process)? {
             let pid = process.child.id();
-            append_terminal_line(&self.terminal, "system", "Stopping FXServer gracefully...")?;
+            let _ =
+                append_terminal_line(&self.terminal, "system", "Stopping FXServer gracefully...");
 
-            match request_graceful_fxserver_stop(&mut process) {
+            match request_graceful_fxserver_stop(process) {
                 Ok(true) => {
                     if wait_for_child_exit(&mut process.child, GRACEFUL_STOP_TIMEOUT) {
-                        append_terminal_line(&self.terminal, "system", "FXServer stopped.")?;
+                        *guard = None;
+                        let _ = append_terminal_line(&self.terminal, "system", "FXServer stopped.");
                         return Ok(());
                     }
 
-                    append_terminal_line(
+                    let _ = append_terminal_line(
                         &self.terminal,
                         "system",
                         "FXServer did not exit after the graceful stop request; forcing shutdown.",
-                    )?;
+                    );
                 }
                 Ok(false) => {
-                    append_terminal_line(
+                    let _ = append_terminal_line(
                         &self.terminal,
                         "system",
                         "FXServer console input was unavailable; forcing shutdown.",
-                    )?;
+                    );
                 }
                 Err(error) => {
-                    append_terminal_line(
+                    let _ = append_terminal_line(
                         &self.terminal,
                         "system",
                         format!("Graceful FXServer stop failed: {error}. Forcing shutdown."),
-                    )?;
+                    );
                 }
             }
 
             force_stop_fxserver_process(&mut process.child, pid)?;
         }
 
-        append_terminal_line(&self.terminal, "system", "FXServer stopped.")?;
+        *guard = None;
+        let _ = append_terminal_line(&self.terminal, "system", "FXServer stopped.");
 
         Ok(())
     }
@@ -516,6 +522,11 @@ fn start_fxserver_blocking(
         }
     }
 
+    clear_terminal(&manager.terminal)?;
+    let mut process_guard = manager
+        .process
+        .lock()
+        .map_err(|_| "FXServer process state is unavailable.".to_string())?;
     let mut child = command
         .spawn()
         .map_err(|error| format!("Failed to start FXServer.exe: {error}"))?;
@@ -525,20 +536,49 @@ fn start_fxserver_blocking(
     let stdin = child.stdin.take();
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
-    let cleanup_job = create_process_cleanup_job(&child);
-    let cleanup_warning = cleanup_job.as_ref().err().cloned();
-    let cleanup_job = cleanup_job.ok();
+    let cleanup_job = match create_process_cleanup_job(&child) {
+        Ok(job) => job,
+        Err(error) => {
+            // Keep ownership until the failed launch has been stopped or can be retried.
+            let cleanup = force_stop_fxserver_process(&mut child, pid);
+            if cleanup.is_err() {
+                *process_guard = Some(ManagedFxserverProcess {
+                    child,
+                    stdin,
+                    artifact_path,
+                    started_at,
+                    resource_sample: None,
+                    _cleanup_job: None,
+                });
+            }
+            return Err(format!(
+                "{error}. FXServer start was aborted.{}",
+                cleanup
+                    .err()
+                    .map(|error| format!(" {error}"))
+                    .unwrap_or_default()
+            ));
+        }
+    };
+    *process_guard = Some(ManagedFxserverProcess {
+        child,
+        stdin,
+        artifact_path: artifact_path.clone(),
+        started_at,
+        resource_sample: None,
+        _cleanup_job: Some(cleanup_job.clone()),
+    });
+    drop(process_guard);
     let watchdog_warning = spawn_fxserver_watchdog(pid).err();
 
-    clear_terminal(&manager.terminal)?;
-    append_terminal_line(
+    let _ = append_terminal_line(
         &manager.terminal,
         "system",
         format!(
             "Started FXServer.exe from {}",
             artifact_path.to_string_lossy()
         ),
-    )?;
+    );
 
     if let Some(stdout) = stdout {
         spawn_terminal_reader(manager.terminal.clone(), "stdout", stdout);
@@ -548,30 +588,11 @@ fn start_fxserver_blocking(
         spawn_terminal_reader(manager.terminal.clone(), "stderr", stderr);
     }
 
-    if let Some(warning) = cleanup_warning {
-        append_terminal_line(&manager.terminal, "system", warning)?;
-    }
-
     if let Some(warning) = watchdog_warning {
-        append_terminal_line(&manager.terminal, "system", warning)?;
+        let _ = append_terminal_line(&manager.terminal, "system", warning);
     }
 
-    if let Some(job) = cleanup_job.clone() {
-        attach_process_tree_to_cleanup_job_later(job, pid);
-    }
-
-    *manager
-        .process
-        .lock()
-        .map_err(|_| "FXServer process state is unavailable.".to_string())? =
-        Some(ManagedFxserverProcess {
-            child,
-            stdin,
-            artifact_path: artifact_path.clone(),
-            started_at,
-            resource_sample: None,
-            _cleanup_job: cleanup_job,
-        });
+    attach_process_tree_to_cleanup_job_later(cleanup_job, pid);
 
     Ok(FxserverLaunchResult {
         pid,
@@ -1149,9 +1170,11 @@ fn spawn_fxserver_watchdog(_: u32) -> Result<(), String> {
 
 #[cfg(target_os = "windows")]
 fn attach_process_tree_to_cleanup_job_later(job: Arc<ProcessCleanupJob>, root_pid: u32) {
+    let job = Arc::downgrade(&job);
     thread::spawn(move || {
         for _ in 0..10 {
             thread::sleep(Duration::from_millis(500));
+            let Some(job) = job.upgrade() else { break };
             let _ = attach_process_tree_to_cleanup_job(&job, root_pid);
         }
     });
@@ -1284,13 +1307,17 @@ fn request_graceful_fxserver_stop(process: &mut ManagedFxserverProcess) -> Resul
 }
 
 fn force_stop_fxserver_process(child: &mut Child, pid: u32) -> Result<(), String> {
-    if let Err(error) = terminate_process_tree(pid) {
+    let _ = terminate_process_tree(pid);
+    if !wait_for_child_exit(child, FORCE_STOP_WAIT_TIMEOUT) {
         child
             .kill()
-            .map_err(|kill_error| format!("Failed to force stop FXServer after process tree cleanup failed ({error}): {kill_error}"))?;
+            .map_err(|error| format!("Failed to force stop FXServer: {error}"))?;
+        if !wait_for_child_exit(child, FORCE_STOP_WAIT_TIMEOUT) {
+            return Err(
+                "FXServer has not exited. Its process is still tracked; retry Stop.".into(),
+            );
+        }
     }
-
-    wait_for_child_exit(child, FORCE_STOP_WAIT_TIMEOUT);
     Ok(())
 }
 
@@ -1300,7 +1327,7 @@ fn wait_for_child_exit(child: &mut Child, timeout: Duration) -> bool {
         match child.try_wait() {
             Ok(Some(_)) => return true,
             Ok(None) => thread::sleep(Duration::from_millis(100)),
-            Err(_) => return true,
+            Err(_) => return false,
         }
     }
     false
@@ -2541,7 +2568,7 @@ fn encode_hex(bytes: &[u8]) -> String {
 }
 
 fn decode_hex(value: &str) -> Result<Vec<u8>, String> {
-    if value.len() % 2 != 0 {
+    if !value.len().is_multiple_of(2) {
         return Err("Saved RCON password data is malformed.".to_string());
     }
 
@@ -2831,6 +2858,65 @@ mod tests {
             .contains("in progress"));
         drop(guard);
         stop_fxserver_blocking(&clone).unwrap();
+    }
+
+    #[test]
+    fn resource_mutations_share_the_lifecycle_guard_and_release_after_failure() {
+        let manager = FxserverManager::default();
+        let guard = manager.lifecycle.lock().unwrap();
+        assert!(manager
+            .with_stopped_server(|| -> Result<(), String> {
+                panic!("busy mutation must never run")
+            })
+            .is_err());
+        drop(guard);
+        assert!(manager
+            .with_stopped_server(|| Err::<(), _>("fixture".into()))
+            .is_err());
+        manager
+            .with_stopped_server(|| {
+                assert!(manager.lifecycle.try_lock().is_err());
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn stop_reaps_an_inert_child_even_when_terminal_logging_fails() {
+        let manager = FxserverManager::default();
+        let child = Command::new("powershell")
+            .no_window()
+            .args(["-NoProfile", "-Command", "Start-Sleep -Seconds 30"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        *manager.process.lock().unwrap() = Some(ManagedFxserverProcess {
+            child,
+            stdin: None,
+            artifact_path: PathBuf::from("inert-test-child"),
+            started_at: SystemTime::now(),
+            resource_sample: None,
+            _cleanup_job: None,
+        });
+        let mutation = manager.with_stopped_server(|| Ok(()));
+        let terminal = manager.terminal.clone();
+        let _ = thread::spawn(move || {
+            let _guard = terminal.lock().unwrap();
+            panic!("poison test terminal");
+        })
+        .join();
+        let stopped = manager.stop_process();
+        // Always clean up the inert fixture before asserting the result.
+        if let Some(mut process) = manager.process.lock().unwrap().take() {
+            let _ = process.child.kill();
+            let _ = process.child.wait();
+            panic!("stop lost or retained a running child: {stopped:?}");
+        }
+        assert!(stopped.is_ok());
+        assert!(mutation.unwrap_err().contains("Stop FXServer"));
     }
 
     #[test]

@@ -440,7 +440,8 @@ impl HealthMonitor {
         let Ok(mut state) = self.inner.state.lock() else {
             return;
         };
-        if !state.recovery.matches_generation(process.generation)
+        if state.revision != revision
+            || !state.recovery.matches_generation(process.generation)
             || self.inner.stopped.load(Ordering::Acquire)
         {
             return;
