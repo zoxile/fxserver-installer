@@ -412,13 +412,14 @@ fn pin_directories(path: &Path) -> Result<Vec<File>, String> {
     {
         use std::os::windows::fs::OpenOptionsExt;
         use windows_sys::Win32::Storage::FileSystem::{
-            FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
-            FILE_SHARE_READ,
+            FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_LIST_DIRECTORY,
+            FILE_READ_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE,
         };
         for ancestor in path.ancestors().collect::<Vec<_>>().into_iter().rev() {
+            // Attribute-only handles do not enforce Windows delete-sharing checks.
             let handle = OpenOptions::new()
-                .access_mode(FILE_READ_ATTRIBUTES)
-                .share_mode(FILE_SHARE_READ)
+                .access_mode(FILE_READ_ATTRIBUTES | FILE_LIST_DIRECTORY)
+                .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
                 .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
                 .open(ancestor)
                 .map_err(|error| {
@@ -557,6 +558,10 @@ fn excluded_name(path: &str) -> bool {
                 | "admin.json"
                 | "admins.json"
                 | "players.json"
+                | "id_rsa"
+                | "id_dsa"
+                | "id_ecdsa"
+                | "id_ed25519"
         ) || part == LIVE_BRIDGE_RESOURCE
             || part.starts_with(".env")
             || part.starts_with('.')
@@ -578,9 +583,19 @@ fn excluded_name(path: &str) -> bool {
                     | "exe"
                     | "dll"
             )
-            || ["password", "secret", "credential", "token", "licensekey"]
-                .iter()
-                .any(|word| part.contains(word))
+            || [
+                "password",
+                "passwd",
+                "secret",
+                "credential",
+                "token",
+                "licensekey",
+                "api_key",
+                "api-key",
+                "apikey",
+            ]
+            .iter()
+            .any(|word| part.contains(word))
     })
 }
 
@@ -611,6 +626,13 @@ fn sensitive_text(text: &str) -> bool {
     [
         "password",
         "passwd",
+        "dbpass",
+        "db_pass",
+        "pwd=",
+        "pwd =",
+        "\"pwd\"",
+        "'pwd'",
+        "`pwd`",
         "secret",
         "token",
         "licensekey",
@@ -624,6 +646,12 @@ fn sensitive_text(text: &str) -> bool {
         "authorization",
         "webhook",
         "private key",
+        "private_key",
+        "privatekey",
+        "private-key",
+        "access_key",
+        "accesskey",
+        "steam_webapikey",
         "cfxk_",
         "github_pat_",
         "ghp_",
@@ -652,7 +680,7 @@ fn sanitize_cfg(text: &str) -> Vec<u8> {
     let mut output = String::new();
     let mut bridge_block_depth = 0usize;
     for line in text.lines() {
-        let trimmed = line.trim();
+        let trimmed = line.trim_start_matches('\u{feff}').trim();
         if trimmed == LIVE_BRIDGE_BEGIN {
             bridge_block_depth += 1;
             continue;
@@ -665,7 +693,11 @@ fn sanitize_cfg(text: &str) -> Vec<u8> {
             continue;
         }
         let mut words = trimmed.split_whitespace();
-        let command = words.next().unwrap_or("").to_ascii_lowercase();
+        let command = words
+            .next()
+            .unwrap_or("")
+            .trim_matches(['"', '\''])
+            .to_ascii_lowercase();
         if matches!(command.as_str(), "ensure" | "start")
             && words.next().is_some_and(|resource| {
                 resource
@@ -683,6 +715,7 @@ fn sanitize_cfg(text: &str) -> Vec<u8> {
             continue;
         }
         if sensitive_text(line)
+            || line.contains('\0')
             || external_reference(line)
             || line.contains(';')
             || matches!(
@@ -748,6 +781,10 @@ fn transformed(path: &str, bytes: &[u8]) -> Result<Option<Vec<u8>>, String> {
     if excluded_name(path) {
         return Ok(None);
     }
+    // UTF-16 ASCII keys otherwise appear as valid UTF-8 with interleaved NULs.
+    if bytes.contains(&0) && sensitive_text(&String::from_utf8_lossy(bytes).replace('\0', "")) {
+        return Ok(None);
+    }
     let ext = path.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
     if ext == "cfg" {
         if bytes.len() as u64 > MAX_TEXT {
@@ -758,6 +795,9 @@ fn transformed(path: &str, bytes: &[u8]) -> Result<Option<Vec<u8>>, String> {
         )));
     }
     if let Ok(text) = std::str::from_utf8(bytes) {
+        if text.contains('\0') {
+            return Ok(None);
+        }
         let name = path.rsplit('/').next().unwrap_or("").to_ascii_lowercase();
         let license_notice = name == "license"
             || name.starts_with("license.")
@@ -1081,8 +1121,12 @@ fn execute_plan(
     check_no_links(parent)?;
     require_missing(&plan.destination)?;
     check_disk(parent, plan_bytes(plan))?;
-    let stage = parent.join(format!(".fxclone-stage-{}", unique_id()));
+    let stage = parent.join(format!(
+        ".fxclone-stage-{}",
+        super::backup_manager::storage::secure_token()?
+    ));
     fs::create_dir(&stage).map_err(io_error)?;
+    let mut written = BTreeMap::new();
     let result = (|| {
         for folder in ["server-data", "txData", "artifacts"] {
             fs::create_dir(stage.join(folder)).map_err(io_error)?;
@@ -1107,6 +1151,7 @@ fn execute_plan(
                 return Err("Staged content does not match the preview.".into());
             }
             write_new(&output, &data)?;
+            written.insert(output, digest(&data));
         }
         if let Some(database) = &plan.database {
             let bytes = read_bounded(&database.source, 32 * 1024 * 1024)?;
@@ -1114,6 +1159,7 @@ fn execute_plan(
                 return Err("Database dump changed during staging.".into());
             }
             write_new(&stage.join("database.sql"), &bytes)?;
+            written.insert(stage.join("database.sql"), digest(&bytes));
         }
         let manifest = PackageManifest {
             schema_version: 1,
@@ -1123,10 +1169,9 @@ fn execute_plan(
             files: plan.files.iter().map(|item| item.file.clone()).collect(),
             database: plan.database.as_ref().map(|db| db.package.clone()),
         };
-        write_new(
-            &stage.join(MANIFEST),
-            &serde_json::to_vec_pretty(&manifest).map_err(io_error)?,
-        )?;
+        let manifest_bytes = serde_json::to_vec_pretty(&manifest).map_err(io_error)?;
+        write_new(&stage.join(MANIFEST), &manifest_bytes)?;
+        written.insert(stage.join(MANIFEST), digest(&manifest_bytes));
         let current = build_plan(request)?;
         if current
             .files
@@ -1142,6 +1187,7 @@ fn execute_plan(
         before_promote()?;
         check_no_links(parent)?;
         check_no_links(&stage)?;
+        inspect_stage(&stage, &written)?;
         require_missing(&plan.destination)?;
         promote(&stage, &plan.destination)?;
         Ok(CloneResult {
@@ -1153,8 +1199,13 @@ fn execute_plan(
             database: None,
         })
     })();
-    if result.is_err() {
-        let _ = remove_stage(parent, &stage);
+    if let Err(error) = &result {
+        if let Err(cleanup) = remove_stage(parent, &stage, &written) {
+            return Err(format!(
+                "{error} Staging was preserved at {}: {cleanup}",
+                display(&stage)
+            ));
+        }
     }
     result
 }
@@ -1180,7 +1231,12 @@ fn create_owned_parents(stage: &Path, parent: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn remove_stage(parent: &Path, stage: &Path) -> Result<(), String> {
+fn remove_stage(
+    parent: &Path,
+    stage: &Path,
+    written: &BTreeMap<PathBuf, String>,
+) -> Result<(), String> {
+    let _handles = pin_directories(parent)?;
     check_no_links(parent)?;
     if stage.parent() != Some(parent)
         || !stage
@@ -1189,20 +1245,59 @@ fn remove_stage(parent: &Path, stage: &Path) -> Result<(), String> {
     {
         return Err("Refusing to clean an unowned directory.".into());
     }
-    fn remove_tree(path: &Path) -> Result<(), String> {
+    let directories = inspect_stage(stage, written)?;
+    for (path, expected) in written {
+        if !path.starts_with(stage) {
+            return Err("Unowned staging file; cleanup refused.".into());
+        }
+        super::backup_manager::storage::remove_snapshot(path, expected)?;
+    }
+    for directory in directories.into_iter().rev() {
+        check_no_links(&directory)?;
+        // Non-recursive removal preserves anything added since the inventory check.
+        fs::remove_dir(directory).map_err(io_error)?;
+    }
+    Ok(())
+}
+
+fn inspect_stage(
+    stage: &Path,
+    written: &BTreeMap<PathBuf, String>,
+) -> Result<Vec<PathBuf>, String> {
+    fn inspect_tree(
+        path: &Path,
+        written: &BTreeMap<PathBuf, String>,
+        directories: &mut Vec<PathBuf>,
+        found: &mut usize,
+    ) -> Result<(), String> {
+        let _handles = pin_directories(path)?;
         check_no_links(path)?;
+        directories.push(path.to_path_buf());
         for entry in fs::read_dir(path).map_err(io_error)? {
             let entry = entry.map_err(io_error)?;
             check_no_links(&entry.path())?;
             if entry.file_type().map_err(io_error)?.is_dir() {
-                remove_tree(&entry.path())?;
+                inspect_tree(&entry.path(), written, directories, found)?;
             } else {
-                fs::remove_file(entry.path()).map_err(io_error)?;
+                let path = entry.path();
+                let expected = written
+                    .get(&path)
+                    .ok_or("Untracked staging content; cleanup refused.")?;
+                if digest(&read_bounded(&path, MAX_FILE)?) != *expected {
+                    return Err("Staging content changed; cleanup refused.".into());
+                }
+                *found += 1;
             }
         }
-        fs::remove_dir(path).map_err(io_error)
+        Ok(())
     }
-    remove_tree(stage)
+    let mut directories = Vec::new();
+    let mut found = 0;
+    inspect_tree(stage, written, &mut directories, &mut found)?;
+    if found != written.len() {
+        return Err("Staging files are missing; operation refused.".into());
+    }
+    Ok(directories)
 }
 
 #[cfg(windows)]

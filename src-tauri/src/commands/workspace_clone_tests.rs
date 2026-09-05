@@ -159,6 +159,82 @@ fn removes_owned_bridge_blocks_and_exact_unmanaged_start_references() {
     assert_eq!(sanitize_cfg(&unterminated), b"ensure demo\n");
 }
 
+#[test]
+fn quoted_and_bom_config_commands_cannot_bypass_exclusions() {
+    let input = "\u{feff}exec private.cfg\n\"exec\" private.cfg\n'endpoint_add_tcp' \"0.0.0.0:30120\"\n\"ensure\" \"fxserver_installer_bridge\"\nset safe_setting 1\n";
+    let clean = String::from_utf8(sanitize_cfg(input)).unwrap();
+    assert!(!clean.contains("private.cfg"));
+    assert!(!clean.contains("30120"));
+    assert!(!clean.contains(LIVE_BRIDGE_RESOURCE));
+    assert!(clean.contains("set safe_setting 1"));
+}
+
+#[test]
+fn private_key_files_and_utf16_secrets_are_not_exported() {
+    for name in ["id_rsa", "id_ed25519", "my_api_key.txt", "passwd.txt"] {
+        assert!(transformed(
+            &format!("server-data/resources/demo/{name}"),
+            b"fixture-value"
+        )
+        .unwrap()
+        .is_none());
+    }
+    for value in [
+        "Config.DbPass = 'fixture-value'",
+        "{\"pwd\":\"fixture-value\"}",
+        "private_key=fixture-value",
+    ] {
+        assert!(
+            transformed("server-data/resources/demo/config.lua", value.as_bytes())
+                .unwrap()
+                .is_none()
+        );
+        let utf16: Vec<u8> = value.encode_utf16().flat_map(u16::to_le_bytes).collect();
+        assert!(
+            transformed("server-data/resources/demo/config.json", &utf16)
+                .unwrap()
+                .is_none()
+        );
+        assert!(transformed("server-data/resources/demo/asset.png", &utf16)
+            .unwrap()
+            .is_none());
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn late_staging_changes_are_neither_promoted_nor_deleted() {
+    for replace in [false, true] {
+        let fixture = Fixture::new();
+        let request = fixture.request();
+        let plan = build_plan(&request).unwrap();
+        let mut preserved = PathBuf::new();
+        let result = execute_plan(&request, &plan, || {
+            let stage = fs::read_dir(&fixture.root)
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .find(|path| {
+                    path.file_name()
+                        .unwrap()
+                        .to_string_lossy()
+                        .starts_with(".fxclone-stage-")
+                })
+                .unwrap();
+            preserved = stage.join(if replace {
+                "server-data/server.cfg"
+            } else {
+                "untracked.txt"
+            });
+            fs::write(&preserved, b"preserve unexpected data").unwrap();
+            Ok(())
+        });
+        assert!(result.is_err());
+        assert!(!plan.destination.exists());
+        assert_eq!(fs::read(&preserved).unwrap(), b"preserve unexpected data");
+        assert!(result.err().unwrap().contains("Staging was preserved"));
+    }
+}
+
 #[cfg(windows)]
 #[test]
 fn clone_and_export_exclude_the_entire_machine_paired_bridge() {
