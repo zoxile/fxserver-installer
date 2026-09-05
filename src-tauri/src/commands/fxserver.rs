@@ -4,7 +4,10 @@ use std::{
     net::UdpSocket,
     path::{Path, PathBuf},
     process::{Child, ChildStdin, Command, Stdio},
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
     thread,
     time::{Duration, Instant, SystemTime},
 };
@@ -14,9 +17,9 @@ use crate::{
         FxserverCommandRequest, FxserverEnvironmentVariable, FxserverLaunchRequest,
         FxserverLaunchResult, FxserverRconConfig, FxserverResourceInfo, FxserverResources,
         FxserverStatus, FxserverTerminalEntry, FxserverTerminalResult, FxserverTerminalSegment,
-        ResourceScanRequest, ResourceScanResult, ResourceUpdateRequest, ResourceUpdateResult,
-        SaveServerConfigRequest, ServerConfigFile, ServerConfigRequest, ServerConfigResult,
-        TxDataLogRequest, TxDataLogResult, TxDataProfilesResult,
+        ResourceScanRequest, ResourceScanResult, SaveServerConfigRequest, ServerConfigFile,
+        ServerConfigRequest, ServerConfigResult, TxDataLogRequest, TxDataLogResult,
+        TxDataProfilesResult,
     },
     process::CommandNoWindowExt,
     FXSERVER_WATCHDOG_ARG,
@@ -24,12 +27,68 @@ use crate::{
 
 const GRACEFUL_STOP_TIMEOUT: Duration = Duration::from_secs(4);
 const FORCE_STOP_WAIT_TIMEOUT: Duration = Duration::from_secs(3);
+static RCON_PASSWORD_LOCK: Mutex<()> = Mutex::new(());
 
 #[derive(Clone)]
 pub struct FxserverManager {
     process: Arc<Mutex<Option<ManagedFxserverProcess>>>,
     lifecycle: Arc<Mutex<()>>,
     terminal: Arc<Mutex<TerminalState>>,
+    launch_intent: Arc<Mutex<LaunchIntent>>,
+    shutting_down: Arc<AtomicBool>,
+}
+
+#[derive(Default)]
+struct LaunchIntent {
+    generation: u64,
+    expected_running: bool,
+    launch: Option<SavedLaunch>,
+}
+
+#[derive(Clone)]
+struct SavedLaunch {
+    artifact_path: String,
+    environment: Vec<FxserverEnvironmentVariable>,
+    server_profile: Option<String>,
+}
+
+impl SavedLaunch {
+    fn from_request(request: &FxserverLaunchRequest) -> Self {
+        Self {
+            artifact_path: request.artifact_path.clone(),
+            environment: request.environment.clone(),
+            server_profile: request.server_profile.clone(),
+        }
+    }
+
+    fn into_request(self) -> FxserverLaunchRequest {
+        FxserverLaunchRequest {
+            artifact_path: self.artifact_path,
+            environment: self.environment,
+            server_profile: self.server_profile,
+        }
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct HealthResourceSampler {
+    pid: Option<u32>,
+    previous: Option<ResourceSample>,
+}
+
+pub(crate) struct HealthProcessSample {
+    pub generation: u64,
+    pub expected_running: bool,
+    pub running: bool,
+    pub pid: Option<u32>,
+    pub resources: Option<FxserverResources>,
+}
+
+pub(crate) enum RecoveryOutcome {
+    Busy,
+    Cancelled,
+    Started,
+    Failed(String),
 }
 
 struct ManagedFxserverProcess {
@@ -45,6 +104,7 @@ struct ManagedFxserverProcess {
 struct TerminalState {
     entries: Vec<FxserverTerminalEntry>,
     next_id: u64,
+    generation: u64,
 }
 
 #[cfg(target_os = "windows")]
@@ -88,17 +148,175 @@ impl Default for FxserverManager {
             process: Arc::new(Mutex::new(None)),
             lifecycle: Arc::new(Mutex::new(())),
             terminal: Arc::new(Mutex::new(TerminalState::default())),
+            launch_intent: Arc::new(Mutex::new(LaunchIntent::default())),
+            shutting_down: Arc::new(AtomicBool::new(false)),
         }
     }
 }
 
 impl FxserverManager {
     pub fn stop_running_process(&self) -> Result<(), String> {
+        self.disarm_recovery();
         let _operation = self
             .lifecycle
             .lock()
             .map_err(|_| "FXServer lifecycle is unavailable.".to_string())?;
         self.stop_process()
+    }
+
+    pub fn begin_shutdown(&self) {
+        self.shutting_down.store(true, Ordering::Release);
+        self.disarm_recovery();
+    }
+
+    pub fn disarm_recovery(&self) {
+        if let Ok(mut intent) = self.launch_intent.lock() {
+            intent.expected_running = false;
+            intent.launch = None;
+            intent.generation = intent.generation.wrapping_add(1);
+        }
+    }
+
+    fn launch_generation(&self) -> Result<u64, String> {
+        self.launch_intent
+            .lock()
+            .map(|intent| intent.generation)
+            .map_err(|_| "FXServer launch settings are unavailable.".to_string())
+    }
+
+    fn remember_launch(&self, launch: SavedLaunch, generation: u64) -> Result<bool, String> {
+        let mut intent = self
+            .launch_intent
+            .lock()
+            .map_err(|_| "FXServer launch settings are unavailable.".to_string())?;
+        if intent.generation != generation || self.shutting_down.load(Ordering::Acquire) {
+            return Ok(false);
+        }
+        intent.launch = Some(launch);
+        intent.expected_running = true;
+        intent.generation = intent.generation.wrapping_add(1);
+        Ok(true)
+    }
+
+    pub(crate) fn prepare_workspace_switch(
+        &self,
+        switch: impl FnOnce() -> Result<(), String>,
+    ) -> Result<(), String> {
+        let _operation = self.lifecycle.try_lock().map_err(|_| {
+            "Wait for the current FXServer action before switching workspaces.".to_string()
+        })?;
+        let mut process = self
+            .process
+            .lock()
+            .map_err(|_| "FXServer process state is unavailable.".to_string())?;
+        if let Some(process) = process.as_mut() {
+            if process_is_running(process)? {
+                return Err("Stop FXServer before switching workspaces.".to_string());
+            }
+        }
+        *process = None;
+        drop(process);
+        self.disarm_recovery();
+        switch()?;
+        clear_terminal(&self.terminal)
+    }
+
+    pub(crate) fn sample_health(
+        &self,
+        sampler: &mut HealthResourceSampler,
+        include_resources: bool,
+    ) -> Result<Option<HealthProcessSample>, String> {
+        let Ok(operation) = self.lifecycle.try_lock() else {
+            return Ok(None);
+        };
+        let Ok(mut process) = self.process.try_lock() else {
+            return Ok(None);
+        };
+        let pid = if let Some(child) = process.as_mut() {
+            if process_is_running(child)? {
+                Some(child.child.id())
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        if pid.is_none() {
+            *process = None;
+        }
+        let intent = self
+            .launch_intent
+            .lock()
+            .map_err(|_| "FXServer launch settings are unavailable.".to_string())?;
+        let generation = intent.generation;
+        let expected_running =
+            intent.expected_running && !self.shutting_down.load(Ordering::Acquire);
+        drop(intent);
+        drop(process);
+        drop(operation);
+
+        if sampler.pid != pid {
+            sampler.previous = None;
+            sampler.pid = pid;
+        }
+        let resources = if include_resources {
+            pid.and_then(|pid| read_process_resources(pid, &mut sampler.previous))
+        } else {
+            None
+        };
+        Ok(Some(HealthProcessSample {
+            generation,
+            expected_running,
+            running: pid.is_some(),
+            pid,
+            resources,
+        }))
+    }
+
+    pub(crate) fn recover_last_launch(
+        &self,
+        generation: u64,
+        enabled: &AtomicBool,
+    ) -> RecoveryOutcome {
+        let Ok(_operation) = self.lifecycle.try_lock() else {
+            return RecoveryOutcome::Busy;
+        };
+        if self.shutting_down.load(Ordering::Acquire) || !enabled.load(Ordering::Acquire) {
+            return RecoveryOutcome::Cancelled;
+        }
+        let launch = match self.launch_intent.lock() {
+            Ok(intent) if intent.expected_running && intent.generation == generation => {
+                intent.launch.clone()
+            }
+            _ => None,
+        };
+        let Some(launch) = launch else {
+            return RecoveryOutcome::Cancelled;
+        };
+        if let Ok(mut process) = self.process.lock() {
+            if process
+                .as_mut()
+                .is_some_and(|process| process_is_running(process).unwrap_or(true))
+            {
+                return RecoveryOutcome::Cancelled;
+            }
+        }
+        match start_fxserver_blocking(launch.into_request(), self) {
+            Ok(_) => {
+                let still_expected = self
+                    .launch_intent
+                    .lock()
+                    .map(|intent| intent.expected_running && intent.generation == generation)
+                    .unwrap_or(false);
+                if !still_expected || self.shutting_down.load(Ordering::Acquire) {
+                    let _ = self.stop_process();
+                    RecoveryOutcome::Cancelled
+                } else {
+                    RecoveryOutcome::Started
+                }
+            }
+            Err(error) => RecoveryOutcome::Failed(error),
+        }
     }
 
     fn stop_process(&self) -> Result<(), String> {
@@ -110,6 +328,7 @@ impl FxserverManager {
         let Some(mut process) = guard.take() else {
             return Ok(());
         };
+        drop(guard);
 
         if process_is_running(&mut process)? {
             let pid = process.child.id();
@@ -164,7 +383,14 @@ pub async fn start_fxserver(
             .lifecycle
             .try_lock()
             .map_err(|_| "Another FXServer action is in progress.".to_string())?;
-        start_fxserver_blocking(request, &manager)
+        let launch = SavedLaunch::from_request(&request);
+        let generation = manager.launch_generation()?;
+        let result = start_fxserver_blocking(request, &manager)?;
+        if !manager.remember_launch(launch, generation)? {
+            manager.stop_process()?;
+            return Err("FXServer start was cancelled by a stop or shutdown request.".to_string());
+        }
+        Ok(result)
     })
     .await
 }
@@ -173,6 +399,9 @@ fn start_fxserver_blocking(
     request: FxserverLaunchRequest,
     manager: &FxserverManager,
 ) -> Result<FxserverLaunchResult, String> {
+    if manager.shutting_down.load(Ordering::Acquire) {
+        return Err("FXServer Installer is shutting down.".to_string());
+    }
     if !cfg!(target_os = "windows") {
         return Err(
             "FXServer process management is only supported on Windows right now.".to_string(),
@@ -190,6 +419,7 @@ fn start_fxserver_blocking(
         }
         *guard = None;
     }
+    drop(guard);
 
     let artifact_path = PathBuf::from(request.artifact_path.trim());
     if artifact_path.as_os_str().is_empty() {
@@ -263,14 +493,18 @@ fn start_fxserver_blocking(
         attach_process_tree_to_cleanup_job_later(job, pid);
     }
 
-    *guard = Some(ManagedFxserverProcess {
-        child,
-        stdin,
-        artifact_path: artifact_path.clone(),
-        started_at,
-        resource_sample: None,
-        _cleanup_job: cleanup_job,
-    });
+    *manager
+        .process
+        .lock()
+        .map_err(|_| "FXServer process state is unavailable.".to_string())? =
+        Some(ManagedFxserverProcess {
+            child,
+            stdin,
+            artifact_path: artifact_path.clone(),
+            started_at,
+            resource_sample: None,
+            _cleanup_job: cleanup_job,
+        });
 
     Ok(FxserverLaunchResult {
         pid,
@@ -281,11 +515,13 @@ fn start_fxserver_blocking(
 
 #[tauri::command]
 pub async fn stop_fxserver(manager: tauri::State<'_, FxserverManager>) -> Result<(), String> {
+    manager.disarm_recovery();
     let manager = manager.inner().clone();
     super::run_blocking(move || stop_fxserver_blocking(&manager)).await
 }
 
 fn stop_fxserver_blocking(manager: &FxserverManager) -> Result<(), String> {
+    manager.disarm_recovery();
     let _operation = manager
         .lifecycle
         .try_lock()
@@ -311,8 +547,18 @@ pub async fn restart_fxserver(
             return Err("FXServer.exe was not found in the selected artifact folder.".to_string());
         }
         request.environment = sanitize_environment(request.environment)?;
+        manager.disarm_recovery();
         manager.stop_process()?;
-        start_fxserver_blocking(request, &manager)
+        let launch = SavedLaunch::from_request(&request);
+        let generation = manager.launch_generation()?;
+        let result = start_fxserver_blocking(request, &manager)?;
+        if !manager.remember_launch(launch, generation)? {
+            manager.stop_process()?;
+            return Err(
+                "FXServer restart was cancelled by a stop or shutdown request.".to_string(),
+            );
+        }
+        Ok(result)
     })
     .await
 }
@@ -354,13 +600,24 @@ fn get_fxserver_status_blocking(manager: &FxserverManager) -> Result<FxserverSta
         });
     }
 
+    let pid = process.child.id();
+    let artifact_path = process.artifact_path.to_string_lossy().to_string();
+    let started_at = system_time_to_label(process.started_at);
+    let mut resource_sample = process.resource_sample;
+    drop(guard);
+    let resources = read_process_resources(pid, &mut resource_sample);
+    if let Ok(mut guard) = manager.process.try_lock() {
+        if let Some(process) = guard.as_mut().filter(|process| process.child.id() == pid) {
+            process.resource_sample = resource_sample;
+        }
+    }
     Ok(FxserverStatus {
         running: true,
-        pid: Some(process.child.id()),
-        artifact_path: Some(process.artifact_path.to_string_lossy().to_string()),
-        started_at: Some(system_time_to_label(process.started_at)),
+        pid: Some(pid),
+        artifact_path: Some(artifact_path),
+        started_at: Some(started_at),
         uptime_seconds: None,
-        resources: read_process_resources(process.child.id(), &mut process.resource_sample),
+        resources,
     })
 }
 
@@ -407,12 +664,19 @@ fn get_fxserver_terminal_blocking(
 }
 
 #[tauri::command]
-pub async fn get_fxserver_rcon_password() -> Result<Option<String>, String> {
-    super::run_blocking(get_fxserver_rcon_password_blocking).await
+pub async fn get_fxserver_rcon_password(
+    workspace_id: Option<String>,
+) -> Result<Option<String>, String> {
+    super::run_blocking(move || get_fxserver_rcon_password_blocking(workspace_id.as_deref())).await
 }
 
-fn get_fxserver_rcon_password_blocking() -> Result<Option<String>, String> {
-    let path = rcon_password_path()?;
+fn get_fxserver_rcon_password_blocking(
+    workspace_id: Option<&str>,
+) -> Result<Option<String>, String> {
+    let _lock = RCON_PASSWORD_LOCK
+        .lock()
+        .map_err(|_| "RCON password store is unavailable.".to_string())?;
+    let path = rcon_password_path(workspace_id)?;
     if !path.exists() {
         return Ok(None);
     }
@@ -427,33 +691,51 @@ fn get_fxserver_rcon_password_blocking() -> Result<Option<String>, String> {
 }
 
 #[tauri::command]
-pub async fn save_fxserver_rcon_password(password: String) -> Result<(), String> {
-    super::run_blocking(move || save_fxserver_rcon_password_blocking(password)).await
+pub async fn save_fxserver_rcon_password(
+    password: String,
+    workspace_id: Option<String>,
+) -> Result<(), String> {
+    super::run_blocking(move || {
+        save_fxserver_rcon_password_blocking(password, workspace_id.as_deref())
+    })
+    .await
 }
 
-fn save_fxserver_rcon_password_blocking(password: String) -> Result<(), String> {
+fn save_fxserver_rcon_password_blocking(
+    password: String,
+    workspace_id: Option<&str>,
+) -> Result<(), String> {
     if password.is_empty() {
-        return clear_fxserver_rcon_password_blocking();
+        return clear_fxserver_rcon_password_blocking(workspace_id);
     }
 
-    let path = rcon_password_path()?;
+    let _lock = RCON_PASSWORD_LOCK
+        .lock()
+        .map_err(|_| "RCON password store is unavailable.".to_string())?;
+    let path = rcon_password_path(workspace_id)?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .map_err(|error| format!("Failed to create RCON password store: {error}"))?;
     }
 
     let encrypted = encrypt_secret(password.as_bytes())?;
-    fs::write(&path, encode_hex(&encrypted))
-        .map_err(|error| format!("Failed to save RCON password securely: {error}"))
+    let temporary = path.with_extension("tmp");
+    fs::write(&temporary, encode_hex(&encrypted))
+        .map_err(|error| format!("Failed to save RCON password securely: {error}"))?;
+    replace_secret_file(&temporary, &path)
 }
 
 #[tauri::command]
-pub async fn clear_fxserver_rcon_password() -> Result<(), String> {
-    super::run_blocking(clear_fxserver_rcon_password_blocking).await
+pub async fn clear_fxserver_rcon_password(workspace_id: Option<String>) -> Result<(), String> {
+    super::run_blocking(move || clear_fxserver_rcon_password_blocking(workspace_id.as_deref()))
+        .await
 }
 
-fn clear_fxserver_rcon_password_blocking() -> Result<(), String> {
-    let path = rcon_password_path()?;
+fn clear_fxserver_rcon_password_blocking(workspace_id: Option<&str>) -> Result<(), String> {
+    let _lock = RCON_PASSWORD_LOCK
+        .lock()
+        .map_err(|_| "RCON password store is unavailable.".to_string())?;
+    let path = rcon_password_path(workspace_id)?;
     if path.exists() {
         fs::remove_file(path)
             .map_err(|error| format!("Failed to clear saved RCON password: {error}"))?;
@@ -478,6 +760,11 @@ fn send_fxserver_command_blocking(
     if command.is_empty() {
         return Ok(());
     }
+    let generation = manager
+        .terminal
+        .lock()
+        .map_err(|_| "FXServer terminal output is unavailable.".to_string())?
+        .generation;
 
     {
         let mut guard = manager
@@ -495,19 +782,33 @@ fn send_fxserver_command_blocking(
         }
     }
 
-    append_terminal_line(&manager.terminal, "command", format!("rcon> {command}"))?;
+    append_terminal_generation(
+        &manager.terminal,
+        "command",
+        format!("rcon> {command}"),
+        Some(generation),
+    )?;
+
+    if command
+        .split_whitespace()
+        .next()
+        .is_some_and(|name| name.eq_ignore_ascii_case("quit"))
+    {
+        manager.disarm_recovery();
+    }
 
     let response = send_rcon_command(&request.rcon, command)?;
 
     if response.trim().is_empty() {
-        append_terminal_line(
+        append_terminal_generation(
             &manager.terminal,
             "system",
             "RCON packet sent; no response received.",
+            Some(generation),
         )?;
     } else {
         for line in response.lines() {
-            append_terminal_line(&manager.terminal, "rcon", line)?;
+            append_terminal_generation(&manager.terminal, "rcon", line, Some(generation))?;
         }
     }
 
@@ -683,15 +984,6 @@ pub async fn send_fxserver_rcon_command(request: FxserverCommandRequest) -> Resu
 
 fn send_fxserver_rcon_command_blocking(request: FxserverCommandRequest) -> Result<String, String> {
     send_rcon_command(&request.rcon, &request.command)
-}
-
-#[tauri::command]
-pub async fn update_github_resource(
-    request: ResourceUpdateRequest,
-) -> Result<ResourceUpdateResult, String> {
-    tokio::task::spawn_blocking(move || update_github_resource_blocking(request))
-        .await
-        .map_err(|error| format!("Resource update task failed: {error}"))?
 }
 
 fn process_is_running(process: &mut ManagedFxserverProcess) -> Result<bool, String> {
@@ -1151,171 +1443,12 @@ fn first_quoted_value(value: &str) -> Option<String> {
     None
 }
 
-fn update_github_resource_blocking(
-    request: ResourceUpdateRequest,
-) -> Result<ResourceUpdateResult, String> {
-    let resource_path = PathBuf::from(request.resource_path.trim());
-    if resource_path.as_os_str().is_empty() || !resource_path.is_dir() {
-        return Err("Resource folder was not found.".to_string());
-    }
-
-    if !resource_path.join("fxmanifest.lua").is_file()
-        && !resource_path.join("__resource.lua").is_file()
-    {
-        return Err("The selected folder does not look like a FiveM resource.".to_string());
-    }
-
-    if is_cfx_default_resource_path(&resource_path) {
-        return Err("CFX default resources are updated with FXServer artifacts.".to_string());
-    }
-
-    let (owner, repo) = github_owner_repo(&request.repository)
-        .ok_or_else(|| "Only GitHub repository URLs can be updated automatically.".to_string())?;
-    if owner.eq_ignore_ascii_case("citizenfx") {
-        return Err("CitizenFX resources are updated with FXServer artifacts.".to_string());
-    }
-
-    let branch = validate_github_branch(&request.branch)?;
-    let zip_url = if branch.eq_ignore_ascii_case("HEAD") {
-        format!("https://github.com/{owner}/{repo}/archive/HEAD.zip")
-    } else {
-        format!("https://github.com/{owner}/{repo}/archive/refs/heads/{branch}.zip")
-    };
-
-    run_resource_update_script(&zip_url, &resource_path)?;
-
-    Ok(ResourceUpdateResult {
-        resource_path: resource_path.to_string_lossy().to_string(),
-        repository: format!("https://github.com/{owner}/{repo}"),
-        branch,
-        updated_at: system_time_to_label(SystemTime::now()),
-    })
-}
-
-fn is_cfx_default_resource_path(path: &Path) -> bool {
-    path.components().any(|component| {
-        component
-            .as_os_str()
-            .to_string_lossy()
-            .eq_ignore_ascii_case("[cfx-default]")
-    })
-}
-
-fn github_owner_repo(repository: &str) -> Option<(String, String)> {
-    let mut value = repository.trim().trim_end_matches('/').to_string();
-    if value.ends_with(".git") {
-        value.truncate(value.len() - 4);
-    }
-
-    let path = if let Some(rest) = value.strip_prefix("git@github.com:") {
-        rest
-    } else if let Some(index) = value.find("github.com/") {
-        &value[index + "github.com/".len()..]
-    } else {
-        return None;
-    };
-
-    let mut parts = path.split('/').filter(|part| !part.trim().is_empty());
-    let owner = clean_github_path_part(parts.next()?)?;
-    let repo = clean_github_path_part(parts.next()?)?;
-    Some((owner, repo))
-}
-
-fn clean_github_path_part(value: &str) -> Option<String> {
-    let value = value.trim().trim_end_matches(".git");
-    (!value.is_empty()
-        && value.chars().all(|character| {
-            character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.')
-        }))
-    .then(|| value.to_string())
-}
-
-fn validate_github_branch(branch: &str) -> Result<String, String> {
-    let branch = branch.trim();
-    if branch.is_empty() {
-        return Err("GitHub branch is required before updating a resource.".to_string());
-    }
-
-    if branch.starts_with('/')
-        || branch.ends_with('/')
-        || branch.contains("..")
-        || branch.contains('\\')
-        || branch.chars().any(char::is_whitespace)
-    {
-        return Err("GitHub branch name is not safe to use for updates.".to_string());
-    }
-
-    Ok(branch.to_string())
-}
-
-fn run_resource_update_script(zip_url: &str, resource_path: &Path) -> Result<(), String> {
-    let zip_url_literal = powershell_string_literal(zip_url);
-    let resource_path_literal = powershell_string_literal(&resource_path.to_string_lossy());
-    let script = format!(
-        r#"
-$ErrorActionPreference = "Stop"
-$ProgressPreference = "SilentlyContinue"
-
-$ZipUrl = {zip_url_literal}
-$ResourcePath = {resource_path_literal}
-$TempRoot = Join-Path $env:TEMP ("fxi-resource-update-" + [guid]::NewGuid().ToString("N"))
-$ZipPath = Join-Path $TempRoot "resource.zip"
-$ExtractPath = Join-Path $TempRoot "extract"
-
-New-Item -ItemType Directory -Path $TempRoot, $ExtractPath -Force | Out-Null
-try {{
-    Invoke-WebRequest -Uri ([uri] $ZipUrl) -OutFile $ZipPath -UseBasicParsing
-    Expand-Archive -LiteralPath $ZipPath -DestinationPath $ExtractPath -Force
-    $Source = Get-ChildItem -LiteralPath $ExtractPath -Directory | Select-Object -First 1
-    if ($null -eq $Source) {{
-        throw "GitHub archive did not contain a resource folder."
-    }}
-
-    Get-ChildItem -LiteralPath $Source.FullName -Force | ForEach-Object {{
-        Copy-Item -LiteralPath $_.FullName -Destination $ResourcePath -Recurse -Force
-    }}
-}} finally {{
-    if (Test-Path -LiteralPath $TempRoot) {{
-        Remove-Item -LiteralPath $TempRoot -Recurse -Force
-    }}
-}}
-"#
-    );
-
-    let output = Command::new("powershell")
-        .no_window()
-        .arg("-NoProfile")
-        .arg("-ExecutionPolicy")
-        .arg("Bypass")
-        .arg("-Command")
-        .arg(script)
-        .output()
-        .map_err(|error| format!("Failed to start resource updater: {error}"))?;
-
-    if output.status.success() {
-        return Ok(());
-    }
-
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    let detail = if stderr.is_empty() { stdout } else { stderr };
-
-    Err(if detail.is_empty() {
-        "Resource updater failed without output.".to_string()
-    } else {
-        detail
-    })
-}
-
-fn powershell_string_literal(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "''"))
-}
-
 fn clear_terminal(terminal: &Arc<Mutex<TerminalState>>) -> Result<(), String> {
     let mut terminal = terminal
         .lock()
         .map_err(|_| "FXServer terminal output is unavailable.".to_string())?;
     terminal.entries.clear();
+    terminal.generation = terminal.generation.wrapping_add(1);
     Ok(())
 }
 
@@ -1657,11 +1790,23 @@ fn append_terminal_line(
     stream: &str,
     line: impl Into<String>,
 ) -> Result<(), String> {
+    append_terminal_generation(terminal, stream, line, None)
+}
+
+fn append_terminal_generation(
+    terminal: &Arc<Mutex<TerminalState>>,
+    stream: &str,
+    line: impl Into<String>,
+    generation: Option<u64>,
+) -> Result<(), String> {
     let line = line.into();
     let parsed = parse_terminal_line(&line);
     let mut terminal = terminal
         .lock()
         .map_err(|_| "FXServer terminal output is unavailable.".to_string())?;
+    if generation.is_some_and(|generation| generation != terminal.generation) {
+        return Ok(());
+    }
     let entry = FxserverTerminalEntry {
         id: terminal.next_id,
         stream: stream.to_string(),
@@ -1685,18 +1830,22 @@ fn spawn_terminal_reader<R>(terminal: Arc<Mutex<TerminalState>>, stream: &'stati
 where
     R: std::io::Read + Send + 'static,
 {
+    let Ok(generation) = terminal.lock().map(|state| state.generation) else {
+        return;
+    };
     thread::spawn(move || {
         let reader = BufReader::new(reader);
         for line in reader.lines() {
             match line {
                 Ok(line) => {
-                    let _ = append_terminal_line(&terminal, stream, line);
+                    let _ = append_terminal_generation(&terminal, stream, line, Some(generation));
                 }
                 Err(error) => {
-                    let _ = append_terminal_line(
+                    let _ = append_terminal_generation(
                         &terminal,
                         "system",
                         format!("Stopped reading {stream}: {error}"),
+                        Some(generation),
                     );
                     break;
                 }
@@ -2223,14 +2372,68 @@ fn parse_quake_rcon_response(packet: &[u8]) -> String {
         .to_string()
 }
 
-fn rcon_password_path() -> Result<PathBuf, String> {
+fn rcon_password_path(workspace_id: Option<&str>) -> Result<PathBuf, String> {
     let app_data = env::var_os("APPDATA")
         .map(PathBuf::from)
         .ok_or_else(|| "Windows APPDATA folder is unavailable.".to_string())?;
-    Ok(app_data
-        .join("fxserver-installer")
-        .join("secrets")
-        .join("fxserver-rcon-password.dpapi"))
+    scoped_rcon_password_path(
+        &app_data.join("fxserver-installer").join("secrets"),
+        workspace_id,
+    )
+}
+
+fn scoped_rcon_password_path(root: &Path, workspace_id: Option<&str>) -> Result<PathBuf, String> {
+    let id = workspace_id.unwrap_or("default");
+    if id.is_empty()
+        || id.len() > 64
+        || !id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return Err("Invalid workspace ID for the RCON password store.".to_string());
+    }
+    let id = id.to_ascii_lowercase();
+    let path = root.join(format!("workspace-{id}-rcon.dpapi"));
+    let legacy = root.join("fxserver-rcon-password.dpapi");
+    if id == "default" && !path.exists() && legacy.is_file() {
+        fs::rename(&legacy, &path)
+            .map_err(|error| format!("Failed to migrate the saved RCON password: {error}"))?;
+    }
+    Ok(path)
+}
+
+#[cfg(target_os = "windows")]
+fn replace_secret_file(source: &Path, destination: &Path) -> Result<(), String> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+    };
+    let source: Vec<u16> = source.as_os_str().encode_wide().chain(Some(0)).collect();
+    let destination: Vec<u16> = destination
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect();
+    if unsafe {
+        MoveFileExW(
+            source.as_ptr(),
+            destination.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    } == 0
+    {
+        return Err(format!(
+            "Failed to replace saved RCON password: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn replace_secret_file(source: &Path, destination: &Path) -> Result<(), String> {
+    fs::rename(source, destination)
+        .map_err(|error| format!("Failed to replace saved RCON password: {error}"))
 }
 
 fn encode_hex(bytes: &[u8]) -> String {
@@ -2365,6 +2568,140 @@ fn decrypt_secret(_: &[u8]) -> Result<Vec<u8>, String> {
 mod tests {
     use super::*;
     use std::sync::mpsc;
+
+    fn fixture_secret_directory() -> PathBuf {
+        let path = env::temp_dir().join(format!(
+            "fxserver-secret-test-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&path).unwrap();
+        path
+    }
+
+    #[test]
+    fn workspace_secret_paths_are_isolated_and_reject_traversal() {
+        let root = fixture_secret_directory();
+        let default = scoped_rcon_password_path(&root, None).unwrap();
+        let other = scoped_rcon_password_path(&root, Some("server-2")).unwrap();
+        assert_ne!(default, other);
+        assert_eq!(default.parent(), Some(root.as_path()));
+        for invalid in [
+            "",
+            "..",
+            "../outside",
+            "C:\\outside",
+            "other/server",
+            "a.b",
+            "id with spaces",
+        ] {
+            assert!(scoped_rcon_password_path(&root, Some(invalid)).is_err());
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn only_default_workspace_migrates_the_legacy_secret() {
+        let root = fixture_secret_directory();
+        let legacy = root.join("fxserver-rcon-password.dpapi");
+        fs::write(&legacy, b"encrypted-fixture").unwrap();
+        let other = scoped_rcon_password_path(&root, Some("server-2")).unwrap();
+        assert!(!other.exists());
+        assert!(legacy.exists());
+        let migrated = scoped_rcon_password_path(&root, None).unwrap();
+        assert_eq!(fs::read(&migrated).unwrap(), b"encrypted-fixture");
+        assert!(!legacy.exists());
+        assert_eq!(
+            scoped_rcon_password_path(&root, Some("default")).unwrap(),
+            migrated
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn replacing_encrypted_secret_preserves_the_new_password() {
+        let root = fixture_secret_directory();
+        let path = scoped_rcon_password_path(&root, Some("fixture")).unwrap();
+        fs::write(&path, encode_hex(&encrypt_secret(b"old-password").unwrap())).unwrap();
+        let password = "new-password-!&^\"-\u{1f512}";
+        let encrypted = encrypt_secret(password.as_bytes()).unwrap();
+        let temporary = path.with_extension("tmp");
+        fs::write(&temporary, encode_hex(&encrypted)).unwrap();
+        replace_secret_file(&temporary, &path).unwrap();
+        let saved = decode_hex(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(decrypt_secret(&saved).unwrap(), password.as_bytes());
+        assert!(!temporary.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn workspace_switch_clears_logs_and_rejects_delayed_reader_output() {
+        let manager = FxserverManager::default();
+        append_terminal_line(&manager.terminal, "stdout", "old workspace").unwrap();
+        let generation = manager.terminal.lock().unwrap().generation;
+        manager.prepare_workspace_switch(|| Ok(())).unwrap();
+        append_terminal_generation(
+            &manager.terminal,
+            "stdout",
+            "delayed output",
+            Some(generation),
+        )
+        .unwrap();
+        assert!(manager.terminal.lock().unwrap().entries.is_empty());
+        append_terminal_line(&manager.terminal, "system", "new workspace").unwrap();
+        assert_eq!(manager.terminal.lock().unwrap().entries.len(), 1);
+    }
+
+    #[test]
+    fn health_sampling_skips_busy_lifecycle_without_waiting() {
+        let manager = FxserverManager::default();
+        let _operation = manager.lifecycle.lock().unwrap();
+        assert!(manager
+            .sample_health(&mut HealthResourceSampler::default(), true)
+            .unwrap()
+            .is_none());
+        assert!(manager.prepare_workspace_switch(|| Ok(())).is_err());
+    }
+
+    #[test]
+    fn stop_and_shutdown_disarm_successful_launch_intent() {
+        let manager = FxserverManager::default();
+        let launch = SavedLaunch {
+            artifact_path: "fixture".into(),
+            environment: Vec::new(),
+            server_profile: None,
+        };
+        assert!(manager.remember_launch(launch.clone(), 0).unwrap());
+        let generation = manager.launch_generation().unwrap();
+        assert!(manager.launch_intent.lock().unwrap().expected_running);
+        stop_fxserver_blocking(&manager).unwrap();
+        assert!(!manager.launch_intent.lock().unwrap().expected_running);
+        assert!(!manager.remember_launch(launch.clone(), generation).unwrap());
+        let generation = manager.launch_generation().unwrap();
+        manager.begin_shutdown();
+        assert!(!manager.remember_launch(launch, generation).unwrap());
+        assert!(matches!(
+            manager.recover_last_launch(generation, &AtomicBool::new(true)),
+            RecoveryOutcome::Cancelled
+        ));
+    }
+
+    #[test]
+    fn recovery_requires_explicit_opt_in_and_a_successful_launch() {
+        let manager = FxserverManager::default();
+        assert!(matches!(
+            manager.recover_last_launch(0, &AtomicBool::new(true)),
+            RecoveryOutcome::Cancelled
+        ));
+        assert!(matches!(
+            manager.recover_last_launch(0, &AtomicBool::new(false)),
+            RecoveryOutcome::Cancelled
+        ));
+    }
 
     #[test]
     fn lifecycle_actions_cannot_overlap_across_manager_clones() {

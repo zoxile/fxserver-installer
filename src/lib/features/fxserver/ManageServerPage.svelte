@@ -1,5 +1,6 @@
 <script module lang="ts">
 	import type { FxserverStatus, FxserverTerminalEntry as CachedTerminalEntry, FxserverTerminalSegment as CachedTerminalSegment } from "$lib/modules/fxserver";
+	import type { PreflightReport } from "$lib/modules/diagnostics";
 
 	let status = $state<FxserverStatus>({ running: false });
 	let terminalCommand = $state("");
@@ -10,6 +11,9 @@
 	let error = $state("");
 	let message = $state("");
 	let terminalRevision = $state(0);
+	let cachedWorkspaceRevision = -1;
+	let preflight = $state<PreflightReport | null>(null);
+	let checkingPreflight = $state(false);
 
 	type CachedRenderTerminalSegment = CachedTerminalSegment & {
 		className?: string;
@@ -70,6 +74,9 @@
 	import * as ToggleGroup from "$lib/components/ui/toggle-group/index.js";
 	import { chooseFolder as chooseAnyFolder, chooseInstallFolder } from "$lib/core/selectFolder";
 	import { getInstallPath, loadInstallPath, setInstallPath } from "$lib/core/paths.svelte";
+	import { getWorkspaceId, workspaceSession } from "$lib/core/workspaces.svelte";
+	import { databaseSession } from "$lib/core/databaseSession.svelte";
+	import { runPreflight } from "$lib/modules/diagnostics";
 	import { getInstalledWindowsArtifactInfo, type InstalledArtifactInfo } from "$lib/modules/artifact";
 	import {
 		getFxserverStatus,
@@ -146,6 +153,18 @@
 		},
 	};
 
+	const workspaceId = getWorkspaceId();
+	if (cachedWorkspaceRevision !== workspaceSession.revision) {
+		cachedWorkspaceRevision = workspaceSession.revision;
+		cachedTerminalEntries = [];
+		cachedResourceSamples = [];
+		cachedResourceExtremes = { cpuHigh: null, cpuLow: null, memoryHigh: null, memoryLow: null };
+		status = { running: false };
+		terminalCommand = "";
+		error = "";
+		message = "";
+		preflight = null;
+	}
 	let artifactPath = $state("");
 	let artifact = $state<InstalledArtifactInfo | null>(null);
 	let terminalEntries = $state.raw<RenderTerminalEntry[]>([...cachedTerminalEntries]);
@@ -303,7 +322,7 @@
 
 	async function loadSecureRconPassword() {
 		try {
-			const password = await getSavedFxserverRconPassword();
+			const password = await getSavedFxserverRconPassword(workspaceId);
 			rconPassword = password;
 			lastSavedRconPassword = password;
 		} catch (caught) {
@@ -348,9 +367,9 @@
 
 		try {
 			if (password) {
-				await saveFxserverRconPassword(password);
+				await saveFxserverRconPassword(password, workspaceId);
 			} else {
-				await clearFxserverRconPassword();
+				await clearFxserverRconPassword(workspaceId);
 			}
 			lastSavedRconPassword = password;
 		} catch (caught) {
@@ -597,7 +616,9 @@
 
 		try {
 			saveEnvironment();
-			await startFxserver(launchRequest());
+			const request = launchRequest();
+			await checkReadiness(request, true);
+			await startFxserver(request);
 			terminalRevision += 1;
 			await refreshStatus(false);
 			message = "FXServer started with the selected TXHOST environment.";
@@ -616,7 +637,9 @@
 
 		try {
 			saveEnvironment();
-			await restartFxserver(launchRequest());
+			const request = launchRequest();
+			await checkReadiness(request, false);
+			await restartFxserver(request);
 			terminalRevision += 1;
 			await refreshStatus(false);
 			message = "FXServer restarted with the selected TXHOST environment.";
@@ -645,6 +668,20 @@
 		} finally {
 			stopping = false;
 		}
+	}
+
+	async function checkReadiness(request: ReturnType<typeof launchRequest>, checkPorts: boolean) {
+		checkingPreflight = true;
+		try {
+			preflight = await runPreflight({
+				artifactPath: request.artifactPath,
+				txDataPath: request.environment.find((item) => item.key === "TXHOST_DATA_PATH")?.value ?? "",
+				profile: request.serverProfile ?? "",
+				credentials: databaseSession.credentials ? { ...databaseSession.credentials } : null,
+				checkPorts,
+			});
+			if (preflight.blocking) throw new Error("Preflight found blocking issues. Review the checks before starting FXServer.");
+		} finally { checkingPreflight = false; }
 	}
 
 	function bytes(value?: number | null) {
@@ -801,6 +838,18 @@
 		<Notice tone="error" message={error} onDismiss={() => (error = "")} class="px-4 py-3 text-sm" />
 	{:else if message}
 		<Notice tone="success" {message} onDismiss={() => (message = "")} class="px-4 py-3 text-sm" />
+	{/if}
+	{#if checkingPreflight}
+		<div class="flex items-center gap-2 text-sm text-muted-foreground" role="status"><LoaderCircleIcon class="size-4 animate-spin" />Checking server readiness...</div>
+	{:else if preflight && (preflight.errorCount || preflight.warningCount)}
+		<details class="border-y border-border py-3" open={preflight.blocking}>
+			<summary class="cursor-pointer text-sm font-medium">Preflight: {preflight.errorCount} errors, {preflight.warningCount} warnings</summary>
+			<div class="mt-3 max-h-64 space-y-3 overflow-y-auto">
+				{#each preflight.checks.filter((item) => item.severity === "error" || item.severity === "warning") as check}
+					<div class="border-l-2 border-border pl-3 text-xs"><p class={check.severity === "error" ? "font-medium text-red-300" : "font-medium text-amber-300"}>{check.title}</p><p class="mt-1 break-words text-muted-foreground">{check.detail}</p></div>
+				{/each}
+			</div>
+		</details>
 	{/if}
 
 	<div class="grid gap-4">

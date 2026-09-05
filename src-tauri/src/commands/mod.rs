@@ -1,16 +1,87 @@
 pub mod artifact;
+pub mod backup_manager;
+pub mod diagnostics;
 pub mod fxserver;
+pub mod health;
 pub mod jooat;
 pub mod logs;
 pub mod mariadb;
+pub mod resource_updates;
 pub mod system;
+
+use std::sync::{Condvar, Mutex};
+
+struct BackgroundWork {
+    closing: bool,
+    active: usize,
+}
+
+static BACKGROUND_WORK: Mutex<BackgroundWork> = Mutex::new(BackgroundWork {
+    closing: false,
+    active: 0,
+});
+static BACKGROUND_IDLE: Condvar = Condvar::new();
+
+struct WorkPermit;
+
+impl Drop for WorkPermit {
+    fn drop(&mut self) {
+        let mut work = BACKGROUND_WORK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        work.active = work.active.saturating_sub(1);
+        BACKGROUND_IDLE.notify_all();
+    }
+}
+
+pub(crate) fn begin_shutdown() {
+    BACKGROUND_WORK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .closing = true;
+}
+
+pub(crate) fn require_other_work_idle() -> Result<(), String> {
+    let work = BACKGROUND_WORK
+        .lock()
+        .map_err(|_| "Background work lock is unavailable.".to_string())?;
+    // The workspace-switch command itself owns one permit.
+    if work.active > 1 {
+        return Err("Background operations are still running. Try switching workspaces again when they finish.".into());
+    }
+    Ok(())
+}
+
+pub(crate) fn wait_for_background_work() {
+    let mut work = BACKGROUND_WORK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    while work.active > 0 {
+        work = BACKGROUND_IDLE
+            .wait(work)
+            .unwrap_or_else(|error| error.into_inner());
+    }
+}
 
 pub(crate) async fn run_blocking<T: Send + 'static>(
     task: impl FnOnce() -> Result<T, String> + Send + 'static,
 ) -> Result<T, String> {
-    tauri::async_runtime::spawn_blocking(task)
-        .await
-        .map_err(|error| format!("Background task failed: {error}"))?
+    {
+        let mut work = BACKGROUND_WORK
+            .lock()
+            .map_err(|_| "Background work lock is unavailable.".to_string())?;
+        if work.closing {
+            return Err("The application is shutting down.".into());
+        }
+        work.active += 1;
+    }
+    let permit = WorkPermit;
+    tauri::async_runtime::spawn_blocking(move || {
+        let _permit = permit;
+        task()
+    })
+    .await
+    .map_err(|error| format!("Background task failed: {error}"))?
 }
 
 #[cfg(test)]

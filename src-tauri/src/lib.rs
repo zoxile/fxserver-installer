@@ -85,11 +85,33 @@ pub fn run() {
 
     tauri::Builder::default()
         .manage(commands::fxserver::FxserverManager::default())
+        .manage(commands::backup_manager::BackupManager::default())
+        .manage(commands::health::HealthMonitor::default())
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             commands::artifact::get_windows_artifact_metadata,
             commands::artifact::get_installed_windows_artifact_info,
             commands::artifact::install_windows_artifact,
+            commands::backup_manager::get_backup_manager,
+            commands::backup_manager::save_backup_schedule,
+            commands::backup_manager::remove_backup_schedule,
+            commands::backup_manager::run_scheduled_backup_now,
+            commands::backup_manager::preview_backup_restore,
+            commands::backup_manager::restore_backup_snapshot,
+            commands::diagnostics::run_fxserver_preflight,
+            commands::diagnostics::preview_diagnostic_export,
+            commands::diagnostics::export_diagnostic_zip,
+            commands::health::get_health_status,
+            commands::health::configure_health,
+            commands::health::clear_health_events,
+            commands::health::prepare_workspace_switch,
+            commands::health::initialize_health_workspace,
+            commands::resource_updates::preview_resource_update,
+            commands::resource_updates::apply_resource_update,
+            commands::resource_updates::discard_resource_preview,
+            commands::resource_updates::list_resource_snapshots,
+            commands::resource_updates::rollback_resource_update,
+            commands::resource_updates::delete_resource_snapshot,
             commands::fxserver::get_fxserver_status,
             commands::fxserver::get_fxserver_terminal,
             commands::fxserver::get_fxserver_rcon_password,
@@ -104,7 +126,6 @@ pub fn run() {
             commands::fxserver::start_fxserver,
             commands::fxserver::stop_fxserver,
             commands::fxserver::restart_fxserver,
-            commands::fxserver::update_github_resource,
             commands::fxserver::clear_fxserver_rcon_password,
             commands::jooat::get_jooat_resolver_status,
             commands::jooat::prepare_jooat_resolver_database,
@@ -146,6 +167,16 @@ pub fn run() {
                 )?;
             }
             setup_system_tray(app)?;
+            app.state::<commands::backup_manager::BackupManager>()
+                .start(app.handle().clone());
+            app.state::<commands::health::HealthMonitor>()
+                .start(
+                    app.state::<commands::fxserver::FxserverManager>()
+                        .inner()
+                        .clone(),
+                    app.handle().clone(),
+                )
+                .map_err(std::io::Error::other)?;
             spawn_activation_signal_watcher(app.handle().clone());
             Ok(())
         })
@@ -231,12 +262,25 @@ fn request_app_quit<R: Runtime>(app: &tauri::AppHandle<R>) {
         return;
     }
 
+    commands::begin_shutdown();
+    app.state::<commands::fxserver::FxserverManager>()
+        .begin_shutdown();
+
     hide_main_window(app);
     hide_tray_icon(app);
 
     let app = app.clone();
     thread::spawn(move || {
+        let health = app.state::<commands::health::HealthMonitor>();
+        let backups = app.state::<commands::backup_manager::BackupManager>();
+        health.stop(&app.state::<commands::fxserver::FxserverManager>());
+        backups.stop();
+        health.wait_stopped();
         stop_managed_fxserver(&app);
+        commands::wait_for_background_work();
+        if let Err(error) = backups.stop_and_wait() {
+            eprintln!("Backup shutdown failed: {error}");
+        }
         app.exit(0);
     });
 }

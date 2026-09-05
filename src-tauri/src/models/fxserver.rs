@@ -185,20 +185,3 @@ pub struct FxserverResourceInfo {
     pub version: Option<String>,
     pub repository: Option<String>,
 }
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ResourceUpdateRequest {
-    pub resource_path: String,
-    pub repository: String,
-    pub branch: String,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ResourceUpdateResult {
-    pub resource_path: String,
-    pub repository: String,
-    pub branch: String,
-    pub updated_at: String,
-}
