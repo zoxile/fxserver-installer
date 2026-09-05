@@ -38,7 +38,7 @@
 				<div class="min-w-0">
 					<Card.Title>Install Configuration</Card.Title>
 					<Card.Description>
-						Installing {packageInfo?.latestVersion ? `MariaDB ${packageInfo.latestVersion}` : "the recommended MariaDB package"} from winget.
+						{packageInfo?.latestVersion ? `MariaDB ${packageInfo.latestVersion}` : "Latest stable MariaDB"} - official Windows MSI.
 					</Card.Description>
 				</div>
 			</div>
@@ -53,7 +53,7 @@
 		<div class="grid gap-3 md:grid-cols-3">
 			<div class="rounded-sm border border-border bg-background px-3 py-2">
 				<p class="text-xs text-muted-foreground">Recommended Version</p>
-				<p class="mt-1 font-semibold">{packageInfo?.latestVersion || "Checking..."}</p>
+				<p class="mt-1 font-semibold">{packageInfo?.latestVersion || (packageInfo ? "Unavailable" : "Checking...")}</p>
 			</div>
 			<div class="rounded-sm border border-border bg-background px-3 py-2 md:col-span-2">
 				<p class="text-xs text-muted-foreground">Install Progress</p>

@@ -1,6 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
 import { downloadDir } from "@tauri-apps/api/path";
+import { listen } from "@tauri-apps/api/event";
 import { log } from "$lib/core/logger.svelte";
+import { mariadbActivity } from "$lib/core/mariadbActivity.svelte";
 
 export interface MariaDBStatus {
 	installed: boolean;
@@ -192,7 +194,30 @@ export function getMariaDBStatus(force = false) {
 
 export function installMariaDB(options: MariaDBInstallOptions) {
 	if (!hasTauriRuntime()) return unavailableOutsideTauri<string>();
-	return invokeMariaDB<string>("install_mariadb", { options }, "MariaDB install", (output) => output.trim() || "MariaDB installer finished.");
+	return runInstaller("install_mariadb", { options }, "MariaDB install");
+}
+
+async function runInstaller(command: string, args: Record<string, unknown>, action: string) {
+	if (mariadbActivity.busy) throw new Error("A MariaDB installation action is already running.");
+	mariadbActivity.busy = true;
+	mariadbActivity.stage = `${action} is preparing...`;
+	let unlisten: (() => void) | undefined;
+	try {
+		unlisten = await listen<string>("mariadb-progress", ({ payload }) => {
+			mariadbActivity.stage = payload;
+			log(payload, { scope: "mariadb.install" });
+		});
+		const result = await invokeMariaDB<string>(command, args, action, (output) => output.trim() || `${action} completed.`);
+		cachedStatus = null;
+		mariadbActivity.stage = result;
+		return result;
+	} catch (error) {
+		mariadbActivity.stage = errorMessage(error);
+		throw error;
+	} finally {
+		unlisten?.();
+		mariadbActivity.busy = false;
+	}
 }
 
 export function getMariaDBPackageInfo() {
@@ -208,12 +233,12 @@ export function getMariaDBPackageInfo() {
 
 export function uninstallMariaDB() {
 	if (!hasTauriRuntime()) return unavailableOutsideTauri<string>();
-	return invokeMariaDB<string>("uninstall_mariadb", {}, "MariaDB uninstall", (output) => output.trim() || "MariaDB uninstalled.");
+	return runInstaller("uninstall_mariadb", {}, "MariaDB uninstall");
 }
 
 export function updateMariaDB() {
 	if (!hasTauriRuntime()) return unavailableOutsideTauri<string>();
-	return invokeMariaDB<string>("update_mariadb", {}, "MariaDB update", (output) => output.trim() || "MariaDB update finished.");
+	return runInstaller("update_mariadb", {}, "MariaDB update");
 }
 
 export function startMariaDBService(serviceName?: string | null) {

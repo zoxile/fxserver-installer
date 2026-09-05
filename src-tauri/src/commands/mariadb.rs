@@ -1,3 +1,6 @@
+use std::sync::Mutex;
+use tauri::{AppHandle, Emitter};
+
 use crate::{
     models::mariadb::{
         MariaDBBackupOptions, MariaDBBackupResult, MariaDBCredentials, MariaDBInstallOptions,
@@ -21,16 +24,34 @@ use crate::{
     },
 };
 
-#[tauri::command]
-pub fn get_mariadb_status() -> MariaDBStatus {
-    detect_mariadb()
+static INSTALLER: Mutex<()> = Mutex::new(());
+
+async fn run_installer(
+    app: AppHandle,
+    task: impl FnOnce(&dyn Fn(&str)) -> Result<String, String> + Send + 'static,
+) -> Result<String, String> {
+    super::run_blocking(move || {
+        let _guard = INSTALLER
+            .try_lock()
+            .map_err(|_| "A MariaDB installation action is already running.".to_string())?;
+        task(&|stage| {
+            let _ = app.emit("mariadb-progress", stage);
+        })
+    })
+    .await
 }
 
 #[tauri::command]
-pub async fn install_mariadb(options: MariaDBInstallOptions) -> Result<String, String> {
-    tauri::async_runtime::spawn_blocking(move || install_mariadb_service(options))
-        .await
-        .map_err(|error| format!("MariaDB install task failed: {error}"))?
+pub async fn get_mariadb_status() -> Result<MariaDBStatus, String> {
+    super::run_blocking(|| Ok(detect_mariadb())).await
+}
+
+#[tauri::command]
+pub async fn install_mariadb(
+    app: AppHandle,
+    options: MariaDBInstallOptions,
+) -> Result<String, String> {
+    run_installer(app, move |report| install_mariadb_service(options, report)).await
 }
 
 #[tauri::command]
@@ -41,117 +62,131 @@ pub async fn get_mariadb_package_info() -> Result<MariaDBPackageInfo, String> {
 }
 
 #[tauri::command]
-pub async fn uninstall_mariadb() -> Result<String, String> {
-    tauri::async_runtime::spawn_blocking(uninstall_mariadb_service)
-        .await
-        .map_err(|error| format!("MariaDB uninstall task failed: {error}"))?
+pub async fn uninstall_mariadb(app: AppHandle) -> Result<String, String> {
+    run_installer(app, |report| uninstall_mariadb_service(report)).await
 }
 
 #[tauri::command]
-pub async fn update_mariadb() -> Result<String, String> {
-    tauri::async_runtime::spawn_blocking(update_mariadb_service)
-        .await
-        .map_err(|error| format!("MariaDB update task failed: {error}"))?
+pub async fn update_mariadb(app: AppHandle) -> Result<String, String> {
+    run_installer(app, |report| update_mariadb_service(report)).await
 }
 
 #[tauri::command]
-pub fn start_mariadb_service(service_name: Option<String>) -> Result<MariaDBStatus, String> {
-    start_service(service_name)?;
-    Ok(detect_mariadb())
+pub async fn start_mariadb_service(service_name: Option<String>) -> Result<MariaDBStatus, String> {
+    super::run_blocking(move || {
+        start_service(service_name)?;
+        Ok(detect_mariadb())
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn stop_mariadb_service(service_name: Option<String>) -> Result<MariaDBStatus, String> {
-    stop_service(service_name)?;
-    Ok(detect_mariadb())
+pub async fn stop_mariadb_service(service_name: Option<String>) -> Result<MariaDBStatus, String> {
+    super::run_blocking(move || {
+        stop_service(service_name)?;
+        Ok(detect_mariadb())
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn restart_mariadb_service(service_name: Option<String>) -> Result<MariaDBStatus, String> {
-    restart_service(service_name)?;
-    Ok(detect_mariadb())
+pub async fn restart_mariadb_service(
+    service_name: Option<String>,
+) -> Result<MariaDBStatus, String> {
+    super::run_blocking(move || {
+        restart_service(service_name)?;
+        Ok(detect_mariadb())
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn execute_mariadb_query(
+pub async fn execute_mariadb_query(
     credentials: MariaDBCredentials,
     query: String,
 ) -> Result<MariaDBQueryResult, String> {
-    execute_query(credentials, query)
+    super::run_blocking(move || execute_query(credentials, query)).await
 }
 
 #[tauri::command]
-pub fn validate_mariadb_credentials(credentials: MariaDBCredentials) -> Result<(), String> {
-    validate_connection(credentials)
+pub async fn validate_mariadb_credentials(credentials: MariaDBCredentials) -> Result<(), String> {
+    super::run_blocking(move || validate_connection(credentials)).await
 }
 
 #[tauri::command]
-pub fn list_mariadb_databases(credentials: MariaDBCredentials) -> Result<Vec<String>, String> {
-    list_databases(credentials)
+pub async fn list_mariadb_databases(
+    credentials: MariaDBCredentials,
+) -> Result<Vec<String>, String> {
+    super::run_blocking(move || list_databases(credentials)).await
 }
 
 #[tauri::command]
-pub fn list_mariadb_tables(
+pub async fn list_mariadb_tables(
     credentials: MariaDBCredentials,
     database: String,
 ) -> Result<Vec<String>, String> {
-    list_tables(credentials, database)
+    super::run_blocking(move || list_tables(credentials, database)).await
 }
 
 #[tauri::command]
-pub fn backup_mariadb(
+pub async fn backup_mariadb(
     credentials: MariaDBCredentials,
     options: MariaDBBackupOptions,
 ) -> Result<MariaDBBackupResult, String> {
-    create_backup(credentials, options)
+    super::run_blocking(move || create_backup(credentials, options)).await
 }
 
 #[tauri::command]
-pub fn save_mariadb_user(
+pub async fn save_mariadb_user(
     credentials: MariaDBCredentials,
     config: MariaDBUserConfig,
 ) -> Result<(), String> {
-    create_or_update_user(credentials, config)
+    super::run_blocking(move || create_or_update_user(credentials, config)).await
 }
 
 #[tauri::command]
-pub fn list_mariadb_users(credentials: MariaDBCredentials) -> Result<Vec<MariaDBUser>, String> {
-    list_users(credentials)
+pub async fn list_mariadb_users(
+    credentials: MariaDBCredentials,
+) -> Result<Vec<MariaDBUser>, String> {
+    super::run_blocking(move || list_users(credentials)).await
 }
 
 #[tauri::command]
-pub fn update_mariadb_user(
+pub async fn update_mariadb_user(
     credentials: MariaDBCredentials,
     config: MariaDBUserUpdateConfig,
 ) -> Result<(), String> {
-    update_user(credentials, config)
+    super::run_blocking(move || update_user(credentials, config)).await
 }
 
 #[tauri::command]
-pub fn get_mariadb_user_access(
+pub async fn get_mariadb_user_access(
     credentials: MariaDBCredentials,
     username: String,
     host: String,
 ) -> Result<MariaDBUserAccess, String> {
-    get_user_access(credentials, username, host)
+    super::run_blocking(move || get_user_access(credentials, username, host)).await
 }
 
 #[tauri::command]
-pub fn grant_mariadb_permissions(
+pub async fn grant_mariadb_permissions(
     credentials: MariaDBCredentials,
     username: String,
     host: String,
     database: String,
     privileges: Vec<String>,
 ) -> Result<(), String> {
-    grant_permissions(credentials, username, host, database, privileges)
+    super::run_blocking(move || {
+        grant_permissions(credentials, username, host, database, privileges)
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn delete_mariadb_user(
+pub async fn delete_mariadb_user(
     credentials: MariaDBCredentials,
     username: String,
     host: String,
 ) -> Result<(), String> {
-    drop_user(credentials, username, host)
+    super::run_blocking(move || drop_user(credentials, username, host)).await
 }

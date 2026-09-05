@@ -139,6 +139,10 @@ The wizard is a guide, not a lock. You can still open each full panel directly f
 
 Use Manage MariaDB to install, update, uninstall, inspect, and manage the database server.
 
+MariaDB installation and updates download the official Windows x64 MSI over HTTPS and verify its SHA-256 checksum before running it. They do not require winget or Microsoft Store, including on Windows Server. Internet access to MariaDB's download service and mirrors is required. The app requests administrator permission when installing binaries or configuring services; it does not need to run elevated for normal use.
+
+Installation stages appear in Manage MariaDB and Application Logs. You can switch tabs during an operation and return to see progress. FXServer start, stop, restart, and RCON commands also run in the background. A restart completes the stop before launching the server again, and overlapping lifecycle actions are rejected.
+
 Recommended order:
 
 1. Back up existing databases.

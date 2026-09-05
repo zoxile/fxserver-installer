@@ -18,11 +18,15 @@ use crate::{
 
 const INSTALL_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 
-pub fn install_mariadb(options: MariaDBInstallOptions) -> Result<String, String> {
+pub fn install_mariadb(
+    options: MariaDBInstallOptions,
+    report: &dyn Fn(&str),
+) -> Result<String, String> {
+    report("Checking installation settings and preserved data.");
     let log_path = installer_log_path();
     let install_plan = build_install_plan(&options)?;
     let override_args = build_msi_overrides(&options, &install_plan, &log_path)?;
-    let output = run_winget_install(&override_args, INSTALL_TIMEOUT, false)?;
+    let output = run_msi_install(&override_args, report)?;
 
     if output.success {
         let installer_message = if output.stdout.is_empty() {
@@ -31,17 +35,24 @@ pub fn install_mariadb(options: MariaDBInstallOptions) -> Result<String, String>
             output.stdout
         };
         let plan_message = match &install_plan {
-            InstallPlan::Fresh => Some(initialize_fresh_database(&options)?),
+            InstallPlan::Fresh => {
+                report("Initializing the database and Windows service. Approve the app's administrator prompt if requested.");
+                Some(initialize_fresh_database(&options)?)
+            }
             InstallPlan::Reattach {
                 data_dir,
                 install_dir,
-            } => Some(reattach_preserved_data(&options, install_dir, data_dir)?),
+            } => {
+                report("Reconnecting preserved database files and configuring the Windows service. Approve the app's administrator prompt if requested.");
+                Some(reattach_preserved_data(&options, install_dir, data_dir)?)
+            }
         };
 
         if let Some(detected_message) = wait_for_install_detection(Duration::from_secs(45)) {
             let plan_message = plan_message
                 .map(|message| format!("\n{message}"))
                 .unwrap_or_default();
+            report("Checking the service and database credentials.");
             let validation_message = install_validation_message(&options, &install_plan)?;
             Ok(format!(
                 "{installer_message}{plan_message}{validation_message}\n{detected_message}\nInstaller log: {}",
@@ -49,7 +60,7 @@ pub fn install_mariadb(options: MariaDBInstallOptions) -> Result<String, String>
             ))
         } else {
             Err(format!(
-                "{installer_message}\nWinget reported success, but MariaDB was not detected after the installer exited. Windows Installer may still be running in the background; close any stuck msiexec/MariaDB installer process and try again.\nInstaller log: {}",
+                "{installer_message}\nWindows Installer reported success, but MariaDB was not detected after installation. Check the installer log before retrying.\nInstaller log: {}",
                 log_path.display()
             ))
         }
@@ -64,7 +75,9 @@ pub fn install_mariadb(options: MariaDBInstallOptions) -> Result<String, String>
 }
 
 pub fn get_package_info() -> MariaDBPackageInfo {
-    let latest_version = winget_latest_version();
+    let latest_version = super::package::latest_package()
+        .ok()
+        .map(|package| package.version);
     let installed_package_version = registry_installed_package()
         .and_then(|package| package.version)
         .or_else(|| detect_mariadb().version);
@@ -80,7 +93,8 @@ pub fn get_package_info() -> MariaDBPackageInfo {
     }
 }
 
-pub fn uninstall_mariadb() -> Result<String, String> {
+pub fn uninstall_mariadb(report: &dyn Fn(&str)) -> Result<String, String> {
+    report("Checking the installed package and preserving HeidiSQL if needed.");
     let service_name = find_service_name().unwrap_or_else(|| "MariaDB".to_string());
     let package = match registry_installed_package() {
         Some(package) => package,
@@ -97,6 +111,7 @@ pub fn uninstall_mariadb() -> Result<String, String> {
         "MariaDB product code was not found in Windows uninstall registry.".to_string()
     })?;
     let log_path = installer_log_path();
+    report("Removing MariaDB binaries while keeping database files. Approve the app's administrator prompt if requested.");
     let output =
         run_elevated_mariadb_uninstall(&product_code, &service_name, &log_path, INSTALL_TIMEOUT)?;
 
@@ -128,11 +143,11 @@ pub fn uninstall_mariadb() -> Result<String, String> {
     }
 }
 
-pub fn update_mariadb() -> Result<String, String> {
+pub fn update_mariadb(report: &dyn Fn(&str)) -> Result<String, String> {
     let before = get_package_info().installed_package_version;
     let log_path = installer_log_path();
     let override_args = build_update_overrides(&log_path);
-    let output = run_winget_install(&override_args, INSTALL_TIMEOUT, true)?;
+    let output = run_msi_install(&override_args, report)?;
 
     if !output.success {
         let detail = if output.stderr.is_empty() {
@@ -143,8 +158,19 @@ pub fn update_mariadb() -> Result<String, String> {
         return Err(format!("{detail}\nInstaller log: {}", log_path.display()));
     }
 
+    report("Checking the installed MariaDB version.");
     let after = wait_for_package_version_change(before.as_deref(), Duration::from_secs(60))
         .or_else(|| get_package_info().installed_package_version);
+    if after.as_deref().map_or(true, |version| {
+        before
+            .as_deref()
+            .is_some_and(|old| !compare_versions(old, version).is_lt())
+    }) {
+        return Err(format!(
+            "MariaDB's installed version did not change. Check the MSI log before retrying: {}",
+            log_path.display()
+        ));
+    }
 
     Ok(format!(
         "{}\nDetected MariaDB version: {}\nInstaller log: {}",
@@ -158,39 +184,53 @@ pub fn update_mariadb() -> Result<String, String> {
     ))
 }
 
-struct InstallOutput {
-    success: bool,
-    stdout: String,
-    stderr: String,
+pub(super) struct InstallOutput {
+    pub success: bool,
+    pub stdout: String,
+    pub stderr: String,
 }
 
-fn run_winget_install(
-    override_args: &str,
+fn run_msi_install(override_args: &str, report: &dyn Fn(&str)) -> Result<InstallOutput, String> {
+    report("Resolving the latest stable MariaDB Windows installer.");
+    let package = super::package::latest_package()?;
+    let path = installer_log_path().with_extension("msi");
+    let result = (|| {
+        report(&format!(
+            "Downloading MariaDB {} and verifying its SHA-256 checksum.",
+            package.version
+        ));
+        let download = super::package::download_package(&package, &path)?;
+        if !download.success {
+            return Err(format!("MariaDB download failed: {}", download.stderr));
+        }
+        report(&format!("MariaDB {} verified. Installing binaries; approve the app's administrator prompt if requested.", package.version));
+        let arguments = format!("/i {} {override_args}", quote_arg(&path.to_string_lossy()))
+            .replace('\'', "''");
+        let verify = super::package::verify_checksum_script(&path, &package.sha256);
+        let script = format!(
+            r#"$ErrorActionPreference = 'Stop'
+try {{
+    {verify}
+    $process = Start-Process -WindowStyle Hidden -FilePath 'msiexec.exe' -ArgumentList '{arguments}' -Wait -PassThru
+    if ($process.ExitCode -in @(0, 1641, 3010)) {{ exit 0 }}
+    exit $process.ExitCode
+}} catch {{
+    [Console]::Error.WriteLine($_.Exception.Message)
+    exit 1
+}}
+"#
+        );
+        run_elevated_powershell_script("mariadb-install", &script, INSTALL_TIMEOUT)
+    })();
+    let _ = fs::remove_file(path);
+    result
+}
+
+pub(super) fn run_process(
+    command: &str,
+    args: &[&str],
     timeout: Duration,
-    force: bool,
 ) -> Result<InstallOutput, String> {
-    let mut args = vec![
-        "install",
-        "--id",
-        "MariaDB.Server",
-        "-e",
-        "--silent",
-        "--source",
-        "winget",
-        "--disable-interactivity",
-        "--accept-package-agreements",
-        "--accept-source-agreements",
-        "--override",
-        override_args,
-    ];
-    if force {
-        args.push("--force");
-    }
-
-    run_process("winget", &args, timeout)
-}
-
-fn run_process(command: &str, args: &[&str], timeout: Duration) -> Result<InstallOutput, String> {
     let mut child = Command::new(command)
         .no_window()
         .args(args)
@@ -199,21 +239,22 @@ fn run_process(command: &str, args: &[&str], timeout: Duration) -> Result<Instal
         .spawn()
         .map_err(|error| format!("Failed to start {command}: {error}"))?;
 
+    let stdout = drain_output(child.stdout.take().expect("piped stdout"));
+    let stderr = drain_output(child.stderr.take().expect("piped stderr"));
     let started = Instant::now();
     loop {
         if let Some(status) = child
             .try_wait()
-            .map_err(|error| format!("Failed to wait for winget: {error}"))?
+            .map_err(|error| format!("Failed to wait for {command}: {error}"))?
         {
-            let mut stdout = String::new();
-            let mut stderr = String::new();
-            if let Some(mut stream) = child.stdout.take() {
-                let _ = stream.read_to_string(&mut stdout);
+            let stdout = stdout.join().unwrap_or_default();
+            let mut stderr = stderr.join().unwrap_or_default();
+            if !status.success() && stderr.is_empty() {
+                stderr = format!(
+                    "{command} exited with code {}.",
+                    status.code().unwrap_or(-1)
+                );
             }
-            if let Some(mut stream) = child.stderr.take() {
-                let _ = stream.read_to_string(&mut stderr);
-            }
-
             return Ok(InstallOutput {
                 success: status.success(),
                 stdout: stdout.trim().to_string(),
@@ -225,13 +266,28 @@ fn run_process(command: &str, args: &[&str], timeout: Duration) -> Result<Instal
             let _ = child.kill();
             let _ = child.wait();
             return Err(format!(
-                "MariaDB installer did not finish within {} minutes. Windows Installer may still be waiting for an elevated msiexec prompt; close any MariaDB installer windows and try again.",
-                timeout.as_secs() / 60
+                "{command} did not finish within {} seconds. Check for an administrator prompt or installer window before retrying.",
+                timeout.as_secs()
             ));
         }
 
-        thread::sleep(Duration::from_millis(500));
+        thread::sleep(Duration::from_millis(100));
     }
+}
+
+fn drain_output(mut stream: impl Read + Send + 'static) -> thread::JoinHandle<String> {
+    thread::spawn(move || {
+        let mut output = Vec::new();
+        let mut buffer = [0; 8192];
+        while let Ok(size) = stream.read(&mut buffer) {
+            if size == 0 {
+                break;
+            }
+            let keep = size.min((1024 * 1024_usize).saturating_sub(output.len()));
+            output.extend_from_slice(&buffer[..keep]);
+        }
+        String::from_utf8_lossy(&output).trim().to_string()
+    })
 }
 
 fn run_elevated_mariadb_uninstall(
@@ -295,14 +351,17 @@ fn run_script_via_elevated_app(
 ) -> Result<InstallOutput, String> {
     let app_path = env::current_exe()
         .map_err(|error| format!("Failed to resolve app executable for elevation: {error}"))?;
-    let app_path = app_path.to_string_lossy().replace('\'', "''");
-    let script_path = script_path.to_string_lossy().replace('\'', "''");
-    let helper_arg = crate::ELEVATED_SCRIPT_ARG.replace('\'', "''");
-    let command = format!(
-        "$process = Start-Process -FilePath '{app_path}' -ArgumentList @('{helper_arg}', '{script_path}') -Verb RunAs -WindowStyle Hidden -Wait -PassThru; exit $process.ExitCode"
-    );
-
+    let command = elevation_command(&app_path, script_path);
     run_process("powershell", &["-NoProfile", "-Command", &command], timeout)
+}
+
+fn elevation_command(app_path: &Path, script_path: &Path) -> String {
+    let app_path = app_path.to_string_lossy().replace('\'', "''");
+    let script_path = quote_arg(&script_path.to_string_lossy()).replace('\'', "''");
+    let helper_arg = crate::ELEVATED_SCRIPT_ARG.replace('\'', "''");
+    format!(
+        "$ErrorActionPreference = 'Stop'; try {{ $process = Start-Process -FilePath '{app_path}' -ArgumentList @('{helper_arg}', '{script_path}') -Verb RunAs -WindowStyle Hidden -Wait -PassThru; exit $process.ExitCode }} catch {{ [Console]::Error.WriteLine($_.Exception.Message); exit 1 }}"
+    )
 }
 
 fn wait_for_install_detection(timeout: Duration) -> Option<String> {
@@ -546,27 +605,15 @@ fn build_msi_overrides(
         "/norestart".to_string(),
         "/l*v".to_string(),
         quote_arg(&log_path.to_string_lossy()),
-        format!(
-            "ADDLOCAL={}",
-            selected_features(options, install_plan).join(",")
-        ),
+        format!("ADDLOCAL={}", selected_features(options).join(",")),
     ];
 
-    if matches!(install_plan, InstallPlan::Fresh) {
-        push_property_bool(
-            &mut properties,
-            "STDCONFIG",
-            options.optimize_for_transactions,
-        );
-        push_property_bool(&mut properties, "UTF8", options.use_utf8);
-    } else {
-        push_property_bool(
-            &mut properties,
-            "STDCONFIG",
-            options.optimize_for_transactions,
-        );
-        push_property_bool(&mut properties, "UTF8", options.use_utf8);
-    }
+    push_property_bool(
+        &mut properties,
+        "STDCONFIG",
+        options.optimize_for_transactions,
+    );
+    push_property_bool(&mut properties, "UTF8", options.use_utf8);
 
     match install_plan {
         InstallPlan::Fresh => {
@@ -1389,14 +1436,8 @@ fn ini_section_range(lines: &[String], section: &str) -> Option<(usize, usize)> 
     section_start.map(|start| (start, next_section))
 }
 
-fn selected_features(
-    options: &MariaDBInstallOptions,
-    install_plan: &InstallPlan,
-) -> Vec<&'static str> {
-    let mut features = match install_plan {
-        InstallPlan::Fresh => vec!["Client", "MYSQLSERVER", "SharedLibraries"],
-        InstallPlan::Reattach { .. } => vec!["Client", "MYSQLSERVER", "SharedLibraries"],
-    };
+fn selected_features(options: &MariaDBInstallOptions) -> Vec<&'static str> {
+    let mut features = vec!["Client", "MYSQLSERVER", "SharedLibraries"];
     if options.install_heidi_sql {
         features.push("HeidiSQL");
     }
@@ -1454,27 +1495,6 @@ fn registry_installed_package() -> Option<RegistryPackage> {
     })
 }
 
-fn winget_latest_version() -> Option<String> {
-    let output = Command::new("winget")
-        .no_window()
-        .args(["show", "--id", "MariaDB.Server", "-e", "--source", "winget"])
-        .output()
-        .ok()?;
-
-    if !output.status.success() {
-        return None;
-    }
-
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .find_map(|line| {
-            line.trim()
-                .strip_prefix("Version:")
-                .map(|value| value.trim().to_string())
-        })
-        .filter(|value| !value.is_empty())
-}
-
 fn compare_versions(left: &str, right: &str) -> std::cmp::Ordering {
     let left_parts = numeric_version_parts(left);
     let right_parts = numeric_version_parts(right);
@@ -1516,6 +1536,55 @@ fn extract_json_string(json: &str, key: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cancelled_elevation_is_not_reported_as_success() {
+        let command = elevation_command(
+            Path::new("C:/Program Files/FXServer Installer/app.exe"),
+            Path::new("C:/Users/Test User/Temp/install.ps1"),
+        );
+        assert!(command.contains("'\"C:/Users/Test User/Temp/install.ps1\"'"));
+        let script = format!(
+            "function Start-Process {{ throw 'Administrator prompt cancelled' }}\n{command}"
+        );
+        let result = run_process(
+            "powershell",
+            &["-NoProfile", "-Command", &script],
+            Duration::from_secs(15),
+        )
+        .unwrap();
+        assert!(!result.success);
+        assert!(result.stderr.contains("Administrator prompt cancelled"));
+    }
+
+    #[test]
+    fn process_output_is_drained_and_bounded_without_deadlocking() {
+        let output = run_process(
+            "powershell",
+            &[
+                "-NoProfile",
+                "-Command",
+                "[Console]::Out.Write(('x' * 2097152)); [Console]::Error.Write(('y' * 2097152))",
+            ],
+            Duration::from_secs(15),
+        )
+        .unwrap();
+        assert!(output.success);
+        assert_eq!(output.stdout.len(), 1024 * 1024);
+        assert_eq!(output.stderr.len(), 1024 * 1024);
+    }
+
+    #[test]
+    fn process_errors_include_exit_codes() {
+        let output = run_process(
+            "powershell",
+            &["-NoProfile", "-Command", "exit 1603"],
+            Duration::from_secs(15),
+        )
+        .unwrap();
+        assert!(!output.success);
+        assert!(output.stderr.contains("1603"));
+    }
 
     fn options() -> MariaDBInstallOptions {
         MariaDBInstallOptions {

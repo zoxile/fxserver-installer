@@ -1,3 +1,12 @@
+<script module lang="ts">
+	import type { MariaDBPackageInfo, MariaDBStatus } from "$lib/modules/mariadb";
+	let status = $state<MariaDBStatus | null>(null);
+	let packageInfo = $state<MariaDBPackageInfo | null>(null);
+	let activeTasks = $state(0);
+	let message = $state("");
+	let error = $state("");
+</script>
+
 <script lang="ts">
 	import { onMount, tick } from "svelte";
 	import LoaderCircleIcon from "@lucide/svelte/icons/loader-circle";
@@ -10,6 +19,7 @@
 	import { Notice } from "$lib/components/ui/notice/index.js";
 	import { databaseSession, rememberDatabaseCredentials } from "$lib/core/databaseSession.svelte";
 	import { log } from "$lib/core/logger.svelte";
+	import { mariadbActivity } from "$lib/core/mariadbActivity.svelte";
 	import {
 		deleteMariaDBUser,
 		getMariaDBPackageInfo,
@@ -28,18 +38,12 @@
 		validateMariaDBCredentials,
 		type MariaDBCredentials,
 		type MariaDBInstallOptions,
-		type MariaDBPackageInfo,
-		type MariaDBStatus,
 		type MariaDBUser,
 		type MariaDBUserAccess,
 	} from "$lib/modules/mariadb";
 
-	let status = $state<MariaDBStatus | null>(null);
-	let packageInfo = $state<MariaDBPackageInfo | null>(null);
-	let busy = $state(false);
-	let message = $state("");
-	let error = $state("");
-	let installStage = $state("");
+	let busy = $derived(activeTasks > 0 || mariadbActivity.busy);
+	let installStage = $derived(mariadbActivity.stage);
 	let backupWarningDismissed = $state(false);
 	let credentialsReady = $state(false);
 	let connectionError = $state("");
@@ -101,7 +105,7 @@
 	});
 
 	async function runTask<T>(task: () => Promise<T>, success: string, after?: (value: T) => void) {
-		busy = true;
+		activeTasks += 1;
 		error = "";
 		message = "";
 		await tick();
@@ -115,12 +119,12 @@
 			error = caught instanceof Error ? caught.message : String(caught);
 			log("MariaDB panel task failed.", { level: "error", scope: "mariadb.ui", detail: error });
 		} finally {
-			busy = false;
+			activeTasks -= 1;
 		}
 	}
 
 	function setStage(stage: string) {
-		installStage = stage;
+		mariadbActivity.stage = stage;
 		if (stage) log(stage, { scope: "mariadb.ui" });
 	}
 
