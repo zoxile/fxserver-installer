@@ -148,6 +148,161 @@ fn missing_started_dependencies_and_duplicates_block_start() {
         .any(|check| check.code == "dependency-missing" && check.detail.contains("/onesync")));
 }
 
+#[cfg(windows)]
+fn link_directory(target: &Path, link: &Path) {
+    let output = Command::new("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-Command",
+            "$ErrorActionPreference = 'Stop'; New-Item -ItemType Junction -Path $env:FXSI_TEST_LINK -Target $env:FXSI_TEST_TARGET | Out-Null"])
+        .env("FXSI_TEST_LINK", link)
+        .env("FXSI_TEST_TARGET", target)
+        .no_window()
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[cfg(unix)]
+fn link_directory(target: &Path, link: &Path) {
+    std::os::unix::fs::symlink(target, link).unwrap();
+}
+
+#[test]
+fn linked_resources_and_groups_keep_their_aliases_and_support_resource_configs() {
+    let fixture = Fixture::new();
+    let shared = fixture.root.join("shared");
+    fs::create_dir_all(shared.join("actual-job")).unwrap();
+    fs::create_dir_all(shared.join("group/library")).unwrap();
+    fs::write(
+        shared.join("actual-job/fxmanifest.lua"),
+        "dependency 'library'",
+    )
+    .unwrap();
+    fs::write(shared.join("actual-job/settings.cfg"), "ensure library").unwrap();
+    fs::write(
+        shared.join("group/library/fxmanifest.lua"),
+        "fx_version 'cerulean'",
+    )
+    .unwrap();
+    fs::create_dir(fixture.root.join("data/resources/[jobs]")).unwrap();
+    link_directory(
+        &shared.join("actual-job"),
+        &fixture.root.join("data/resources/[jobs]/job"),
+    );
+    link_directory(
+        &shared.join("actual-job"),
+        &fixture.root.join("data/resources/second-alias"),
+    );
+    link_directory(
+        &shared.join("group"),
+        &fixture.root.join("data/resources/[shared]"),
+    );
+    fs::write(
+        fixture.root.join("data/server.cfg"),
+        "exec @job/settings.cfg\nensure [jobs]\nensure [shared]\nensure second-alias",
+    )
+    .unwrap();
+
+    let inspection = inspect(&fixture.request());
+    assert!(!report(&inspection).blocking);
+    assert_eq!(inspection.resources.len(), 3);
+    assert_eq!(inspection.configs.len(), 2);
+    assert!(inspection
+        .resources
+        .iter()
+        .any(|item| item.name == "job" && item.groups == ["[jobs]"]));
+    assert!(inspection
+        .resources
+        .iter()
+        .any(|item| item.name == "second-alias"));
+    assert!(config_target(
+        "@job/../outside.cfg",
+        &fixture.root.join("data"),
+        &inspection.resources
+    )
+    .is_none());
+    assert!(config_target(
+        &shared.join("actual-job/settings.cfg").to_string_lossy(),
+        &fixture.root.join("data"),
+        &inspection.resources
+    )
+    .is_none());
+}
+
+#[test]
+fn linked_resources_root_is_supported_and_cycles_are_not_followed() {
+    let fixture = Fixture::new();
+    let shared = fixture.root.join("shared");
+    fs::create_dir_all(shared.join("job")).unwrap();
+    fs::write(shared.join("job/fxmanifest.lua"), "fx_version 'cerulean'").unwrap();
+    let resources = fixture.root.join("data/resources");
+    fs::remove_dir(&resources).unwrap();
+    link_directory(&shared, &resources);
+    link_directory(&shared, &shared.join("[cycle]"));
+    fs::write(fixture.root.join("data/server.cfg"), "ensure job").unwrap();
+    let report = report(&inspect(&fixture.request()));
+    assert!(!report.blocking);
+    assert_eq!(report.resource_count, 1);
+    assert_eq!(
+        report
+            .checks
+            .iter()
+            .filter(|check| check.code == "resource-link-cycle")
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn linked_resource_configs_cannot_escape_their_registered_target() {
+    let fixture = Fixture::new();
+    let shared = fixture.root.join("shared/job");
+    fs::create_dir_all(&shared).unwrap();
+    fs::write(shared.join("fxmanifest.lua"), "fx_version 'cerulean'").unwrap();
+    fs::create_dir(fixture.root.join("private")).unwrap();
+    fs::write(
+        fixture.root.join("private/secret.cfg"),
+        "ensure outside-secret",
+    )
+    .unwrap();
+    link_directory(&shared, &fixture.root.join("data/resources/job"));
+    link_directory(&fixture.root.join("private"), &shared.join("external"));
+    fs::write(
+        fixture.root.join("data/server.cfg"),
+        "ensure job\nexec @job/external/secret.cfg",
+    )
+    .unwrap();
+    let report = report(&inspect(&fixture.request()));
+    assert!(!report.blocking);
+    assert_eq!(report.config_count, 1);
+    assert!(report
+        .checks
+        .iter()
+        .any(|check| check.code == "exec-unresolved"));
+    assert!(!serde_json::to_string(&report)
+        .unwrap()
+        .contains("outside-secret"));
+}
+
+#[cfg(windows)]
+#[test]
+#[ignore = "Requires Windows Developer Mode or symbolic-link privilege."]
+fn directory_symlink_is_detected_as_a_resource() {
+    let fixture = Fixture::new();
+    let shared = fixture.root.join("shared");
+    fs::create_dir(&shared).unwrap();
+    fs::write(shared.join("fxmanifest.lua"), "fx_version 'cerulean'").unwrap();
+    let link = fixture.root.join("data/resources/job");
+    std::os::windows::fs::symlink_dir(&shared, &link).unwrap();
+    fs::write(fixture.root.join("data/server.cfg"), "ensure job").unwrap();
+    let report = report(&inspect(&fixture.request()));
+    assert!(!report.blocking);
+    assert_eq!(report.resource_count, 1);
+}
+
 #[test]
 fn rejects_profile_traversal_and_external_exec_targets() {
     let fixture = Fixture::new();

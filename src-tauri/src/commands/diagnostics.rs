@@ -25,6 +25,7 @@ use crate::{models::mariadb::MariaDBCredentials, process::CommandNoWindowExt};
 const MAX_FILE_BYTES: u64 = 512 * 1024;
 const MAX_CONFIGS: usize = 128;
 const MAX_RESOURCES: usize = 5000;
+const MAX_RESOURCE_ENTRIES: usize = 20_000;
 const MAX_CHECKS: usize = 2000;
 const PREVIEW_TTL: Duration = Duration::from_secs(15 * 60);
 
@@ -126,6 +127,7 @@ struct Inspection {
 struct Resource {
     name: String,
     path: PathBuf,
+    resolved_path: PathBuf,
     groups: Vec<String>,
     manifest: parsing::Manifest,
     revision: String,
@@ -290,12 +292,14 @@ fn inspect(request: &PreflightRequest) -> Inspection {
                 );
                 inspection.data_root = Some(root.clone());
                 let resources = root.join("resources");
-                if let Some(resources) = resources
-                    .canonicalize()
-                    .ok()
-                    .filter(|path| path.is_dir() && path.starts_with(&root))
-                {
-                    scan_resources(&resources, &resources, 0, &mut inspection);
+                if resources.is_dir() {
+                    scan_resources(
+                        &resources,
+                        &resources,
+                        0,
+                        &mut ResourceScan::default(),
+                        &mut inspection,
+                    );
                     inspection
                         .resources
                         .sort_by_key(|resource| resource.name.to_ascii_lowercase());
@@ -306,7 +310,7 @@ fn inspect(request: &PreflightRequest) -> Inspection {
                         "resources-missing",
                         Severity::Error,
                         "Resources directory missing",
-                        "The resources folder is missing, unreadable, or resolves outside dataPath.",
+                        "The resources folder is missing, unreadable, or its link target is unavailable.",
                     );
                 }
                 read_config(
@@ -362,8 +366,23 @@ fn read_bounded(path: &Path) -> Result<String, String> {
     String::from_utf8(bytes).map_err(|_| "File is not valid UTF-8.".into())
 }
 
-fn scan_resources(path: &Path, root: &Path, depth: usize, inspection: &mut Inspection) {
-    if depth > 12 || inspection.resources.len() >= MAX_RESOURCES {
+#[derive(Default)]
+struct ResourceScan {
+    ancestors: HashSet<PathBuf>,
+    entries: usize,
+}
+
+fn scan_resources(
+    path: &Path,
+    root: &Path,
+    depth: usize,
+    scan: &mut ResourceScan,
+    inspection: &mut Inspection,
+) {
+    if depth > 12
+        || inspection.resources.len() >= MAX_RESOURCES
+        || scan.entries >= MAX_RESOURCE_ENTRIES
+    {
         check(
             inspection,
             "Resources",
@@ -371,6 +390,31 @@ fn scan_resources(path: &Path, root: &Path, depth: usize, inspection: &mut Inspe
             Severity::Warning,
             "Resource scan limit reached",
             "Part of the resource tree was skipped because of its size or nesting depth.",
+        );
+        return;
+    }
+    let Ok(resolved) = path.canonicalize() else {
+        check(
+            inspection,
+            "Resources",
+            "resource-unreadable",
+            Severity::Warning,
+            "Resource directory unavailable",
+            format!(
+                "{} could not be resolved. Check its link target and access permissions.",
+                relative(path, root)
+            ),
+        );
+        return;
+    };
+    if scan.ancestors.contains(&resolved) {
+        check(
+            inspection,
+            "Resources",
+            "resource-link-cycle",
+            Severity::Warning,
+            "Cyclic resource link skipped",
+            format!("{} links back to a parent directory.", relative(path, root)),
         );
         return;
     }
@@ -382,15 +426,15 @@ fn scan_resources(path: &Path, root: &Path, depth: usize, inspection: &mut Inspe
         if let Some(manifest_path) = manifest_path {
             if !manifest_path
                 .canonicalize()
-                .is_ok_and(|path| path.starts_with(root))
+                .is_ok_and(|path| path.starts_with(&resolved))
             {
                 check(
                     inspection,
                     "Resources",
                     "manifest-unreadable",
                     Severity::Warning,
-                    "Resource manifest outside dataPath",
-                    "A resource manifest resolves outside the resource directory and was not read.",
+                    "Resource manifest outside its resource",
+                    "A manifest resolves outside its resource's target directory and was not read.",
                 );
                 return;
             }
@@ -402,6 +446,7 @@ fn scan_resources(path: &Path, root: &Path, depth: usize, inspection: &mut Inspe
                         .to_string_lossy()
                         .into_owned(),
                     path: path.to_path_buf(),
+                    resolved_path: resolved,
                     groups: path
                         .strip_prefix(root)
                         .unwrap_or(path)
@@ -441,10 +486,21 @@ fn scan_resources(path: &Path, root: &Path, depth: usize, inspection: &mut Inspe
         );
         return;
     };
+    // Track ancestors, not all visited targets: separate resource aliases remain valid.
+    scan.ancestors.insert(resolved.clone());
     for entry in entries.flatten() {
-        if inspection.resources.len() >= MAX_RESOURCES {
+        if inspection.resources.len() >= MAX_RESOURCES || scan.entries >= MAX_RESOURCE_ENTRIES {
+            check(
+                inspection,
+                "Resources",
+                "scan-limit",
+                Severity::Warning,
+                "Resource scan limit reached",
+                "Additional resource entries were skipped after the diagnostic limit.",
+            );
             break;
         }
+        scan.entries += 1;
         let name = entry.file_name().to_string_lossy().into_owned();
         if name.starts_with('.')
             || matches!(
@@ -454,19 +510,24 @@ fn scan_resources(path: &Path, root: &Path, depth: usize, inspection: &mut Inspe
         {
             continue;
         }
-        let Ok(kind) = entry.file_type() else {
-            continue;
-        };
-        if kind.is_dir() && !kind.is_symlink() {
-            let child = entry.path();
-            if child
-                .canonicalize()
-                .is_ok_and(|resolved| resolved.starts_with(root))
-            {
-                scan_resources(&child, root, depth + 1, inspection);
-            }
+        let child = entry.path();
+        if child.is_dir() {
+            scan_resources(&child, root, depth + 1, scan, inspection);
+        } else if entry.file_type().is_ok_and(|kind| kind.is_symlink()) && !child.exists() {
+            check(
+                inspection,
+                "Resources",
+                "resource-link-broken",
+                Severity::Warning,
+                "Broken resource link",
+                format!(
+                    "{} points to an unavailable target.",
+                    relative(&child, root)
+                ),
+            );
         }
     }
+    scan.ancestors.remove(&resolved);
 }
 
 fn relative(path: &Path, root: &Path) -> String {
@@ -479,15 +540,14 @@ fn config_target(reference: &str, root: &Path, resources: &[Resource]) -> Option
     if reference.contains(['$', '*', '?', '\0']) {
         return None;
     }
-    let path = if let Some(resource_ref) = reference.strip_prefix('@') {
+    let (path, allowed_root) = if let Some(resource_ref) = reference.strip_prefix('@') {
         let (name, file) = resource_ref.split_once('/')?;
-        resources
+        let resource = resources
             .iter()
-            .find(|resource| resource.name.eq_ignore_ascii_case(name))?
-            .path
-            .join(file)
+            .find(|resource| resource.name.eq_ignore_ascii_case(name))?;
+        (resource.path.join(file), resource.resolved_path.as_path())
     } else {
-        root.join(reference)
+        (root.join(reference), root)
     };
     if path
         .components()
@@ -496,7 +556,7 @@ fn config_target(reference: &str, root: &Path, resources: &[Resource]) -> Option
         return None;
     }
     let resolved = path.canonicalize().ok()?;
-    (resolved.starts_with(root) && resolved.is_file()).then_some(resolved)
+    (resolved.starts_with(allowed_root) && resolved.is_file()).then_some(resolved)
 }
 
 fn read_config(
@@ -517,7 +577,12 @@ fn read_config(
         );
         return;
     };
-    if !path.starts_with(root) {
+    if !path.starts_with(root)
+        && !inspection
+            .resources
+            .iter()
+            .any(|resource| path.starts_with(&resource.resolved_path))
+    {
         check(
             inspection,
             "Configuration",
