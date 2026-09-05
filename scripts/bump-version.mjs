@@ -1,6 +1,6 @@
 import { readFile, writeFile } from "node:fs/promises";
 
-const VERSION_RE = /^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?$/;
+const VERSION_RE = /^v?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$/;
 const bumpTypes = new Set(["major", "minor", "patch", "prerelease"]);
 
 const target = process.argv[2]?.trim();
@@ -23,7 +23,7 @@ const cargoToml = await readFile(cargoTomlPath, "utf8");
 const cargoLock = await readFile(cargoLockPath, "utf8");
 
 const currentVersion = tauriConfig.version || packageJson.version;
-const nextVersion = bumpTypes.has(target) ? bumpVersion(currentVersion, target) : normalizeVersion(target);
+const nextVersion = normalizeVersion(bumpTypes.has(target) ? bumpVersion(currentVersion, target) : target);
 
 packageJson.version = nextVersion;
 packageLock.version = nextVersion;
@@ -32,11 +32,14 @@ if (packageLock.packages?.[""]) {
 }
 tauriConfig.version = nextVersion;
 
-await writeJson(packagePath, packageJson);
-await writeJson(packageLockPath, packageLock);
-await writeJson(tauriConfigPath, tauriConfig);
-await writeFile(cargoTomlPath, replaceCargoPackageVersion(cargoToml, nextVersion), "utf8");
-await writeFile(cargoLockPath, replaceCargoLockPackageVersion(cargoLock, nextVersion), "utf8");
+const changes = [
+	[packagePath, `${JSON.stringify(packageJson, null, 2)}\n`],
+	[packageLockPath, `${JSON.stringify(packageLock, null, 2)}\n`],
+	[tauriConfigPath, `${JSON.stringify(tauriConfig, null, 2)}\n`],
+	[cargoTomlPath, replaceCargoPackageVersion(cargoToml, nextVersion)],
+	[cargoLockPath, replaceCargoLockPackageVersion(cargoLock, nextVersion)],
+];
+for (const [path, content] of changes) await writeFile(path, content, "utf8");
 
 console.log(`Bumped app version to ${nextVersion}`);
 
@@ -64,7 +67,7 @@ function bumpPrerelease(value) {
 	const last = parts.at(-1);
 
 	if (last && /^\d+$/.test(last)) {
-		parts[parts.length - 1] = String(Number(last) + 1);
+		parts[parts.length - 1] = String(BigInt(last) + 1n);
 		return parts.join(".");
 	}
 
@@ -78,7 +81,7 @@ function normalizeVersion(version) {
 
 function parseVersion(version) {
 	const match = VERSION_RE.exec(version);
-	if (!match) {
+	if (!match || match.slice(1, 4).some((part) => !Number.isSafeInteger(Number(part))) || match[4]?.split(".").some((part) => /^0\d+$/.test(part))) {
 		console.error(`Invalid version "${version}". Use semver like 1.2.3, or a bump type.`);
 		process.exit(1);
 	}
@@ -142,9 +145,6 @@ function replaceCargoLockPackageVersion(content, version) {
 		}
 	}
 
-	return content;
-}
-
-function writeJson(path, value) {
-	return writeFile(path, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+	console.error("Could not find the app package in Cargo.lock.");
+	process.exit(1);
 }

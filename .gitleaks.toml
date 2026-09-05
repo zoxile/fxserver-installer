@@ -1,0 +1,9 @@
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Deterministic database ownership fixtures, not usable credentials"
+condition = "AND"
+paths = ['''src-tauri/src/services/mariadb/owned_restore\.rs$''']
+regexTarget = "line"
+regexes = ['''marker_token:\s*"fedcba9876543210fedcba9876543210"''']
