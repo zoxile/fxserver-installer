@@ -9,7 +9,7 @@ async (page) => {
     localStorage.setItem("installPath", "C:/mock/artifacts");
     const callbacks = new Map();
     const events = new Map();
-    const state = window.testDesktop = { running: false, pending: {}, calls: [], logs: [], unknown: [], counter: 0 };
+    const state = window.testDesktop = { running: false, pending: {}, calls: [], logs: [], unknown: [], counter: 0, blockPreflight: false, preflightError: "" };
     window.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener: (name) => events.delete(name) };
     window.__TAURI_INTERNALS__ = {
       metadata: { currentWindow: { label: "main" }, currentWebview: { label: "main" } },
@@ -27,7 +27,10 @@ async (page) => {
           case "save_fxserver_rcon_password": return;
           case "initialize_health_workspace": return;
           case "configure_live_bridge": return { workspaceId: args.target.workspaceId, enabled: false, connected: false, snapshot: null };
-          case "run_fxserver_preflight": return { checkedAt: Date.now(), blocking: false, errorCount: 0, warningCount: 0, resourceCount: 0, configCount: 0, checks: [] };
+          case "run_fxserver_preflight":
+            if (state.preflightError) throw new Error(state.preflightError);
+            return { checkedAt: Date.now(), blocking: state.blockPreflight, errorCount: state.blockPreflight ? 1 : 0, warningCount: 0, resourceCount: 0, configCount: 0,
+              checks: state.blockPreflight ? [{ severity: "error", title: "Configured resource missing", detail: "A fixture resource is missing." }] : [] };
           case "get_windows_artifact_metadata": return { recommendedArtifact: "10000", windowsDownloadLink: "https://example.invalid/artifact.zip", brokenArtifacts: [] };
           case "get_installed_windows_artifact_info": return { installed: true, version: "10000", destination: "C:/mock/artifacts", markerPath: "", hasFxserverExecutable: true, detectionSource: "marker" };
           case "get_fxserver_status": return { running: state.running, pid: 123, startedAt: "2026-09-05T10:00:00Z", resources: { cpuPercent: 15, memoryBytes: 104857600, totalMemoryBytes: 1073741824, memoryPercent: 10, threadCount: 30, handleCount: 150 } };
@@ -118,6 +121,48 @@ async (page) => {
   await page.getByRole("button", { name: "Send", exact: true }).waitFor();
   await page.screenshot({ path: "output/playwright/manage-server.png", fullPage: true });
 
+  await page.getByRole("button", { name: "Stop", exact: true }).click();
+  await waitPending("stop_fxserver");
+  await complete("stop_fxserver");
+  await page.evaluate(() => { window.testDesktop.blockPreflight = true; });
+  const calls = (command) => page.evaluate((name) => window.testDesktop.calls.filter((call) => call === name).length, command);
+  const startsBeforeOverride = await calls("start_fxserver");
+  await page.getByRole("button", { name: "Start", exact: true }).click();
+  await page.getByText("Configured resource missing", { exact: true }).waitFor();
+  if (await calls("start_fxserver") !== startsBeforeOverride) throw new Error("Normal start bypassed a blocking preflight");
+  await page.getByRole("button", { name: "Force start", exact: true }).click();
+  const override = page.getByRole("dialog", { name: "Start without preflight?" });
+  await override.waitFor();
+  await page.setViewportSize({ width: 480, height: 800 });
+  await page.screenshot({ path: "output/playwright/force-start-confirmation.png", fullPage: true, animations: "disabled" });
+  const bounds = await override.boundingBox();
+  if (!bounds || bounds.x < 0 || bounds.y < 0 || bounds.x + bounds.width > 480 || bounds.y + bounds.height > 800) throw new Error("Force start dialog clips at narrow width");
+  await override.getByRole("button", { name: "Cancel", exact: true }).click();
+  if (await calls("start_fxserver") !== startsBeforeOverride) throw new Error("Cancelling the override launched FXServer");
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.getByRole("button", { name: "Force start", exact: true }).click();
+  const checksBeforeOverride = await calls("run_fxserver_preflight");
+  await override.getByRole("button", { name: "Start anyway", exact: true }).click();
+  await waitPending("start_fxserver");
+  if (await calls("run_fxserver_preflight") !== checksBeforeOverride) throw new Error("Confirmed force start reran preflight");
+  await home();
+  await manage();
+  await assertDisabled("Force start");
+  await complete("start_fxserver", "Mock executable startup failure");
+  await page.getByText("Mock executable startup failure", { exact: true }).waitFor();
+  await page.getByRole("button", { name: "Start", exact: true }).click();
+  await page.getByText("Preflight found blocking issues.", { exact: false }).waitFor();
+  if (await calls("start_fxserver") !== startsBeforeOverride + 1) throw new Error("The preflight override persisted into another start");
+  await page.evaluate(() => { window.testDesktop.preflightError = "Mock preflight unavailable"; });
+  await page.getByRole("button", { name: "Start", exact: true }).click();
+  await page.getByText("Mock preflight unavailable", { exact: true }).waitFor();
+  await page.getByRole("button", { name: "Force start", exact: true }).click();
+  await override.getByRole("button", { name: "Start anyway", exact: true }).click();
+  await waitPending("start_fxserver");
+  await complete("start_fxserver");
+  await page.getByText("FXServer started with the selected TXHOST environment.", { exact: true }).waitFor();
+  await page.waitForFunction(() => window.testDesktop.logs.some((line) => line.includes("user-confirmed preflight override")));
+
   await db();
   await page.getByPlaceholder("Required root password").fill("mock-only");
   await page.getByRole("button", { name: "Install", exact: true }).click();
@@ -135,5 +180,5 @@ async (page) => {
   const longestTask = await page.evaluate(() => Math.max(0, ...window.uiLongTasks));
   if (longestTask >= 500) throw new Error(`UI stalled for ${longestTask} ms`);
   console.log(`Longest UI task: ${longestTask} ms (500 ms regression ceiling)`);
-  console.log("PASS: start/restart/stop, RCON success/failure, 1000 console entries, MariaDB progress across navigation; no page errors.");
+  console.log("PASS: start/restart/stop, one-time confirmed preflight override, RCON success/failure, 1000 console entries, MariaDB progress across navigation; no page errors.");
 }

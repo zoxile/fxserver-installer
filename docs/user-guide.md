@@ -281,9 +281,15 @@ If the console is extremely busy, the app batches visible output so the UI remai
 
 Start and Restart run preflight checks first. Blocking errors prevent launch; warnings remain visible for review. Port checks are skipped during Restart because the current server still owns its ports. You can also run checks from **FXServer > Diagnostics**, which lists missing dependencies, duplicate resources, configuration references, and RCON warnings. Dynamically generated Lua configuration cannot be fully verified without executing it, so review those warnings manually.
 
+Preflight follows resource directory symlinks and junctions, including linked groups and a linked resources root. It reads manifests and explicit `exec @resource/file.cfg` includes without changing their targets. Cycles and scan limits produce warnings. File-changing workflows retain their separate link protections.
+
+When stopped, **Force start** offers a confirmed, one-time attempt without preflight. Use it after reviewing a false-positive check or when diagnostics cannot complete. It does not repair missing files, free occupied ports, bypass executable/process safeguards, or permanently disable checks. Overrides are recorded in Application Logs.
+
 ## Workspaces And Tasks
 
 The first saved workspace, **Default**, adopts your existing settings. Open **Workspaces** to save another server's artifact folder, txData folder, profile, RCON endpoint, and database defaults. Switching requires a stopped server and no running conflicting tasks. Only one FXServer is managed at a time.
+
+A txAdmin profile already selects server configuration and its data directory. A workspace is an optional app-side preset around a profile: it also separates artifact/txData paths, saved database connection defaults, backup schedules, resource update preferences, and bridge settings. Keep one workspace and switch profiles when you do not need that extra separation. Switching profiles within one workspace does not create separate app-side schedules or preferences for each profile.
 
 RCON passwords are encrypted separately for each workspace with Windows data protection. Database passwords stay in memory until the app closes; saved workspace metadata contains connection defaults but no database password. Sensitive TXHOST environment values are not included in saved workspace metadata. Removing a workspace removes its entry, backup schedules, and saved RCON password, not its server files, backup files, or databases.
 

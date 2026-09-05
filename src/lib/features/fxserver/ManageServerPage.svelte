@@ -59,6 +59,8 @@
 	import SendIcon from "@lucide/svelte/icons/send";
 	import ServerIcon from "@lucide/svelte/icons/server";
 	import SquareIcon from "@lucide/svelte/icons/square";
+	import TriangleAlertIcon from "@lucide/svelte/icons/triangle-alert";
+	import { Dialog } from "bits-ui";
 	import { scaleTime } from "d3-scale";
 	import { curveNatural } from "d3-shape";
 	import { AreaChart } from "layerchart";
@@ -75,6 +77,7 @@
 	import { chooseFolder as chooseAnyFolder, chooseInstallFolder } from "$lib/core/selectFolder";
 	import { getInstallPath, loadInstallPath, setInstallPath } from "$lib/core/paths.svelte";
 	import { getWorkspaceId, workspaceSession } from "$lib/core/workspaces.svelte";
+	import { log } from "$lib/core/logger.svelte";
 	import { databaseSession } from "$lib/core/databaseSession.svelte";
 	import { runPreflight } from "$lib/modules/diagnostics";
 	import { getInstalledWindowsArtifactInfo, type InstalledArtifactInfo } from "$lib/modules/artifact";
@@ -177,6 +180,7 @@
 	let pageActive = true;
 	let statusRefresh: Promise<void> | null = null;
 	let busy = $state(false);
+	let forceStartOpen = $state(false);
 	let refreshTimer: number | undefined;
 	let terminalTimer: number | undefined;
 	let uptimeTimer: number | undefined;
@@ -608,7 +612,7 @@
 		};
 	}
 
-	async function startServer() {
+	async function startServer(skipPreflight = false) {
 		if (!canStart) return;
 		error = "";
 		message = "";
@@ -617,7 +621,11 @@
 		try {
 			saveEnvironment();
 			const request = launchRequest();
-			await checkReadiness(request, true);
+			if (skipPreflight) {
+				log("Starting FXServer with a user-confirmed preflight override.", { scope: "FXServer", level: "warn" });
+			} else {
+				await checkReadiness(request, true);
+			}
 			await startFxserver(request);
 			terminalRevision += 1;
 			await refreshStatus(false);
@@ -680,7 +688,7 @@
 				credentials: databaseSession.credentials ? { ...databaseSession.credentials } : null,
 				checkPorts,
 			});
-			if (preflight.blocking) throw new Error("Preflight found blocking issues. Review the checks before starting FXServer.");
+			if (preflight.blocking) throw new Error("Preflight found blocking issues. Review the checks before starting FXServer. When stopped, Force start can skip preflight for one launch.");
 		} finally { checkingPreflight = false; }
 	}
 
@@ -925,7 +933,7 @@
 		</Card.Header>
 		<Card.Content class="space-y-4">
 			<div class="flex flex-wrap items-center gap-2">
-				<Button onclick={startServer} disabled={!canStart} aria-busy={starting} title="Start FXServer.exe with the configured TXHOST variables">
+				<Button onclick={() => startServer()} disabled={!canStart} aria-busy={starting} title="Start FXServer.exe with the configured TXHOST variables">
 					{#if starting}
 						<LoaderCircleIcon class="animate-spin" />
 					{:else}
@@ -952,6 +960,10 @@
 				<Button variant="outline" onclick={() => refreshStatus()} disabled={busy || starting || stopping || restarting} title="Refresh FXServer process usage">
 					<RefreshCwIcon />
 					Status
+				</Button>
+				<Button variant="outline" onclick={() => (forceStartOpen = true)} disabled={!canStart} title="Review a one-time override of the startup readiness checks">
+					<TriangleAlertIcon class="text-amber-400" />
+					Force start
 				</Button>
 			</div>
 
@@ -1354,3 +1366,21 @@
 		</Card.Content>
 	</Card.Root>
 </section>
+
+<Dialog.Root bind:open={forceStartOpen}>
+	<Dialog.Portal>
+		<Dialog.Overlay class="fixed inset-0 z-[119] bg-black/65 data-[state=open]:animate-in data-[state=open]:fade-in-0" />
+		<Dialog.Content class="fixed top-1/2 left-1/2 z-[120] max-h-[calc(100dvh-2rem)] w-[calc(100vw-2rem)] max-w-lg -translate-x-1/2 -translate-y-1/2 space-y-4 overflow-y-auto rounded-md border border-border bg-popover p-5 shadow-xl data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=open]:zoom-in-95">
+			<Dialog.Title class="flex items-center gap-2 text-lg font-semibold"><TriangleAlertIcon class="size-5 shrink-0 text-amber-400" />Start without preflight?</Dialog.Title>
+			<Dialog.Description class="text-sm leading-6 text-muted-foreground">Skip resource, configuration, database, and port checks for this launch only. Missing dependencies or occupied ports can still prevent FXServer from starting correctly. Normal process and executable safeguards remain active.</Dialog.Description>
+			<dl class="space-y-2 text-sm">
+				<div><dt class="text-muted-foreground">Profile</dt><dd class="break-all">{serverProfile || "Initial txAdmin setup"}</dd></div>
+				<div><dt class="text-muted-foreground">Artifact folder</dt><dd class="break-all font-mono text-xs">{artifactPath}</dd></div>
+			</dl>
+			<div class="flex flex-wrap justify-end gap-2">
+				<Button variant="outline" onclick={() => (forceStartOpen = false)}>Cancel</Button>
+				<Button variant="destructive" disabled={!canStart} onclick={() => { forceStartOpen = false; void startServer(true); }}><PlayIcon />Start anyway</Button>
+			</div>
+		</Dialog.Content>
+	</Dialog.Portal>
+</Dialog.Root>
