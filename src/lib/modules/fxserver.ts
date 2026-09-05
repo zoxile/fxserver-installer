@@ -219,6 +219,18 @@ export async function stopFxserver() {
 	}
 }
 
+export async function restartFxserver(request: FxserverLaunchRequest) {
+	if (!hasTauriRuntime()) return unavailableOutsideTauri<FxserverLaunchResult>();
+	try {
+		const result = await invoke<FxserverLaunchResult>("restart_fxserver", { request });
+		log("FXServer restarted.", { level: "success", scope: "fxserver.manage" });
+		return result;
+	} catch (error) {
+		log("FXServer restart failed.", { level: "error", scope: "fxserver.manage", detail: errorMessage(error) });
+		throw error;
+	}
+}
+
 export async function getFxserverTerminal(maxLines = 500, afterId: number | null = null) {
 	if (!hasTauriRuntime()) {
 		return {
@@ -238,19 +250,27 @@ export async function getFxserverTerminal(maxLines = 500, afterId: number | null
 	}
 }
 
+let rconPasswordTask: Promise<unknown> = Promise.resolve();
+
+function withRconPasswordStore<T>(task: () => Promise<T>): Promise<T> {
+	const pending = rconPasswordTask.then(task);
+	rconPasswordTask = pending.catch(() => undefined);
+	return pending;
+}
+
 export async function getSavedFxserverRconPassword() {
 	if (!hasTauriRuntime()) return "";
-	return (await invoke<string | null>("get_fxserver_rcon_password")) ?? "";
+	return (await withRconPasswordStore(() => invoke<string | null>("get_fxserver_rcon_password"))) ?? "";
 }
 
 export async function saveFxserverRconPassword(password: string) {
 	if (!hasTauriRuntime()) return;
-	await invoke<void>("save_fxserver_rcon_password", { password });
+	await withRconPasswordStore(() => invoke<void>("save_fxserver_rcon_password", { password }));
 }
 
 export async function clearFxserverRconPassword() {
 	if (!hasTauriRuntime()) return;
-	await invoke<void>("clear_fxserver_rcon_password");
+	await withRconPasswordStore(() => invoke<void>("clear_fxserver_rcon_password"));
 }
 
 export async function sendFxserverCommand(command: string, rcon: FxserverRconConfig) {

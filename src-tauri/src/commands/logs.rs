@@ -48,7 +48,11 @@ pub struct ClientLogResult {
 const CLIENT_LOG_MAX_BYTES: u64 = 4 * 1024 * 1024;
 
 #[tauri::command]
-pub fn read_app_logs(app: AppHandle) -> Result<AppLogFile, String> {
+pub async fn read_app_logs(app: AppHandle) -> Result<AppLogFile, String> {
+    super::run_blocking(move || read_app_logs_blocking(app)).await
+}
+
+fn read_app_logs_blocking(app: AppHandle) -> Result<AppLogFile, String> {
     let path = log_path(&app)?;
     if !path.exists() {
         return Ok(AppLogFile {
@@ -57,8 +61,7 @@ pub fn read_app_logs(app: AppHandle) -> Result<AppLogFile, String> {
         });
     }
 
-    let content = fs::read_to_string(&path)
-        .map_err(|error| format!("Failed to read application log file: {error}"))?;
+    let content = tail_file(&path, 700)?;
 
     Ok(AppLogFile {
         path: path.to_string_lossy().to_string(),
@@ -67,7 +70,11 @@ pub fn read_app_logs(app: AppHandle) -> Result<AppLogFile, String> {
 }
 
 #[tauri::command]
-pub fn append_app_log(app: AppHandle, entry: String) -> Result<(), String> {
+pub async fn append_app_log(app: AppHandle, entry: String) -> Result<(), String> {
+    super::run_blocking(move || append_app_log_blocking(app, entry)).await
+}
+
+fn append_app_log_blocking(app: AppHandle, entry: String) -> Result<(), String> {
     let path = log_path(&app)?;
     let mut file = OpenOptions::new()
         .create(true)
@@ -80,13 +87,21 @@ pub fn append_app_log(app: AppHandle, entry: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn clear_app_logs(app: AppHandle) -> Result<(), String> {
+pub async fn clear_app_logs(app: AppHandle) -> Result<(), String> {
+    super::run_blocking(move || clear_app_logs_blocking(app)).await
+}
+
+fn clear_app_logs_blocking(app: AppHandle) -> Result<(), String> {
     let path = log_path(&app)?;
     fs::write(&path, "").map_err(|error| format!("Failed to clear application log file: {error}"))
 }
 
 #[tauri::command]
-pub fn read_client_logs(request: ClientLogRequest) -> Result<ClientLogResult, String> {
+pub async fn read_client_logs(request: ClientLogRequest) -> Result<ClientLogResult, String> {
+    super::run_blocking(move || read_client_logs_blocking(request)).await
+}
+
+fn read_client_logs_blocking(request: ClientLogRequest) -> Result<ClientLogResult, String> {
     let directory = request
         .directory
         .as_deref()

@@ -25,8 +25,10 @@ use crate::{
 const GRACEFUL_STOP_TIMEOUT: Duration = Duration::from_secs(4);
 const FORCE_STOP_WAIT_TIMEOUT: Duration = Duration::from_secs(3);
 
+#[derive(Clone)]
 pub struct FxserverManager {
-    process: Mutex<Option<ManagedFxserverProcess>>,
+    process: Arc<Mutex<Option<ManagedFxserverProcess>>>,
+    lifecycle: Arc<Mutex<()>>,
     terminal: Arc<Mutex<TerminalState>>,
 }
 
@@ -83,7 +85,8 @@ struct WindowsProcessInfo {
 impl Default for FxserverManager {
     fn default() -> Self {
         Self {
-            process: Mutex::new(None),
+            process: Arc::new(Mutex::new(None)),
+            lifecycle: Arc::new(Mutex::new(())),
             terminal: Arc::new(Mutex::new(TerminalState::default())),
         }
     }
@@ -91,6 +94,14 @@ impl Default for FxserverManager {
 
 impl FxserverManager {
     pub fn stop_running_process(&self) -> Result<(), String> {
+        let _operation = self
+            .lifecycle
+            .lock()
+            .map_err(|_| "FXServer lifecycle is unavailable.".to_string())?;
+        self.stop_process()
+    }
+
+    fn stop_process(&self) -> Result<(), String> {
         let mut guard = self
             .process
             .lock()
@@ -143,9 +154,24 @@ impl FxserverManager {
 }
 
 #[tauri::command]
-pub fn start_fxserver(
+pub async fn start_fxserver(
     request: FxserverLaunchRequest,
     manager: tauri::State<'_, FxserverManager>,
+) -> Result<FxserverLaunchResult, String> {
+    let manager = manager.inner().clone();
+    super::run_blocking(move || {
+        let _operation = manager
+            .lifecycle
+            .try_lock()
+            .map_err(|_| "Another FXServer action is in progress.".to_string())?;
+        start_fxserver_blocking(request, &manager)
+    })
+    .await
+}
+
+fn start_fxserver_blocking(
+    request: FxserverLaunchRequest,
+    manager: &FxserverManager,
 ) -> Result<FxserverLaunchResult, String> {
     if !cfg!(target_os = "windows") {
         return Err(
@@ -254,14 +280,52 @@ pub fn start_fxserver(
 }
 
 #[tauri::command]
-pub fn stop_fxserver(manager: tauri::State<'_, FxserverManager>) -> Result<(), String> {
-    manager.stop_running_process()
+pub async fn stop_fxserver(manager: tauri::State<'_, FxserverManager>) -> Result<(), String> {
+    let manager = manager.inner().clone();
+    super::run_blocking(move || stop_fxserver_blocking(&manager)).await
+}
+
+fn stop_fxserver_blocking(manager: &FxserverManager) -> Result<(), String> {
+    let _operation = manager
+        .lifecycle
+        .try_lock()
+        .map_err(|_| "Another FXServer action is in progress.".to_string())?;
+    manager.stop_process()
 }
 
 #[tauri::command]
-pub fn get_fxserver_status(
+pub async fn restart_fxserver(
+    mut request: FxserverLaunchRequest,
+    manager: tauri::State<'_, FxserverManager>,
+) -> Result<FxserverLaunchResult, String> {
+    let manager = manager.inner().clone();
+    super::run_blocking(move || {
+        let _operation = manager
+            .lifecycle
+            .try_lock()
+            .map_err(|_| "Another FXServer action is in progress.".to_string())?;
+        if !Path::new(request.artifact_path.trim())
+            .join("FXServer.exe")
+            .is_file()
+        {
+            return Err("FXServer.exe was not found in the selected artifact folder.".to_string());
+        }
+        request.environment = sanitize_environment(request.environment)?;
+        manager.stop_process()?;
+        start_fxserver_blocking(request, &manager)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn get_fxserver_status(
     manager: tauri::State<'_, FxserverManager>,
 ) -> Result<FxserverStatus, String> {
+    let manager = manager.inner().clone();
+    super::run_blocking(move || get_fxserver_status_blocking(&manager)).await
+}
+
+fn get_fxserver_status_blocking(manager: &FxserverManager) -> Result<FxserverStatus, String> {
     let mut guard = manager
         .process
         .lock()
@@ -301,10 +365,19 @@ pub fn get_fxserver_status(
 }
 
 #[tauri::command]
-pub fn get_fxserver_terminal(
+pub async fn get_fxserver_terminal(
     max_lines: Option<usize>,
     after_id: Option<u64>,
     manager: tauri::State<'_, FxserverManager>,
+) -> Result<FxserverTerminalResult, String> {
+    let manager = manager.inner().clone();
+    super::run_blocking(move || get_fxserver_terminal_blocking(max_lines, after_id, &manager)).await
+}
+
+fn get_fxserver_terminal_blocking(
+    max_lines: Option<usize>,
+    after_id: Option<u64>,
+    manager: &FxserverManager,
 ) -> Result<FxserverTerminalResult, String> {
     let max_lines = max_lines.unwrap_or(500).clamp(50, 5000);
     let terminal = manager
@@ -334,7 +407,11 @@ pub fn get_fxserver_terminal(
 }
 
 #[tauri::command]
-pub fn get_fxserver_rcon_password() -> Result<Option<String>, String> {
+pub async fn get_fxserver_rcon_password() -> Result<Option<String>, String> {
+    super::run_blocking(get_fxserver_rcon_password_blocking).await
+}
+
+fn get_fxserver_rcon_password_blocking() -> Result<Option<String>, String> {
     let path = rcon_password_path()?;
     if !path.exists() {
         return Ok(None);
@@ -350,9 +427,13 @@ pub fn get_fxserver_rcon_password() -> Result<Option<String>, String> {
 }
 
 #[tauri::command]
-pub fn save_fxserver_rcon_password(password: String) -> Result<(), String> {
+pub async fn save_fxserver_rcon_password(password: String) -> Result<(), String> {
+    super::run_blocking(move || save_fxserver_rcon_password_blocking(password)).await
+}
+
+fn save_fxserver_rcon_password_blocking(password: String) -> Result<(), String> {
     if password.is_empty() {
-        return clear_fxserver_rcon_password();
+        return clear_fxserver_rcon_password_blocking();
     }
 
     let path = rcon_password_path()?;
@@ -367,7 +448,11 @@ pub fn save_fxserver_rcon_password(password: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn clear_fxserver_rcon_password() -> Result<(), String> {
+pub async fn clear_fxserver_rcon_password() -> Result<(), String> {
+    super::run_blocking(clear_fxserver_rcon_password_blocking).await
+}
+
+fn clear_fxserver_rcon_password_blocking() -> Result<(), String> {
     let path = rcon_password_path()?;
     if path.exists() {
         fs::remove_file(path)
@@ -377,9 +462,17 @@ pub fn clear_fxserver_rcon_password() -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn send_fxserver_command(
+pub async fn send_fxserver_command(
     request: FxserverCommandRequest,
     manager: tauri::State<'_, FxserverManager>,
+) -> Result<(), String> {
+    let manager = manager.inner().clone();
+    super::run_blocking(move || send_fxserver_command_blocking(request, &manager)).await
+}
+
+fn send_fxserver_command_blocking(
+    request: FxserverCommandRequest,
+    manager: &FxserverManager,
 ) -> Result<(), String> {
     let command = request.command.trim();
     if command.is_empty() {
@@ -407,7 +500,11 @@ pub fn send_fxserver_command(
     let response = send_rcon_command(&request.rcon, command)?;
 
     if response.trim().is_empty() {
-        append_terminal_line(&manager.terminal, "system", "RCON command accepted.")?;
+        append_terminal_line(
+            &manager.terminal,
+            "system",
+            "RCON packet sent; no response received.",
+        )?;
     } else {
         for line in response.lines() {
             append_terminal_line(&manager.terminal, "rcon", line)?;
@@ -418,7 +515,11 @@ pub fn send_fxserver_command(
 }
 
 #[tauri::command]
-pub fn read_txdata_log(request: TxDataLogRequest) -> Result<TxDataLogResult, String> {
+pub async fn read_txdata_log(request: TxDataLogRequest) -> Result<TxDataLogResult, String> {
+    super::run_blocking(move || read_txdata_log_blocking(request)).await
+}
+
+fn read_txdata_log_blocking(request: TxDataLogRequest) -> Result<TxDataLogResult, String> {
     let log_name = request.log_name.trim();
     if !matches!(log_name, "fxserver.log" | "admin.log" | "server.log") {
         return Err("Only fxserver.log, admin.log, and server.log can be opened.".to_string());
@@ -449,7 +550,11 @@ pub fn read_txdata_log(request: TxDataLogRequest) -> Result<TxDataLogResult, Str
 }
 
 #[tauri::command]
-pub fn list_txdata_profiles(data_path: String) -> Result<TxDataProfilesResult, String> {
+pub async fn list_txdata_profiles(data_path: String) -> Result<TxDataProfilesResult, String> {
+    super::run_blocking(move || list_txdata_profiles_blocking(data_path)).await
+}
+
+fn list_txdata_profiles_blocking(data_path: String) -> Result<TxDataProfilesResult, String> {
     let data_path = PathBuf::from(data_path.trim());
     if data_path.as_os_str().is_empty() {
         return Err("Choose a txData folder before scanning profiles.".to_string());
@@ -487,7 +592,13 @@ pub fn list_txdata_profiles(data_path: String) -> Result<TxDataProfilesResult, S
 }
 
 #[tauri::command]
-pub fn read_server_config(request: ServerConfigRequest) -> Result<ServerConfigResult, String> {
+pub async fn read_server_config(
+    request: ServerConfigRequest,
+) -> Result<ServerConfigResult, String> {
+    super::run_blocking(move || read_server_config_blocking(request)).await
+}
+
+fn read_server_config_blocking(request: ServerConfigRequest) -> Result<ServerConfigResult, String> {
     let (tx_data_path, profile, profile_config_path, data_path) =
         resolve_profile_data_path(request.tx_data_path, request.profile)?;
 
@@ -510,7 +621,15 @@ pub fn read_server_config(request: ServerConfigRequest) -> Result<ServerConfigRe
 }
 
 #[tauri::command]
-pub fn save_server_config(request: SaveServerConfigRequest) -> Result<ServerConfigFile, String> {
+pub async fn save_server_config(
+    request: SaveServerConfigRequest,
+) -> Result<ServerConfigFile, String> {
+    super::run_blocking(move || save_server_config_blocking(request)).await
+}
+
+fn save_server_config_blocking(
+    request: SaveServerConfigRequest,
+) -> Result<ServerConfigFile, String> {
     let path = PathBuf::from(request.path.trim());
     if path.as_os_str().is_empty() {
         return Err("Choose a config file before saving.".to_string());
@@ -526,7 +645,15 @@ pub fn save_server_config(request: SaveServerConfigRequest) -> Result<ServerConf
 }
 
 #[tauri::command]
-pub fn scan_fxserver_resources(request: ResourceScanRequest) -> Result<ResourceScanResult, String> {
+pub async fn scan_fxserver_resources(
+    request: ResourceScanRequest,
+) -> Result<ResourceScanResult, String> {
+    super::run_blocking(move || scan_fxserver_resources_blocking(request)).await
+}
+
+fn scan_fxserver_resources_blocking(
+    request: ResourceScanRequest,
+) -> Result<ResourceScanResult, String> {
     let (tx_data_path, profile, _, data_path) =
         resolve_profile_data_path(request.tx_data_path, request.profile)?;
     let resource_root = data_path.join("resources");
@@ -550,7 +677,11 @@ pub fn scan_fxserver_resources(request: ResourceScanRequest) -> Result<ResourceS
 }
 
 #[tauri::command]
-pub fn send_fxserver_rcon_command(request: FxserverCommandRequest) -> Result<String, String> {
+pub async fn send_fxserver_rcon_command(request: FxserverCommandRequest) -> Result<String, String> {
+    super::run_blocking(move || send_fxserver_rcon_command_blocking(request)).await
+}
+
+fn send_fxserver_rcon_command_blocking(request: FxserverCommandRequest) -> Result<String, String> {
     send_rcon_command(&request.rcon, &request.command)
 }
 
@@ -1185,7 +1316,6 @@ fn clear_terminal(terminal: &Arc<Mutex<TerminalState>>) -> Result<(), String> {
         .lock()
         .map_err(|_| "FXServer terminal output is unavailable.".to_string())?;
     terminal.entries.clear();
-    terminal.next_id = 0;
     Ok(())
 }
 
@@ -1999,6 +2129,14 @@ fn read_process_resources(
 }
 
 fn send_rcon_command(config: &FxserverRconConfig, command: &str) -> Result<String, String> {
+    send_rcon_command_with_timeout(config, command, Duration::from_secs(4))
+}
+
+fn send_rcon_command_with_timeout(
+    config: &FxserverRconConfig,
+    command: &str,
+    timeout: Duration,
+) -> Result<String, String> {
     let host = config.host.trim();
     let password = config.password.trim();
     let command = command.trim();
@@ -2018,9 +2156,6 @@ fn send_rcon_command(config: &FxserverRconConfig, command: &str) -> Result<Strin
     let socket = UdpSocket::bind("0.0.0.0:0")
         .map_err(|error| format!("Failed to open local RCON UDP socket: {error}"))?;
     socket
-        .set_read_timeout(Some(rcon_response_timeout()))
-        .map_err(|error| format!("Failed to configure RCON read timeout: {error}"))?;
-    socket
         .set_write_timeout(Some(Duration::from_secs(4)))
         .map_err(|error| format!("Failed to configure RCON write timeout: {error}"))?;
 
@@ -2035,13 +2170,29 @@ fn send_rcon_command(config: &FxserverRconConfig, command: &str) -> Result<Strin
         )
     })?;
 
+    let deadline = Instant::now() + timeout;
     let mut responses = Vec::new();
     let mut buffer = [0_u8; 4096];
     loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        let wait = if responses.is_empty() {
+            remaining
+        } else {
+            remaining.min(Duration::from_millis(150))
+        };
+        socket
+            .set_read_timeout(Some(wait))
+            .map_err(|error| format!("Failed to configure RCON response timeout: {error}"))?;
         match socket.recv_from(&mut buffer) {
             Ok((length, _)) => {
                 let response = parse_quake_rcon_response(&buffer[..length]);
                 if !response.trim().is_empty() {
+                    if response.to_ascii_lowercase().contains("bad rconpassword") {
+                        return Err("RCON authentication failed. Check rcon_password.".to_string());
+                    }
                     responses.push(response);
                 }
             }
@@ -2057,12 +2208,7 @@ fn send_rcon_command(config: &FxserverRconConfig, command: &str) -> Result<Strin
         }
     }
 
-    let response = responses.join("\n").trim().to_string();
-    if response.to_ascii_lowercase().contains("bad rconpassword") {
-        return Err("RCON authentication failed. Check rcon_password.".to_string());
-    }
-
-    Ok(response)
+    Ok(responses.join("\n").trim().to_string())
 }
 
 fn parse_quake_rcon_response(packet: &[u8]) -> String {
@@ -2075,16 +2221,6 @@ fn parse_quake_rcon_response(packet: &[u8]) -> String {
         .trim_matches(char::from(0))
         .trim()
         .to_string()
-}
-
-#[cfg(not(test))]
-fn rcon_response_timeout() -> Duration {
-    Duration::from_secs(4)
-}
-
-#[cfg(test)]
-fn rcon_response_timeout() -> Duration {
-    Duration::from_millis(100)
 }
 
 fn rcon_password_path() -> Result<PathBuf, String> {
@@ -2229,6 +2365,110 @@ fn decrypt_secret(_: &[u8]) -> Result<Vec<u8>, String> {
 mod tests {
     use super::*;
     use std::sync::mpsc;
+
+    #[test]
+    fn lifecycle_actions_cannot_overlap_across_manager_clones() {
+        let manager = FxserverManager::default();
+        let clone = manager.clone();
+        let guard = manager.lifecycle.lock().unwrap();
+        assert!(stop_fxserver_blocking(&clone)
+            .unwrap_err()
+            .contains("in progress"));
+        drop(guard);
+        stop_fxserver_blocking(&clone).unwrap();
+    }
+
+    #[test]
+    fn clearing_terminal_keeps_cursor_ids_monotonic() {
+        let manager = FxserverManager::default();
+        append_terminal_line(&manager.terminal, "stdout", "before").unwrap();
+        let next_id = manager.terminal.lock().unwrap().next_id;
+        clear_terminal(&manager.terminal).unwrap();
+        append_terminal_line(&manager.terminal, "stdout", "after").unwrap();
+        assert_eq!(manager.terminal.lock().unwrap().next_id, next_id + 1);
+    }
+
+    #[test]
+    fn quake_rcon_collects_multiple_packets_without_waiting_four_seconds() {
+        let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let port = socket.local_addr().unwrap().port();
+        let server = thread::spawn(move || {
+            let (_, peer) = socket.recv_from(&mut [0; 1024]).unwrap();
+            socket
+                .send_to(b"\xff\xff\xff\xffprint\nfirst", peer)
+                .unwrap();
+            thread::sleep(Duration::from_millis(30));
+            socket
+                .send_to(b"\xff\xff\xff\xffprint\nsecond", peer)
+                .unwrap();
+        });
+        let started = Instant::now();
+        let result = send_rcon_command(
+            &FxserverRconConfig {
+                host: "127.0.0.1".into(),
+                port,
+                password: "test".into(),
+            },
+            "status",
+        )
+        .unwrap();
+        server.join().unwrap();
+        assert_eq!(result, "first\nsecond");
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn quake_rcon_has_an_absolute_deadline_even_with_continuous_output() {
+        let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let port = socket.local_addr().unwrap().port();
+        let server = thread::spawn(move || {
+            let (_, peer) = socket.recv_from(&mut [0; 1024]).unwrap();
+            for _ in 0..40 {
+                let _ = socket.send_to(b"\xff\xff\xff\xffprint\noutput", peer);
+                thread::sleep(Duration::from_millis(20));
+            }
+        });
+        let started = Instant::now();
+        let result = send_rcon_command_with_timeout(
+            &FxserverRconConfig {
+                host: "127.0.0.1".into(),
+                port,
+                password: "test".into(),
+            },
+            "status",
+            Duration::from_millis(200),
+        )
+        .unwrap();
+        let elapsed = started.elapsed();
+        server.join().unwrap();
+        assert!(!result.is_empty());
+        assert!(elapsed < Duration::from_millis(700));
+    }
+
+    #[test]
+    fn quake_rcon_silent_response_is_bounded() {
+        let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let port = socket.local_addr().unwrap().port();
+        let started = Instant::now();
+        let result = send_rcon_command_with_timeout(
+            &FxserverRconConfig {
+                host: "127.0.0.1".into(),
+                port,
+                password: "test".into(),
+            },
+            "status",
+            Duration::from_millis(100),
+        )
+        .unwrap();
+        assert!(result.is_empty());
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
 
     #[test]
     fn quake_rcon_sends_udp_packet_and_reads_response() {

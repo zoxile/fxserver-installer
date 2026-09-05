@@ -1,5 +1,15 @@
 <script module lang="ts">
-	import type { FxserverTerminalEntry as CachedTerminalEntry, FxserverTerminalSegment as CachedTerminalSegment } from "$lib/modules/fxserver";
+	import type { FxserverStatus, FxserverTerminalEntry as CachedTerminalEntry, FxserverTerminalSegment as CachedTerminalSegment } from "$lib/modules/fxserver";
+
+	let status = $state<FxserverStatus>({ running: false });
+	let terminalCommand = $state("");
+	let starting = $state(false);
+	let stopping = $state(false);
+	let restarting = $state(false);
+	let rconSending = $state(false);
+	let error = $state("");
+	let message = $state("");
+	let terminalRevision = $state(0);
 
 	type CachedRenderTerminalSegment = CachedTerminalSegment & {
 		className?: string;
@@ -48,7 +58,7 @@
 	import { scaleTime } from "d3-scale";
 	import { curveNatural } from "d3-shape";
 	import { AreaChart } from "layerchart";
-	import { onDestroy, onMount, tick } from "svelte";
+	import { onDestroy, onMount, tick, untrack } from "svelte";
 	import { Checkbox } from "$lib/components/ui/checkbox/index.js";
 	import * as Card from "$lib/components/ui/card/index.js";
 	import { Button } from "$lib/components/ui/button/index.js";
@@ -70,8 +80,8 @@
 		sendFxserverCommand,
 		startFxserver,
 		stopFxserver,
+		restartFxserver,
 		type FxserverRconConfig,
-		type FxserverStatus,
 		type FxserverTerminalEntry,
 		type FxserverTerminalSegment,
 	} from "$lib/modules/fxserver";
@@ -138,22 +148,16 @@
 
 	let artifactPath = $state("");
 	let artifact = $state<InstalledArtifactInfo | null>(null);
-	let status = $state<FxserverStatus>({ running: false });
-	let terminalEntries = $state<RenderTerminalEntry[]>([...cachedTerminalEntries]);
-	let terminalCommand = $state("");
+	let terminalEntries = $state.raw<RenderTerminalEntry[]>([...cachedTerminalEntries]);
 	let rconHost = $state("127.0.0.1");
 	let rconPort = $state(30120);
 	let rconPassword = $state("");
 	let envValues = $state<Record<string, string>>(emptyEnvironment());
 	let serverProfile = $state("");
 	let storageReady = false;
+	let pageActive = true;
+	let statusRefresh: Promise<void> | null = null;
 	let busy = $state(false);
-	let starting = $state(false);
-	let stopping = $state(false);
-	let restarting = $state(false);
-	let rconSending = $state(false);
-	let error = $state("");
-	let message = $state("");
 	let refreshTimer: number | undefined;
 	let terminalTimer: number | undefined;
 	let uptimeTimer: number | undefined;
@@ -161,6 +165,7 @@
 	let nowSeconds = $state(Math.floor(Date.now() / 1000));
 	let terminalViewport: HTMLDivElement | null = null;
 	let terminalRefreshPending = false;
+	let terminalResetPending = false;
 	let pendingTerminalEntries: RenderTerminalEntry[] = [];
 	let terminalFlushTimer: number | undefined;
 	let terminalScrollFrame: number | undefined;
@@ -168,7 +173,7 @@
 	let lastSavedRconPassword = "";
 	let metricWindow = $state<MetricWindow>("5m");
 	let resourceWindowNowMs = $state(Date.now());
-	let resourceSamples = $state<ResourceSample[]>([...cachedResourceSamples]);
+	let resourceSamples = $state.raw<ResourceSample[]>([...cachedResourceSamples]);
 	let resourceExtremes = $state<ResourceExtremes>({ ...cachedResourceExtremes });
 
 	const rconConfig = $derived<FxserverRconConfig>({
@@ -215,6 +220,8 @@
 	});
 
 	onDestroy(() => {
+		pageActive = false;
+		void persistRconPassword();
 		if (refreshTimer) window.clearInterval(refreshTimer);
 		if (terminalTimer) window.clearInterval(terminalTimer);
 		if (uptimeTimer) window.clearInterval(uptimeTimer);
@@ -222,6 +229,11 @@
 		if (terminalFlushTimer) window.clearTimeout(terminalFlushTimer);
 		if (terminalScrollFrame) window.cancelAnimationFrame(terminalScrollFrame);
 		flushTerminalEntries();
+	});
+
+	$effect(() => {
+		terminalRevision;
+		untrack(() => void refreshTerminal({ reset: true, scrollToBottom: false }));
 	});
 
 	$effect(() => {
@@ -328,18 +340,19 @@
 
 	async function persistRconPassword() {
 		if (!rconPasswordLoaded || rconPassword === lastSavedRconPassword) return;
+		const password = rconPassword;
 		if (rconPasswordSaveTimer) {
 			window.clearTimeout(rconPasswordSaveTimer);
 			rconPasswordSaveTimer = undefined;
 		}
 
 		try {
-			if (rconPassword) {
-				await saveFxserverRconPassword(rconPassword);
+			if (password) {
+				await saveFxserverRconPassword(password);
 			} else {
 				await clearFxserverRconPassword();
 			}
-			lastSavedRconPassword = rconPassword;
+			lastSavedRconPassword = password;
 		} catch (caught) {
 			error = caught instanceof Error ? caught.message : String(caught);
 		}
@@ -405,10 +418,19 @@
 	}
 
 	async function refreshStatus(showMessage = true) {
-		status = await getFxserverStatus({ logResult: showMessage });
-		nowSeconds = Math.floor(Date.now() / 1000);
-		recordResourceSample(status);
-		if (showMessage) message = status.running ? "FXServer status refreshed." : "FXServer is not running from this app.";
+		if (statusRefresh) return statusRefresh;
+		statusRefresh = (async () => {
+			try {
+				status = await getFxserverStatus({ logResult: showMessage });
+				if (!pageActive) return;
+				nowSeconds = Math.floor(Date.now() / 1000);
+				recordResourceSample(status);
+				if (showMessage) message = status.running ? "FXServer status refreshed." : "FXServer is not running from this app.";
+			} catch (caught) {
+				error = caught instanceof Error ? caught.message : String(caught);
+			}
+		})().finally(() => { statusRefresh = null; });
+		return statusRefresh;
 	}
 
 	function recordResourceSample(nextStatus: FxserverStatus) {
@@ -450,12 +472,17 @@
 	}
 
 	async function refreshTerminal(options: { reset?: boolean; scrollToBottom?: boolean } = {}) {
-		if (terminalRefreshPending) return;
+		if (!pageActive) return;
+		if (terminalRefreshPending) {
+			terminalResetPending ||= options.reset ?? false;
+			return;
+		}
 		terminalRefreshPending = true;
 		try {
 			const reset = options.reset ?? false;
 			const afterId = reset ? null : latestTerminalEntryId();
 			const result = await getFxserverTerminal(reset ? terminalBufferLimit : 200, afterId);
+			if (!pageActive) return;
 			mergeTerminalEntries(result.entries, reset);
 			if (options.scrollToBottom ?? true) {
 				autoScrollTerminal = true;
@@ -469,6 +496,10 @@
 			error = caught instanceof Error ? caught.message : String(caught);
 		} finally {
 			terminalRefreshPending = false;
+			if (terminalResetPending) {
+				terminalResetPending = false;
+				void refreshTerminal({ reset: true, scrollToBottom: false });
+			}
 		}
 	}
 
@@ -510,7 +541,7 @@
 	}
 
 	function applyTerminalEntries(entries: (FxserverTerminalEntry | RenderTerminalEntry)[], suppressAutoScroll = false) {
-		const normalizedEntries = entries.map(normalizeTerminalEntry);
+		const normalizedEntries = entries.map((entry) => "toneClass" in entry ? entry : normalizeTerminalEntry(entry));
 		terminalEntries = normalizedEntries;
 		cachedTerminalEntries = normalizedEntries;
 		if (suppressAutoScroll) {
@@ -559,6 +590,7 @@
 	}
 
 	async function startServer() {
+		if (!canStart) return;
 		error = "";
 		message = "";
 		starting = true;
@@ -566,7 +598,8 @@
 		try {
 			saveEnvironment();
 			await startFxserver(launchRequest());
-			await Promise.all([refreshStatus(false), refreshTerminal({ reset: true })]);
+			terminalRevision += 1;
+			await refreshStatus(false);
 			message = "FXServer started with the selected TXHOST environment.";
 		} catch (caught) {
 			error = caught instanceof Error ? caught.message : String(caught);
@@ -576,32 +609,36 @@
 	}
 
 	async function restartServer() {
+		if (!canRestart) return;
 		error = "";
 		message = "";
 		restarting = true;
 
 		try {
 			saveEnvironment();
-			await stopFxserver();
-			await startFxserver(launchRequest());
-			await Promise.all([refreshStatus(false), refreshTerminal({ reset: true })]);
+			await restartFxserver(launchRequest());
+			terminalRevision += 1;
+			await refreshStatus(false);
 			message = "FXServer restarted with the selected TXHOST environment.";
 		} catch (caught) {
 			error = caught instanceof Error ? caught.message : String(caught);
-			await Promise.all([refreshStatus(false), refreshTerminal({ reset: true })]).catch(() => undefined);
+			terminalRevision += 1;
+			await refreshStatus(false);
 		} finally {
 			restarting = false;
 		}
 	}
 
 	async function stopServer() {
+		if (starting || stopping || restarting) return;
 		error = "";
 		message = "";
 		stopping = true;
 
 		try {
 			await stopFxserver();
-			await Promise.all([refreshStatus(false), refreshTerminal({ reset: true })]);
+			terminalRevision += 1;
+			await refreshStatus(false);
 			message = "FXServer stopped.";
 		} catch (caught) {
 			error = caught instanceof Error ? caught.message : String(caught);
@@ -726,15 +763,16 @@
 
 	async function submitTerminalCommand() {
 		const command = terminalCommand.trim();
-		if (!command || rconSending) return;
+		if (!command || rconSending || starting || stopping || restarting) return;
+		const config = { ...rconConfig };
 
 		rconSending = true;
 		terminalCommand = "";
 		await tick();
 		try {
-			await persistRconPassword();
-			await sendFxserverCommand(command, rconConfig);
-			await refreshTerminal({ scrollToBottom: true });
+			void persistRconPassword();
+			await sendFxserverCommand(command, config);
+			if (pageActive) await refreshTerminal({ scrollToBottom: true });
 		} catch (caught) {
 			if (!terminalCommand.trim()) terminalCommand = command;
 			error = caught instanceof Error ? caught.message : String(caught);
@@ -838,7 +876,7 @@
 		</Card.Header>
 		<Card.Content class="space-y-4">
 			<div class="flex flex-wrap items-center gap-2">
-				<Button onclick={startServer} disabled={!canStart} title="Start FXServer.exe with the configured TXHOST variables">
+				<Button onclick={startServer} disabled={!canStart} aria-busy={starting} title="Start FXServer.exe with the configured TXHOST variables">
 					{#if starting}
 						<LoaderCircleIcon class="animate-spin" />
 					{:else}
@@ -846,7 +884,7 @@
 					{/if}
 					Start
 				</Button>
-				<Button variant="secondary" onclick={restartServer} disabled={!canRestart} title="Restart FXServer with the configured TXHOST variables">
+				<Button variant="secondary" onclick={restartServer} disabled={!canRestart} aria-busy={restarting} title="Restart FXServer with the configured TXHOST variables">
 					{#if restarting}
 						<LoaderCircleIcon class="animate-spin" />
 					{:else}
@@ -854,7 +892,7 @@
 					{/if}
 					Restart
 				</Button>
-				<Button variant="destructive" onclick={stopServer} disabled={!status.running || stopping || restarting} title="Stop the FXServer process started by this app">
+				<Button variant="destructive" onclick={stopServer} disabled={!status.running || starting || stopping || restarting} aria-busy={stopping} title="Stop the FXServer process started by this app">
 					{#if stopping}
 						<LoaderCircleIcon class="animate-spin" />
 					{:else}
@@ -1130,10 +1168,10 @@
 					bind:value={terminalCommand}
 					placeholder="status, refresh, say hello..."
 					title="Command to send to FXServer through RCON"
-					disabled={!status.running || !rconPassword.trim()}
+					disabled={!status.running || !rconPassword.trim() || starting || stopping || restarting}
 					class="rounded-sm font-mono text-xs"
 				/>
-				<Button type="submit" disabled={!status.running || !terminalCommand.trim() || !rconPassword.trim() || rconSending} title="Send command through RCON">
+				<Button type="submit" disabled={!status.running || !terminalCommand.trim() || !rconPassword.trim() || rconSending || starting || stopping || restarting} aria-busy={rconSending} class="min-w-28" title="Send command through RCON">
 					{#if rconSending}
 						<LoaderCircleIcon class="animate-spin" />
 						Sending

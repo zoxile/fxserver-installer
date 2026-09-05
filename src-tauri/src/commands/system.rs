@@ -4,7 +4,11 @@ use std::{fs, path::Path, process::Command};
 use crate::process::CommandNoWindowExt;
 
 #[tauri::command]
-pub fn open_external_url(url: String) -> Result<(), String> {
+pub async fn open_external_url(url: String) -> Result<(), String> {
+    super::run_blocking(move || open_external_url_blocking(url)).await
+}
+
+fn open_external_url_blocking(url: String) -> Result<(), String> {
     let trimmed = url.trim();
 
     if !(trimmed.starts_with("https://") || trimmed.starts_with("http://")) {
@@ -19,7 +23,11 @@ pub fn open_external_url(url: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn read_text_file(path: String, max_bytes: Option<u64>) -> Result<String, String> {
+pub async fn read_text_file(path: String, max_bytes: Option<u64>) -> Result<String, String> {
+    super::run_blocking(move || read_text_file_blocking(path, max_bytes)).await
+}
+
+fn read_text_file_blocking(path: String, max_bytes: Option<u64>) -> Result<String, String> {
     let path = Path::new(path.trim());
 
     if !path.exists() {

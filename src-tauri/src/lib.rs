@@ -103,6 +103,7 @@ pub fn run() {
             commands::fxserver::send_fxserver_command,
             commands::fxserver::start_fxserver,
             commands::fxserver::stop_fxserver,
+            commands::fxserver::restart_fxserver,
             commands::fxserver::update_github_resource,
             commands::fxserver::clear_fxserver_rcon_password,
             commands::jooat::get_jooat_resolver_status,
@@ -155,17 +156,15 @@ pub fn run() {
                 label,
                 event: WindowEvent::CloseRequested { api, .. },
                 ..
-            } => {
-                if label == MAIN_WINDOW_LABEL {
-                    api.prevent_close();
-                    hide_main_window(app_handle);
-                }
+            } if label == MAIN_WINDOW_LABEL => {
+                api.prevent_close();
+                hide_main_window(app_handle);
             }
-            tauri::RunEvent::ExitRequested { api, .. } => {
-                if !SHUTDOWN_IN_PROGRESS.load(Ordering::SeqCst) {
-                    api.prevent_exit();
-                    request_app_quit(app_handle);
-                }
+            tauri::RunEvent::ExitRequested { api, .. }
+                if !SHUTDOWN_IN_PROGRESS.load(Ordering::SeqCst) =>
+            {
+                api.prevent_exit();
+                request_app_quit(app_handle);
             }
             _ => {}
         });

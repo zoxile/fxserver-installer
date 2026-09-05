@@ -19,7 +19,13 @@ pub async fn get_windows_artifact_metadata() -> Result<ArtifactMetadata, String>
 }
 
 #[tauri::command]
-pub fn get_installed_windows_artifact_info(
+pub async fn get_installed_windows_artifact_info(
+    destination: String,
+) -> Result<InstalledArtifactInfo, String> {
+    super::run_blocking(move || get_installed_windows_artifact_info_blocking(destination)).await
+}
+
+fn get_installed_windows_artifact_info_blocking(
     destination: String,
 ) -> Result<InstalledArtifactInfo, String> {
     let destination = PathBuf::from(destination.trim());
@@ -37,7 +43,7 @@ pub fn get_installed_windows_artifact_info(
     let marker_version = read_marker_version(&marker_path)?;
     let version = version_info
         .as_ref()
-        .and_then(|info| artifact_version_from_file_info(info))
+        .and_then(artifact_version_from_file_info)
         .or(marker_version);
 
     let installed =
@@ -104,8 +110,7 @@ fn artifact_version_from_file_info(info: &FileVersionInfo) -> Option<String> {
                 .and_then(|version| {
                     version
                         .split(|character: char| !character.is_ascii_digit())
-                        .filter(|part| !part.is_empty())
-                        .next_back()
+                        .rfind(|part| !part.is_empty())
                 })
                 .map(str::to_string)
         })

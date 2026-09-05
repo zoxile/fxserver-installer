@@ -6,36 +6,36 @@ use crate::{
 };
 
 #[tauri::command]
-pub fn get_jooat_resolver_status(app: AppHandle) -> JooatResolverStatus {
-    get_status(&app)
+pub async fn get_jooat_resolver_status(app: AppHandle) -> Result<JooatResolverStatus, String> {
+    super::run_blocking(move || Ok(get_status(&app))).await
 }
 
 #[tauri::command]
-pub fn prepare_jooat_resolver_database(
+pub async fn prepare_jooat_resolver_database(
     app: AppHandle,
     manifest: JooatResolverManifest,
 ) -> Result<JooatResolverStatus, String> {
-    prepare_database(&app, manifest)
+    super::run_blocking(move || prepare_database(&app, manifest)).await
 }
 
 #[tauri::command]
-pub fn save_jooat_resolver_shard(
+pub async fn save_jooat_resolver_shard(
     app: AppHandle,
     prefix: String,
     content: String,
 ) -> Result<JooatResolverStatus, String> {
-    save_shard(&app, prefix, content)
+    super::run_blocking(move || save_shard(&app, prefix, content)).await
 }
 
 #[tauri::command]
-pub fn remove_jooat_resolver_database(app: AppHandle) -> Result<JooatResolverStatus, String> {
-    remove_database(&app)
+pub async fn remove_jooat_resolver_database(app: AppHandle) -> Result<JooatResolverStatus, String> {
+    super::run_blocking(move || remove_database(&app)).await
 }
 
 #[tauri::command]
-pub fn resolve_jooat_hashes(
+pub async fn resolve_jooat_hashes(
     app: AppHandle,
     queries: Vec<String>,
 ) -> Result<Vec<JooatResolvedHash>, String> {
-    resolve_hashes(&app, queries)
+    super::run_blocking(move || resolve_hashes(&app, queries)).await
 }
