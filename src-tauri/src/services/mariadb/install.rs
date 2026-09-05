@@ -1,6 +1,6 @@
 use std::{
     env, fs,
-    io::Read,
+    io::{Read, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     thread,
@@ -161,7 +161,7 @@ pub fn update_mariadb(report: &dyn Fn(&str)) -> Result<String, String> {
     report("Checking the installed MariaDB version.");
     let after = wait_for_package_version_change(before.as_deref(), Duration::from_secs(60))
         .or_else(|| get_package_info().installed_package_version);
-    if after.as_deref().map_or(true, |version| {
+    if after.as_deref().is_none_or(|version| {
         before
             .as_deref()
             .is_some_and(|old| !compare_versions(old, version).is_lt())
@@ -243,10 +243,17 @@ pub(super) fn run_process(
     let stderr = drain_output(child.stderr.take().expect("piped stderr"));
     let started = Instant::now();
     loop {
-        if let Some(status) = child
-            .try_wait()
-            .map_err(|error| format!("Failed to wait for {command}: {error}"))?
-        {
+        let status = match child.try_wait() {
+            Ok(status) => status,
+            Err(error) => {
+                let _ = crate::commands::fxserver::terminate_process_tree(child.id());
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("Failed to wait for {command}: {error}"));
+            }
+        };
+        // Descendants may inherit the pipes after the direct child exits.
+        if let Some(status) = status.filter(|_| stdout.is_finished() && stderr.is_finished()) {
             let stdout = stdout.join().unwrap_or_default();
             let mut stderr = stderr.join().unwrap_or_default();
             if !status.success() && stderr.is_empty() {
@@ -263,6 +270,7 @@ pub(super) fn run_process(
         }
 
         if started.elapsed() >= timeout {
+            let _ = crate::commands::fxserver::terminate_process_tree(child.id());
             let _ = child.kill();
             let _ = child.wait();
             return Err(format!(
@@ -306,6 +314,7 @@ $serviceName = '{escaped_service_name}'
 $logPath = '{escaped_log_path}'
 $process = Start-Process -WindowStyle Hidden -FilePath 'msiexec.exe' -ArgumentList @('/x', $productCode, '/qn', '/norestart', 'CLEANUPDATA=""', '/l*v', $logPath) -Wait -PassThru
 $exitCode = $process.ExitCode
+if ($exitCode -notin @(0, 1641, 3010)) {{ exit $exitCode }}
 $service = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
 if ($service) {{
     if ($service.Status -ne 'Stopped') {{
@@ -314,7 +323,7 @@ if ($service) {{
     }}
     Start-Process -WindowStyle Hidden -FilePath 'sc.exe' -ArgumentList @('delete', $serviceName) -Wait | Out-Null
 }}
-exit $exitCode
+exit 0
 "#
     );
 
@@ -327,22 +336,54 @@ fn run_elevated_powershell_script(
     timeout: Duration,
 ) -> Result<InstallOutput, String> {
     let script_path = env::temp_dir().join(format!(
-        "fxserver-installer-{script_name}-{}.ps1",
+        "fxserver-installer-{script_name}-{}-{}.ps1",
+        std::process::id(),
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .map(|duration| duration.as_secs())
+            .map(|duration| duration.as_nanos())
             .unwrap_or(0)
     ));
-    fs::write(&script_path, script).map_err(|error| {
-        format!(
-            "Failed to prepare elevated PowerShell script {}: {error}",
-            script_path.display()
-        )
-    })?;
+    // Persist only DPAPI-protected content, including any credentials in the script.
+    let protected = protected_script_wrapper(script)?;
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&script_path)
+        .map_err(|error| {
+            format!(
+                "Failed to prepare elevated PowerShell script {}: {error}",
+                script_path.display()
+            )
+        })?;
 
-    let output = run_script_via_elevated_app(&script_path, timeout);
+    let output = file
+        .write_all(protected.as_bytes())
+        .and_then(|_| file.sync_all())
+        .map_err(|error| format!("Failed to write elevated script: {error}"));
+    drop(file);
+    let output = output.and_then(|_| run_script_via_elevated_app(&script_path, timeout));
     let _ = fs::remove_file(&script_path);
     output
+}
+
+fn protected_script_wrapper(script: &str) -> Result<String, String> {
+    let encrypted = crate::commands::fxserver::encrypt_secret(script.as_bytes())?;
+    let hex: String = encrypted.iter().map(|byte| format!("{byte:02x}")).collect();
+    Ok(format!(
+        r#"$ErrorActionPreference = 'Stop'
+try {{
+    Add-Type -AssemblyName System.Security
+    $hex = '{hex}'
+    $bytes = New-Object byte[] ($hex.Length / 2)
+    for ($i = 0; $i -lt $bytes.Length; $i++) {{ $bytes[$i] = [Convert]::ToByte($hex.Substring($i * 2, 2), 16) }}
+    $plain = [Security.Cryptography.ProtectedData]::Unprotect($bytes, $null, [Security.Cryptography.DataProtectionScope]::CurrentUser)
+    & ([ScriptBlock]::Create([Text.Encoding]::UTF8.GetString($plain)))
+}} catch {{
+    [Console]::Error.WriteLine('Elevated operation failed. Check the installer log; the helper requires the same Windows user.')
+    exit 1
+}}
+"#
+    ))
 }
 
 fn run_script_via_elevated_app(
@@ -596,8 +637,14 @@ fn build_msi_overrides(
         return Err("Root password is required for a configured MariaDB install.".to_string());
     }
 
-    if options.service_name.trim().is_empty() {
-        return Err("Service name is required.".to_string());
+    if options.service_name.is_empty()
+        || options.service_name.len() > 64
+        || !options
+            .service_name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return Err("Service name must contain only letters, digits, hyphens, or underscores (1-64 characters).".to_string());
     }
 
     let mut properties = vec![
@@ -731,6 +778,42 @@ fn write_fresh_config_template(
     Ok(path)
 }
 
+fn fresh_database_arguments(
+    options: &MariaDBInstallOptions,
+    data_dir: &Path,
+    config_template: &Path,
+) -> String {
+    let mut args = vec![
+        format!("--datadir={}", data_dir.display()),
+        format!("--service={}", options.service_name),
+        format!("--password={}", options.root_password),
+        format!("--port={}", options.port),
+        format!("--socket={}", options.service_name),
+        format!("--config={}", config_template.display()),
+        "--silent".into(),
+    ];
+    if options.allow_remote_root_access {
+        args.push("--allow-remote-root-access".into());
+    }
+    if options.create_anonymous_user {
+        args.push("--default-user".into());
+    }
+    if options.skip_networking {
+        args.push("--skip-networking".into());
+    }
+    if let Some(page_size) = options
+        .page_size
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        args.push(format!("--innodb-page-size={page_size}"));
+    }
+    args.iter()
+        .map(|arg| quote_arg(arg))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 fn run_elevated_fresh_database_init(
     options: &MariaDBInstallOptions,
     install_db_path: &Path,
@@ -739,55 +822,24 @@ fn run_elevated_fresh_database_init(
 ) -> Result<InstallOutput, String> {
     let escaped_install_db_path = install_db_path.to_string_lossy().replace('\'', "''");
     let escaped_data_dir = data_dir.to_string_lossy().replace('\'', "''");
-    let escaped_config_template = config_template.to_string_lossy().replace('\'', "''");
     let escaped_service_name = options.service_name.replace('\'', "''");
-    let escaped_password = options.root_password.replace('\'', "''");
-    let mut flags = Vec::new();
-    if options.allow_remote_root_access {
-        flags.push("'--allow-remote-root-access'".to_string());
-    }
-    if options.create_anonymous_user {
-        flags.push("'--default-user'".to_string());
-    }
-    if options.skip_networking {
-        flags.push("'--skip-networking'".to_string());
-    }
-    if let Some(page_size) = options
-        .page_size
-        .as_deref()
-        .filter(|value| !value.trim().is_empty())
-    {
-        flags.push(format!(
-            "'--innodb-page-size={}'",
-            page_size.replace('\'', "''")
-        ));
-    }
-    let flags = if flags.is_empty() {
-        String::new()
-    } else {
-        format!(", {}", flags.join(", "))
-    };
+    let install_arguments =
+        fresh_database_arguments(options, data_dir, config_template).replace('\'', "''");
     let script = format!(
-        r#"$ErrorActionPreference = 'SilentlyContinue'
+        r#"$ErrorActionPreference = 'Stop'
 $installDbPath = '{escaped_install_db_path}'
 $dataDir = '{escaped_data_dir}'
 $serviceName = '{escaped_service_name}'
-$configTemplate = '{escaped_config_template}'
 $service = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
 if ($service) {{
-    if ($service.Status -ne 'Stopped') {{
-        Stop-Service -Name $serviceName -Force -ErrorAction SilentlyContinue
-        $service.WaitForStatus('Stopped', [TimeSpan]::FromSeconds(30))
-    }}
-    Start-Process -WindowStyle Hidden -FilePath 'sc.exe' -ArgumentList @('delete', $serviceName) -Wait | Out-Null
-    Start-Sleep -Seconds 2
+    throw "The selected service already exists. Fresh initialization will not replace it."
 }}
-if ((Test-Path -LiteralPath $dataDir) -and @(Get-ChildItem -LiteralPath $dataDir -Force -ErrorAction SilentlyContinue).Count -gt 0) {{
+if ((Test-Path -LiteralPath $dataDir) -and @(Get-ChildItem -LiteralPath $dataDir -Force -ErrorAction Stop).Count -gt 0) {{
     Write-Error "Data directory is not empty: $dataDir"
     exit 71
 }}
 New-Item -ItemType Directory -Path $dataDir -Force | Out-Null
-$installArgs = @('--datadir=' + $dataDir, '--service=' + $serviceName, '--password={escaped_password}', '--port={port}', '--socket=' + $serviceName, '--config=' + $configTemplate, '--silent'{flags})
+$installArgs = '{install_arguments}'
 $init = Start-Process -WindowStyle Hidden -FilePath $installDbPath -ArgumentList $installArgs -Wait -PassThru
 if ($init.ExitCode -ne 0) {{
     exit $init.ExitCode
@@ -805,8 +857,7 @@ do {{
     Start-Sleep -Seconds 1
 }} while ((Get-Date) -lt $deadline)
 exit 72
-"#,
-        port = options.port
+"#
     );
 
     run_elevated_powershell_script("mariadb-fresh-database", &script, Duration::from_secs(180))
@@ -1150,13 +1201,23 @@ fn run_elevated_reset_preserved_root_password(
     options: &MariaDBInstallOptions,
     my_ini: &Path,
 ) -> Result<InstallOutput, String> {
+    let script = preserved_root_reset_script(options, my_ini);
+    run_elevated_powershell_script(
+        "mariadb-reset-preserved-root",
+        &script,
+        Duration::from_secs(180),
+    )
+}
+
+fn preserved_root_reset_script(options: &MariaDBInstallOptions, my_ini: &Path) -> String {
     let escaped_service_name = options.service_name.replace('\'', "''");
     let escaped_my_ini = my_ini.to_string_lossy().replace('\'', "''");
-    let root_password = sql_string_literal(&options.root_password);
-    let script = format!(
+    let root_password = sql_string_literal(&options.root_password).replace('\'', "''");
+    format!(
         r#"$ErrorActionPreference = 'Stop'
 $serviceName = '{escaped_service_name}'
 $myIni = '{escaped_my_ini}'
+$rootPasswordSql = '{root_password}'
 $machineHost = [System.Net.Dns]::GetHostName().ToLowerInvariant().Replace("'", "''")
 $initFile = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), "fxserver-mariadb-reset-root-$([System.Guid]::NewGuid().ToString('N')).sql")
 $originalConfig = [System.IO.File]::ReadAllText($myIni)
@@ -1164,18 +1225,16 @@ $initPathForIni = $initFile.Replace('\', '/')
 $sql = @"
 CREATE USER IF NOT EXISTS 'root'@'localhost';
 GRANT ALL PRIVILEGES ON *.* TO 'root'@'localhost' WITH GRANT OPTION;
-ALTER USER 'root'@'localhost' IDENTIFIED BY {root_password};
+ALTER USER 'root'@'localhost' IDENTIFIED BY $rootPasswordSql;
 CREATE USER IF NOT EXISTS 'root'@'127.0.0.1';
 GRANT ALL PRIVILEGES ON *.* TO 'root'@'127.0.0.1' WITH GRANT OPTION;
-ALTER USER 'root'@'127.0.0.1' IDENTIFIED BY {root_password};
+ALTER USER 'root'@'127.0.0.1' IDENTIFIED BY $rootPasswordSql;
 CREATE USER IF NOT EXISTS 'root'@'::1';
 GRANT ALL PRIVILEGES ON *.* TO 'root'@'::1' WITH GRANT OPTION;
-ALTER USER 'root'@'::1' IDENTIFIED BY {root_password};
+ALTER USER 'root'@'::1' IDENTIFIED BY $rootPasswordSql;
 CREATE USER IF NOT EXISTS 'root'@'$machineHost';
 GRANT ALL PRIVILEGES ON *.* TO 'root'@'$machineHost' WITH GRANT OPTION;
-ALTER USER 'root'@'$machineHost' IDENTIFIED BY {root_password};
-DROP DATABASE IF EXISTS test;
-DELETE FROM mysql.global_priv WHERE User = 'PUBLIC';
+ALTER USER 'root'@'$machineHost' IDENTIFIED BY $rootPasswordSql;
 FLUSH PRIVILEGES;
 "@
 $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
@@ -1225,12 +1284,6 @@ try {{
     Remove-Item -LiteralPath $initFile -Force -ErrorAction SilentlyContinue
 }}
 "#
-    );
-
-    run_elevated_powershell_script(
-        "mariadb-reset-preserved-root",
-        &script,
-        Duration::from_secs(180),
     )
 }
 
@@ -1259,7 +1312,15 @@ fn prepare_preserved_my_ini(
     data_dir: &Path,
 ) -> Result<PathBuf, String> {
     let my_ini = data_dir.join("my.ini");
-    let existing = fs::read_to_string(&my_ini).unwrap_or_default();
+    let existing = match fs::read_to_string(&my_ini) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => {
+            return Err(format!(
+                "Cannot read preserved MariaDB config; no config was replaced: {error}"
+            ))
+        }
+    };
     let content = rewrite_my_ini(&existing, options, install_dir, data_dir);
 
     write_text_allowing_elevation(&my_ini, &content)?;
@@ -1452,8 +1513,27 @@ fn property(name: &str, value: &str) -> String {
 }
 
 fn quote_arg(value: &str) -> String {
-    let escaped = value.replace('"', "\\\"");
-    format!("\"{escaped}\"")
+    let mut quoted = String::from("\"");
+    let mut slashes = 0;
+    for character in value.chars() {
+        if character == '\\' {
+            slashes += 1;
+            continue;
+        }
+        quoted.extend(std::iter::repeat_n(
+            '\\',
+            if character == '"' {
+                slashes * 2 + 1
+            } else {
+                slashes
+            },
+        ));
+        quoted.push(character);
+        slashes = 0;
+    }
+    quoted.extend(std::iter::repeat_n('\\', slashes * 2));
+    quoted.push('"');
+    quoted
 }
 
 fn push_property_bool(properties: &mut Vec<String>, name: &str, enabled: bool) {
@@ -1536,6 +1616,140 @@ fn extract_json_string(json: &str, key: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_argument_quoting_handles_quotes_and_trailing_slashes() {
+        assert_eq!(quote_arg(""), "\"\"");
+        assert_eq!(
+            quote_arg("C:\\Program Files\\MariaDB\\"),
+            "\"C:\\Program Files\\MariaDB\\\\\""
+        );
+        assert_eq!(quote_arg("a\\\" b"), "\"a\\\\\\\" b\"");
+    }
+
+    #[test]
+    fn fresh_initializer_quotes_each_native_argument() {
+        let mut options = options();
+        options.root_password = "space and \"quotes\"\\".into();
+        let arguments = fresh_database_arguments(
+            &options,
+            Path::new("C:/Data Files/"),
+            Path::new("C:/Temp Files/my.ini"),
+        );
+        for value in [
+            "--datadir=C:/Data Files/",
+            "--config=C:/Temp Files/my.ini",
+            "--password=space and \"quotes\"\\",
+        ] {
+            assert!(arguments.contains(&quote_arg(value)));
+        }
+    }
+
+    #[test]
+    fn installer_rejects_service_wildcards_before_running_commands() {
+        for service in [
+            "*",
+            "MariaDB*",
+            "MariaDB[12]",
+            "name\nother",
+            "name with spaces",
+        ] {
+            let mut options = options();
+            options.service_name = service.into();
+            assert!(
+                build_msi_overrides(&options, &InstallPlan::Fresh, Path::new("unused.log"))
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn unreadable_preserved_config_is_never_replaced_with_defaults() {
+        let root = std::env::temp_dir().join(format!(
+            "fxi-preserved-config-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&root).unwrap();
+        let path = root.join("my.ini");
+        fs::write(&path, [0xff, 0xfe, 0xff]).unwrap();
+        let result = prepare_preserved_my_ini(&options(), &root, &root);
+        let saved = fs::read(&path).unwrap();
+        fs::remove_file(path).unwrap();
+        fs::remove_dir(root).unwrap();
+        assert!(result.unwrap_err().contains("no config was replaced"));
+        assert_eq!(saved, [0xff, 0xfe, 0xff]);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn process_timeout_stops_an_inert_child() {
+        let started = Instant::now();
+        let result = run_process(
+            "powershell",
+            &["-NoProfile", "-Command", "Start-Sleep -Seconds 30"],
+            Duration::from_millis(200),
+        );
+        assert!(result.err().unwrap().contains("did not finish"));
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn preserved_password_is_literal_and_reset_does_not_delete_user_data() {
+        let mut options = options();
+        options.root_password =
+            "fixture'$(throw 'expanded')`n$env:USERNAME\n\"@\nthrow 'escaped'".into();
+        let script = preserved_root_reset_script(&options, Path::new("unused.ini"));
+        assert!(!script.contains("DROP DATABASE"));
+        assert!(!script.contains("DELETE FROM"));
+        // Evaluate only the two string assignments, never the service or file operations.
+        let assignment = script
+            .split_once("$rootPasswordSql = ")
+            .unwrap()
+            .1
+            .split_once("$machineHost = ")
+            .unwrap()
+            .0;
+        let sql = script
+            .split_once("$sql = @\"")
+            .unwrap()
+            .1
+            .split_once("\n\"@")
+            .unwrap()
+            .0;
+        let inert = format!("$ErrorActionPreference = 'Stop'; $rootPasswordSql = {assignment}\n$machineHost = 'fixture';\n$sql = @\"{sql}\n\"@\n[Console]::Out.Write($sql)");
+        let output = run_process(
+            "powershell",
+            &["-NoProfile", "-Command", &inert],
+            Duration::from_secs(15),
+        )
+        .unwrap();
+        assert!(output.success, "{}", output.stderr);
+        assert!(output
+            .stdout
+            .contains(&sql_string_literal(&options.root_password)));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn elevated_script_storage_is_encrypted_and_preserves_exit_status() {
+        let wrapper =
+            protected_script_wrapper("[Console]::Out.Write('fixture-secret'); exit 23").unwrap();
+        assert!(!wrapper.contains("fixture-secret"));
+        let output = run_process(
+            "powershell",
+            &["-NoProfile", "-Command", &wrapper],
+            Duration::from_secs(15),
+        )
+        .unwrap();
+        assert!(!output.success);
+        assert_eq!(output.stdout, "fixture-secret");
+        assert!(output.stderr.contains("23"));
+    }
 
     #[test]
     fn cancelled_elevation_is_not_reported_as_success() {
