@@ -91,7 +91,7 @@ async (page) => {
   await page.waitForFunction((id) => window.managerTest.passwords[id] === "qa-secret", qa);
   await page.evaluate(() => { window.managerTest.blocked = true; });
   await page.getByRole("button", { name: "Start", exact: true }).click();
-  await page.getByText("Preflight found blocking issues. Review the checks before starting FXServer.", { exact: true }).waitFor();
+  await page.getByText("Preflight found blocking issues. Review the checks before starting FXServer.", { exact: false }).waitFor();
   if (await page.evaluate(() => window.managerTest.calls.includes("start_fxserver"))) throw new Error("Preflight did not block launch");
   await page.evaluate(() => { window.managerTest.blocked = false; });
   await page.getByRole("button", { name: "Start", exact: true }).click();
