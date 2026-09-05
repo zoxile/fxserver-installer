@@ -191,6 +191,10 @@ Use Queries & Files for database operations after validating credentials.
 
 The query console includes helpers for common operations. The SQL file runner can execute a selected `.sql` file globally or inside a specific database. Use database scope when importing a framework/database dump that expects tables to be created inside one schema.
 
+Query-console and SQL-file execution accept up to 10 MiB of SQL, retain at most 16 MiB of output per stream, and time out after 30 seconds. These limits keep interactive results bounded; use a reviewed MariaDB client workflow for larger or longer-running imports. A timeout is not a rollback: inspect the database before retrying statements that may already have committed. Managed backup restores use a separate streaming path.
+
+Remote database connections require TLS with server-certificate verification. Configure trusted certificates through MariaDB's normal client option files when required by your server. There is no automatic insecure retry. Explicit localhost or numeric loopback connections retain local compatibility. See [MariaDB client TLS options](https://mariadb.com/docs/server/clients-and-utilities/mariadb-client/mariadb-command-line-client).
+
 ## Database Browser
 
 Open **MariaDB > Database Browser**, validate the session connection, and select a database and table. **Rows**, **Columns**, and **Indexes** separate data from schema metadata. Browsing is read-only by default; sorting, paging, and filters do not enable writes.
@@ -291,7 +295,7 @@ The first saved workspace, **Default**, adopts your existing settings. Open **Wo
 
 A txAdmin profile already selects server configuration and its data directory. A workspace is an optional app-side preset around a profile: it also separates artifact/txData paths, saved database connection defaults, backup schedules, resource update preferences, and bridge settings. Keep one workspace and switch profiles when you do not need that extra separation. Switching profiles within one workspace does not create separate app-side schedules or preferences for each profile.
 
-RCON passwords are encrypted separately for each workspace with Windows data protection. Database passwords stay in memory until the app closes; saved workspace metadata contains connection defaults but no database password. Sensitive TXHOST environment values are not included in saved workspace metadata. Removing a workspace removes its entry, backup schedules, and saved RCON password, not its server files, backup files, or databases.
+RCON passwords are encrypted separately for each workspace with Windows data protection. Database passwords are session credentials; saved workspace metadata contains connection defaults but no database password. During MariaDB CLI operations, a short-lived current-user-only option file supplies credentials without putting them in command-line arguments. Normal completion removes it; an abnormal termination or cleanup failure can leave a protected temporary file. Sensitive TXHOST environment values are not included in saved workspace metadata. Removing a workspace removes its entry, backup schedules, and saved RCON password, not its server files, backup files, or databases.
 
 Open **Task Center** from the sidebar to inspect running operations and session history. Navigation remains available during background work. Closing a resource preview does not cancel an update that has already started. File and database writes are not forcibly cancelled; quitting hides the app immediately, stops new scheduled work, and waits for active writes to finish.
 
@@ -330,6 +334,8 @@ If migration fails, cleanup is limited to the newly created database whose owner
 Schedules run while the app is open or in the tray, not while the app or PC is shut down. Saved schedules reopen paused because passwords are not stored. Validate credentials and enable them again after restarting the app. Missed intervals do not trigger a burst of catch-up backups. Retention only removes verified snapshots owned by that schedule, never unrelated SQL files.
 
 To restore, select an app-managed snapshot and review the target host, database, checksum, and warnings. Enter the requested database name to confirm. The app creates a recovery backup of the target before streaming the selected snapshot into it. Restore can replace tables and data, is not a single transaction, and should be done while FXServer and other database writers are stopped. A failed restore may require restoring the recovery snapshot. Keep an independent, off-machine backup as well.
+
+Regular restore executes trusted SQL and is not a sandbox. Database selection does not contain qualified SQL, routines, triggers, or events that reference another schema. Review the dump and use a database-scoped account. Unlike isolated restore tests, normal backup and restore do not use the 32 MiB restricted-table grammar.
 
 ## Isolated Restore Tests
 

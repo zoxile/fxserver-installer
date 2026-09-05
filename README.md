@@ -9,6 +9,9 @@ Quick note: The main purpose of this app was for me to learn how to build with T
 > [!WARNING]
 > FXServer Installer is a new project in active development. Issues, bugs, UI changes, and breaking changes may happen between releases, so back up important server data before using app features that install, update, uninstall, or rewrite files.
 
+> [!WARNING]
+> **Version 0.4.0 is a beta, not a fully tested production release.** Automated checks do not replace live Windows Server, MariaDB upgrade/restore, or FXServer load testing. Test on a disposable server and keep independent backups. See the [0.4.0 beta release notes](docs/releases/v0.4.0.md) for changes and validation limits.
+
 > [!NOTE]
 > Windows SmartScreen may warn because this project is new and currently unsigned. If you downloaded it from the official GitHub Releases page, click "More info" and then "Run anyway".
 
@@ -63,6 +66,7 @@ Quick note: The main purpose of this app was for me to learn how to build with T
 
 - [User Guide](docs/user-guide.md): Install, build, update, and operate the app without relying on the installer workflow.
 - [Live Bridge](docs/live-bridge.md): Optional local pairing, real runtime data, installation, removal, and security limits.
+- [Security Policy](SECURITY.md): Report vulnerabilities privately and review the application's trust boundaries.
 - [JOOAT Resolver Pack](docs/jooat-resolver-pack.md): Build and host the optional offline JOOAT hash resolver database.
 - [Contributing Guide](CONTRIBUTING.md): How to report issues, open pull requests, and write conventional commits.
 
