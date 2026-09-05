@@ -20,7 +20,7 @@ use crate::commands::{
 const MANIFEST: &str = include_str!("../../../resources/live-bridge/fxmanifest.lua");
 const SCRIPT: &str = include_str!("../../../resources/live-bridge/server.js");
 const OWNER: &str = "fxserver-installer-live-bridge";
-const VERSION: &str = "1.0.0";
+const VERSION: &str = "1.1.0";
 const MARKER: &str = ".fxsi-bridge.json";
 const BEGIN: &str = "# BEGIN FXSERVER INSTALLER LIVE BRIDGE";
 const END: &str = "# END FXSERVER INSTALLER LIVE BRIDGE";
@@ -768,6 +768,28 @@ mod tests {
         }
         assert!(edit_config("ensure fxserver_installer_bridge\n", false).is_err());
         assert!(edit_config(&format!("{BEGIN}\ncustom\n{END}"), true).is_err());
+    }
+
+    #[test]
+    fn bundled_version_and_install_digests_are_consistent() {
+        assert!(MANIFEST
+            .lines()
+            .any(|line| line == format!("version '{VERSION}'")));
+        assert!(SCRIPT.contains(&format!("version: \"{VERSION}\"")));
+        let fixture = Fixture::new();
+        let root = fixture.0.join("resource");
+        let files = stage_resource(&root, &"a".repeat(64), &"b".repeat(64)).unwrap();
+        let marker = owned_marker(&root).unwrap();
+        assert_eq!(marker.version, VERSION);
+        assert_eq!(
+            marker.files.get("fxmanifest.lua"),
+            Some(&digest(MANIFEST.as_bytes()))
+        );
+        assert_eq!(
+            marker.files.get("server.js"),
+            Some(&digest(SCRIPT.as_bytes()))
+        );
+        assert_eq!(inventory(&root).unwrap(), files);
     }
 
     #[test]

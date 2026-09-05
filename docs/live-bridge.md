@@ -98,6 +98,8 @@ Installation, reinstallation, and removal run under the managed server's lifecyc
 
 **Re-install** replaces only a verified app-owned installation and rotates the pairing token. Review and confirm the new preview while the server is stopped, then start FXServer and check connection again. Old token copies no longer authenticate after the new server resource starts.
 
+FXServer Installer 0.4.0 requires bridge protocol 2. Reinstall a bridge from an earlier development build through this page before reconnecting. Resource actions now include the observed server-instance ID, so commands prepared for an old instance are refused after a restart.
+
 To remove:
 
 1. Stop FXServer/txAdmin and open **Live Bridge** for the correct workspace/profile.

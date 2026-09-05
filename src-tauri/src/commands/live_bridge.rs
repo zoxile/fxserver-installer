@@ -375,15 +375,17 @@ pub async fn send_live_bridge_action(
         if bridge.stopped.load(Ordering::Acquire) {
             return Err("Live bridge is shutting down.".into());
         }
-        let (port, token) = {
-            let state = bridge
-                .state
-                .lock()
-                .map_err(|_| "Live bridge is unavailable.")?;
-            state.action_connection(revision, &workspace_id)?
-        };
-        let body = serde_json::json!({ "action": action, "resource": resource }).to_string();
+        // Serialize configuration changes with dispatch so a checked pairing cannot be replaced
+        // before its action is sent. The transport has a two-second deadline.
+        let state = bridge
+            .state
+            .lock()
+            .map_err(|_| "Live bridge is unavailable.")?;
+        let (port, token) = state.action_connection(revision, &workspace_id)?;
+        let instance_id = &state.status.snapshot.as_ref().ok_or("Refresh bridge status first.")?.instance_id;
+        let body = serde_json::json!({ "action": action, "resource": resource, "instanceId": instance_id }).to_string();
         let response = request(port, &token, Some(body))?;
+        drop(state);
         if response.get("accepted").and_then(|v| v.as_bool()) != Some(true) {
             return Err("The bridge did not acknowledge the action.".into());
         }
@@ -444,6 +446,7 @@ fn request(port: u16, token: &str, body: Option<String>) -> Result<serde_json::V
     if !response.status().is_success() {
         return Err(match response.status().as_u16() {
             403 => "Bridge authentication rejected. Reinstall the bridge to repair pairing.".into(),
+            409 => "Server instance changed. Refresh bridge status before retrying.".into(),
             429 => "Bridge is busy. Try again shortly.".into(),
             code => format!("Live bridge returned HTTP {code}. Check the server console."),
         });
@@ -476,7 +479,10 @@ fn validate_snapshot(snapshot: &BridgeSnapshot) -> Result<(), String> {
         "uninitialized",
         "unknown",
     ];
-    if snapshot.protocol != 1
+    if snapshot.protocol != 2 {
+        return Err("Bridge protocol is incompatible. Reinstall its current version.".into());
+    }
+    if snapshot.instance_id.is_empty()
         || snapshot.instance_id.len() > 64
         || snapshot.version.len() > 64
         || snapshot.hostname.len() > 1024
@@ -529,7 +535,7 @@ mod tests {
 
     fn snapshot() -> BridgeSnapshot {
         serde_json::from_value(serde_json::json!({
-            "protocol": 1, "version": "1.0.0", "instanceId": "fixture", "timestamp": 1,
+            "protocol": 2, "version": "1.1.0", "instanceId": "fixture", "timestamp": 1,
             "uptimeSeconds": 1, "schedulerDelayMs": 0, "hostname": "Fixture", "gameBuild": "default",
             "onesync": "on", "maxPlayers": 48, "playerCount": 0, "resourceCount": 0,
             "resources": [], "players": [], "events": []
@@ -706,7 +712,7 @@ mod tests {
             .unwrap()
             .contains("fixture-secret"));
         let mut invalid = valid.clone();
-        invalid.protocol = 2;
+        invalid.protocol = 1;
         assert!(validate_snapshot(&invalid).is_err());
         invalid = valid.clone();
         invalid.hostname = "x".repeat(1025);

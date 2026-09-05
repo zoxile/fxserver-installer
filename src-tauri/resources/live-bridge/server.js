@@ -1,33 +1,35 @@
 "use strict";
 
 const { randomBytes, timingSafeEqual } = require("crypto");
+const { performance } = require("perf_hooks");
 const resourceName = GetCurrentResourceName();
 const token = (LoadResourceFile(resourceName, "bridge-token.txt") || "").trim();
 const instanceId = randomBytes(16).toString("hex");
-const started = Date.now();
+const started = performance.now();
 const events = [];
 let sequence = 0;
 let cachedSnapshot;
-let cacheTime = 0;
-let lastRequest = 0;
-let lastTick = Date.now();
+let cacheTime = -Infinity;
+let lastRequest = -Infinity;
+let lastTick = performance.now();
 let schedulerDelayMs = 0;
 
 function record(kind, name) {
   events.push({ id: ++sequence, timestamp: Date.now(), kind, resource: String(name).slice(0, 128) });
   if (events.length > 100) events.shift();
-  cacheTime = 0;
+  cacheTime = -Infinity;
 }
 
 on("onResourceStart", (name) => record("resource-started", name));
 on("onResourceStop", (name) => record("resource-stopped", name));
 setInterval(() => {
-  const now = Date.now();
+  const now = performance.now();
   schedulerDelayMs = Math.max(0, now - lastTick - 1000);
   lastTick = now;
 }, 1000);
 
 function isLoopback(address) {
+  if (typeof address !== "string" || /[\r\n]/.test(address)) return false;
   return /^(127\.0\.0\.1|::1|::ffff:127\.0\.0\.1)$/.test(address) ||
     /^127\.0\.0\.1:\d+$/.test(address) ||
     /^\[(::1|::ffff:127\.0\.0\.1)\]:\d+$/.test(address);
@@ -49,7 +51,7 @@ function send(response, status, value) {
 
 function snapshot() {
   const now = Date.now();
-  if (cachedSnapshot && now - cacheTime < 1000) return cachedSnapshot;
+  if (cachedSnapshot && performance.now() - cacheTime < 1000) return cachedSnapshot;
   const resources = [];
   const resourceCount = GetNumResources();
   for (let index = 0; index < Math.min(resourceCount, 5000); index++) {
@@ -64,22 +66,22 @@ function snapshot() {
     players.push({ id, name: String(GetPlayerName(id) || "Connecting").slice(0, 128), ping: GetPlayerPing(id) });
   }
   cachedSnapshot = {
-    protocol: 1, version: "1.0.0", instanceId, timestamp: now,
-    uptimeSeconds: Math.floor((now - started) / 1000), schedulerDelayMs,
+    protocol: 2, version: "1.1.0", instanceId, timestamp: now,
+    uptimeSeconds: Math.floor((performance.now() - started) / 1000), schedulerDelayMs,
     hostname: GetConvar("sv_hostname", "FXServer").slice(0, 256),
     gameBuild: GetConvar("sv_enforceGameBuild", "default").slice(0, 64),
     onesync: GetConvar("onesync", "off").slice(0, 32),
     maxPlayers: GetConvarInt("sv_maxclients", 48), playerCount, resourceCount,
     resources, players, events: events.slice(),
   };
-  cacheTime = now;
+  cacheTime = performance.now();
   return cachedSnapshot;
 }
 
 SetHttpHandler((request, response) => {
   if (!authorized(request)) return send(response, 403, { error: "Local bridge authentication required." });
-  if (Date.now() - lastRequest < 100) return send(response, 429, { error: "Retry shortly." });
-  lastRequest = Date.now();
+  if (performance.now() - lastRequest < 100) return send(response, 429, { error: "Retry shortly." });
+  lastRequest = performance.now();
   if (request.method === "GET" && request.path === "/snapshot") {
     return setImmediate(() => {
       try { send(response, 200, snapshot()); }
@@ -88,24 +90,38 @@ SetHttpHandler((request, response) => {
   }
   if (request.method !== "POST" || request.path !== "/resource") return send(response, 404, { error: "Not found." });
   let finished = false;
-  const reply = (status, data) => { if (!finished) { finished = true; send(response, status, data); } };
-  const timeout = setTimeout(() => reply(408, { error: "Request body timed out." }), 3000);
+  let bodyReceived = false;
+  const deadline = performance.now() + 2000;
+  const reply = (status, data) => {
+    if (!finished) {
+      finished = true;
+      clearTimeout(timeout);
+      send(response, status, data);
+    }
+  };
+  const expired = () => {
+    if (performance.now() >= deadline) reply(408, { error: "Request timed out." });
+    return finished;
+  };
+  const timeout = setTimeout(() => reply(408, { error: "Request timed out." }), 2000);
   request.setCancelHandler(() => { finished = true; clearTimeout(timeout); });
   request.setDataHandler((body) => {
-    clearTimeout(timeout);
-    if (finished) return;
+    if (bodyReceived || expired()) return;
+    bodyReceived = true;
     if (typeof body !== "string" || Buffer.byteLength(body) > 1024) return reply(413, { error: "Request too large." });
     let command;
     try { command = JSON.parse(body); }
     catch { return reply(400, { error: "Invalid JSON." }); }
     if (!command || !["start", "stop", "restart", "ensure"].includes(command.action) ||
-        typeof command.resource !== "string" || !/^[A-Za-z0-9_.-]{1,96}$/.test(command.resource) || command.resource === resourceName) {
+        typeof command.resource !== "string" || command.resource.length < 1 || command.resource.length > 96 ||
+        /[^A-Za-z0-9_.-]/.test(command.resource) || command.resource.toLowerCase() === resourceName.toLowerCase()) {
       return reply(400, { error: "Unsupported resource action." });
     }
+    if (command.instanceId !== instanceId) return reply(409, { error: "Server instance changed. Refresh bridge status." });
     setImmediate(() => {
-      if (finished) return;
-      if (GetResourceState(command.resource) === "missing") return reply(404, { error: "Resource not found." });
+      if (expired()) return;
       try {
+        if (GetResourceState(command.resource) === "missing") return reply(404, { error: "Resource not found." });
         ExecuteCommand(`${command.action} ${command.resource}`);
         record("resource-command", command.resource);
         reply(200, { accepted: true, resource: command.resource, state: GetResourceState(command.resource) });
