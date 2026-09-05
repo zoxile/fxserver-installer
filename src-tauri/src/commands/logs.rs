@@ -2,14 +2,20 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
-    time::SystemTime,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Mutex,
+    },
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 
 const LOG_FOLDER: &str = "logs";
 const LOG_FILE: &str = "fxserver-installer.log";
+static LOG_WRITE: Mutex<()> = Mutex::new(());
+static BACKGROUND_LOG_ID: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Serialize)]
 pub struct AppLogFile {
@@ -75,6 +81,9 @@ pub async fn append_app_log(app: AppHandle, entry: String) -> Result<(), String>
 }
 
 fn append_app_log_blocking(app: AppHandle, entry: String) -> Result<(), String> {
+    let _guard = LOG_WRITE
+        .lock()
+        .map_err(|_| "Application log lock is unavailable.".to_string())?;
     let path = log_path(&app)?;
     let mut file = OpenOptions::new()
         .create(true)
@@ -82,8 +91,27 @@ fn append_app_log_blocking(app: AppHandle, entry: String) -> Result<(), String> 
         .open(&path)
         .map_err(|error| format!("Failed to open application log file: {error}"))?;
 
-    writeln!(file, "{entry}")
+    file.write_all(format!("{entry}\n").as_bytes())
         .map_err(|error| format!("Failed to write application log file: {error}"))
+}
+
+pub(crate) fn append_background_log(app: &AppHandle, level: &str, scope: &str, message: &str) {
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let sequence = BACKGROUND_LOG_ID.fetch_add(1, Ordering::Relaxed);
+    let entry = serde_json::json!({
+        "id": format!("background-{timestamp}-{sequence}"),
+        "timestamp": timestamp as u64,
+        "level": level,
+        "scope": scope,
+        "message": message,
+    });
+    if let Err(error) = append_app_log_blocking(app.clone(), entry.to_string()) {
+        log::error!("Could not persist background log: {error}");
+    }
+    let _ = app.emit("background-app-log", entry);
 }
 
 #[tauri::command]
@@ -92,6 +120,9 @@ pub async fn clear_app_logs(app: AppHandle) -> Result<(), String> {
 }
 
 fn clear_app_logs_blocking(app: AppHandle) -> Result<(), String> {
+    let _guard = LOG_WRITE
+        .lock()
+        .map_err(|_| "Application log lock is unavailable.".to_string())?;
     let path = log_path(&app)?;
     fs::write(&path, "").map_err(|error| format!("Failed to clear application log file: {error}"))
 }

@@ -59,11 +59,11 @@
 		privileges: string;
 	} | null>(null);
 	let credentials = $state<MariaDBCredentials>({
-		host: databaseSession.credentials?.host ?? "127.0.0.1",
-		port: databaseSession.credentials?.port ?? 3306,
-		username: databaseSession.credentials?.username ?? "root",
+		host: databaseSession.credentials?.host ?? databaseSession.defaults.host,
+		port: databaseSession.credentials?.port ?? databaseSession.defaults.port,
+		username: databaseSession.credentials?.username ?? databaseSession.defaults.username,
 		password: databaseSession.credentials?.password ?? "",
-		database: databaseSession.credentials?.database ?? "",
+		database: databaseSession.credentials?.database ?? databaseSession.defaults.database,
 	});
 	let installOptions = $state<MariaDBInstallOptions>({
 		rootPassword: "",

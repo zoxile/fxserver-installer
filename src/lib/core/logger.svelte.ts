@@ -84,7 +84,7 @@ function parseLogLine(line: string, index = 0): AppLogEntry | null {
 
 		return {
 			id: parsed.id ?? `${parsed.timestamp}-${parsed.scope}-${index}`,
-			timestamp: parsed.timestamp,
+			timestamp: typeof parsed.timestamp === "number" ? new Date(parsed.timestamp).toISOString() : parsed.timestamp,
 			level: parsed.level,
 			scope: parsed.scope,
 			message: parsed.message,
@@ -92,6 +92,14 @@ function parseLogLine(line: string, index = 0): AppLogEntry | null {
 		};
 	} catch {
 		return null;
+	}
+}
+
+export function acceptBackgroundLog(value: unknown) {
+	const entry = parseLogLine(JSON.stringify(value));
+	if (entry && !logs.some((item) => item.id === entry.id)) {
+		logs.push(entry);
+		trimVisibleLogs();
 	}
 }
 

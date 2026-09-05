@@ -28,11 +28,11 @@
 
 	const globalScope = "__global__";
 	let credentials = $state<MariaDBCredentials>({
-		host: databaseSession.credentials?.host ?? "localhost",
-		port: databaseSession.credentials?.port ?? 3306,
-		username: databaseSession.credentials?.username ?? "root",
+		host: databaseSession.credentials?.host ?? databaseSession.defaults.host,
+		port: databaseSession.credentials?.port ?? databaseSession.defaults.port,
+		username: databaseSession.credentials?.username ?? databaseSession.defaults.username,
 		password: databaseSession.credentials?.password ?? "",
-		database: databaseSession.credentials?.database ?? "",
+		database: databaseSession.credentials?.database ?? databaseSession.defaults.database,
 	});
 	let databases = $state<string[]>([]);
 	let selectedScope = $state(globalScope);

@@ -15,6 +15,7 @@ export const fxserverSettings = $state({
 });
 
 let loaded = false;
+let profileRequest = 0;
 
 export function loadFxserverSettings() {
 	if (loaded) return;
@@ -32,7 +33,9 @@ export function loadFxserverSettings() {
 
 export function readSavedEnvironment() {
 	try {
-		return JSON.parse(localStorage.getItem(envStorageKey) || "{}") as Record<string, string>;
+		const value = JSON.parse(localStorage.getItem(envStorageKey) || "{}");
+		if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+		return Object.fromEntries(Object.entries(value).filter((entry): entry is [string, string] => typeof entry[1] === "string"));
 	} catch {
 		return {};
 	}
@@ -40,6 +43,7 @@ export function readSavedEnvironment() {
 
 export function writeSavedEnvironment(values: Record<string, string>) {
 	localStorage.setItem(envStorageKey, JSON.stringify(values));
+	window.dispatchEvent(new Event("workspace-settings-changed"));
 }
 
 export function setTxDataPath(path: string) {
@@ -59,25 +63,30 @@ export function setServerProfile(profile: string) {
 	fxserverSettings.profile = profile.trim();
 	localStorage.setItem(profileStorageKey, fxserverSettings.profile);
 	localStorage.removeItem(legacyLogProfileStorageKey);
+	window.dispatchEvent(new Event("workspace-settings-changed"));
 }
 
 export async function refreshTxDataProfiles() {
 	loadFxserverSettings();
+	const request = ++profileRequest;
+	const path = fxserverSettings.txDataPath.trim();
 	fxserverSettings.profileError = "";
 	fxserverSettings.profiles = [];
 	fxserverSettings.hasRootLogs = false;
 
-	if (!fxserverSettings.txDataPath.trim()) return;
+	if (!path) { fxserverSettings.loadingProfiles = false; return; }
 
 	fxserverSettings.loadingProfiles = true;
 	try {
-		const result = await listTxDataProfiles(fxserverSettings.txDataPath.trim());
+		const result = await listTxDataProfiles(path);
+		if (request !== profileRequest || path !== fxserverSettings.txDataPath.trim()) return;
 		fxserverSettings.profiles = result.profiles;
 		fxserverSettings.hasRootLogs = result.hasRootLogs;
 		if (fxserverSettings.profile && !result.profiles.includes(fxserverSettings.profile)) {
 			setServerProfile("");
 		}
 	} catch (error) {
+		if (request !== profileRequest || path !== fxserverSettings.txDataPath.trim()) return;
 		fxserverSettings.profileError = error instanceof Error ? error.message : String(error);
 		log("Could not refresh txData profiles.", {
 			level: "error",
@@ -85,6 +94,6 @@ export async function refreshTxDataProfiles() {
 			detail: fxserverSettings.profileError,
 		});
 	} finally {
-		fxserverSettings.loadingProfiles = false;
+		if (request === profileRequest) fxserverSettings.loadingProfiles = false;
 	}
 }

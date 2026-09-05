@@ -7,6 +7,7 @@ export function setInstallPath(path: string) {
 	loaded = true;
 	installPath = path.trim();
 	localStorage.setItem(installPathKey, installPath);
+	window.dispatchEvent(new Event("workspace-settings-changed"));
 }
 
 export function getInstallPath() {

@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { taskInvoke as invoke } from "$lib/core/tasks.svelte";
 import { getInstallPath } from "$lib/core/paths.svelte";
 import { log } from "$lib/core/logger.svelte";
 

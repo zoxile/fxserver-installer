@@ -38,9 +38,9 @@
 	let editorElement = $state<HTMLTextAreaElement | null>(null);
 	let selectedFxDatabase = $state(databaseSession.credentials?.database ?? "fxserver");
 	let dbCredentials = $state<MariaDBCredentials>({
-		host: databaseSession.credentials?.host ?? "localhost",
-		port: databaseSession.credentials?.port ?? 3306,
-		username: databaseSession.credentials?.username ?? "fxserver",
+		host: databaseSession.credentials?.host ?? databaseSession.defaults.host,
+		port: databaseSession.credentials?.port ?? databaseSession.defaults.port,
+		username: databaseSession.credentials?.username ?? databaseSession.defaults.username,
 		password: databaseSession.credentials?.password ?? "",
 		database: databaseSession.credentials?.database ?? "fxserver",
 	});
