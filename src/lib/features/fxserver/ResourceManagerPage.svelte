@@ -10,7 +10,9 @@
 	import SearchIcon from "@lucide/svelte/icons/search";
 	import ShieldIcon from "@lucide/svelte/icons/shield";
 	import SquareIcon from "@lucide/svelte/icons/square";
-	import { onMount } from "svelte";
+	import PinIcon from "@lucide/svelte/icons/pin";
+	import EyeOffIcon from "@lucide/svelte/icons/eye-off";
+	import { onMount, untrack } from "svelte";
 	import * as Card from "$lib/components/ui/card/index.js";
 	import { Button } from "$lib/components/ui/button/index.js";
 	import { Input } from "$lib/components/ui/input/index.js";
@@ -19,6 +21,13 @@
 	import { openExternalUrl } from "$lib/core/openExternal";
 	import { getWorkspaceId } from "$lib/core/workspaces.svelte";
 	import ResourceUpdateDialog from "./ResourceUpdateDialog.svelte";
+	import ResourceUpdatePlan from "./ResourceUpdatePlan.svelte";
+	import { bridgeSession } from "$lib/core/liveBridge.svelte";
+	import { taskSession } from "$lib/core/tasks.svelte";
+	import { getResourcePlan, getResourcePreference, loadResourcePreferences, queueResourceUpdate, resourcePlanSession, saveResourcePreference } from "$lib/modules/resourcePlan.svelte";
+	import { resourcePreferenceKey } from "$lib/modules/resourcePlan";
+	import { githubReleaseRepository } from "$lib/modules/resourceRelease";
+	import type { ResourceTarget, ResourceUpdatePreview } from "$lib/modules/resourceUpdates";
 	import {
 		clearFxserverRconPassword,
 		getSavedFxserverRconPassword,
@@ -59,7 +68,7 @@
 	let scanResult = $state<ResourceScanResult | null>(null);
 	let resources = $state<ResourceView[]>([]);
 	let search = $state("");
-	let filter = $state<"all" | "updates" | "repos" | "missing-repo">("all");
+	let filter = $state<"all" | "updates" | "repos" | "missing-repo" | "pinned" | "ignored">("all");
 	let scanning = $state(false);
 	let checkingAll = $state(false);
 	let busyCommand = $state("");
@@ -71,6 +80,42 @@
 	let contextMenuPosition = $state({ x: 0, y: 0 });
 	let updateDialog = $state<{ resource: ResourceView; reinstall: boolean; history: boolean } | null>(null);
 	const workspaceId = getWorkspaceId();
+	const liveResources = $derived(new Map(bridgeSession.connected && bridgeSession.workspaceId === workspaceId
+		? bridgeSession.snapshot?.resources.map((resource) => [resource.name, resource.state]) ?? [] : []));
+	const plan = getResourcePlan(workspaceId);
+	let observedPlanRevision = plan.revision;
+	$effect(() => {
+		const revision = plan.revision;
+		if (revision !== observedPlanRevision) {
+			observedPlanRevision = revision;
+			void untrack(() => scanResources(false));
+		}
+	});
+	loadResourcePreferences(workspaceId);
+	const resourceOperationBusy = $derived(taskSession.items.some((task) => task.status === "running" && ["preview_resource_update", "apply_resource_update", "rollback_resource_update", "apply_resource_plan"].includes(task.command)));
+
+	function resourceTarget(resource: Pick<FxserverResourceInfo, "path">): ResourceTarget {
+		return { workspaceId, txDataPath: fxserverSettings.txDataPath, profile: fxserverSettings.profile, resourcePath: resource.path };
+	}
+	function preferenceFor(resource: Pick<FxserverResourceInfo, "path">) {
+		if (resourcePlanSession.preferenceErrors[workspaceId]) return { pinnedVersion: null, ignored: true };
+		return getResourcePreference(resourceTarget(resource));
+	}
+	function hasQueuedUpdate(resource: Pick<FxserverResourceInfo, "path">) {
+		return plan.entries.some((entry) => ["ready", "applying"].includes(entry.status) && resourcePreferenceKey(entry.target) === resourcePreferenceKey(resourceTarget(resource)));
+	}
+	function changePreference(resource: ResourceView, key: "pin" | "ignore") {
+		try {
+			const current = preferenceFor(resource);
+			saveResourcePreference(resourceTarget(resource), key === "pin" ? { ...current, pinnedVersion: current.pinnedVersion === null ? resource.version || "Unknown" : null } : { ...current, ignored: !current.ignored });
+		} catch (caught) { error = String(caught); }
+	}
+	function onQueueReviewed(preview: ResourceUpdatePreview, protectedPaths: string[]) {
+		if (!updateDialog) return;
+		queueResourceUpdate(resourceTarget(updateDialog.resource), updateDialog.resource.name, preview, protectedPaths);
+		updateDialog = null;
+		message = "Reviewed update added to the queue.";
+	}
 
 	const latestManifestCache = new Map<string, Promise<LatestManifest>>();
 	const repositoryMetadataCache = new Map<string, Promise<{ defaultBranch: string; webUrl: string }>>();
@@ -86,6 +131,8 @@
 					.includes(needle);
 
 			if (!matchesSearch) return false;
+			if (filter === "pinned") return preferenceFor(resource).pinnedVersion !== null;
+			if (filter === "ignored") return preferenceFor(resource).ignored;
 			if (filter === "updates") return resource.updateStatus === "update-available";
 			if (filter === "repos") return Boolean(resource.repository);
 			if (filter === "missing-repo") return !resource.repository;
@@ -206,6 +253,7 @@
 	}
 
 	async function updateResource(resource: ResourceView, force = false) {
+		if (resourceOperationBusy || preferenceFor(resource).ignored || preferenceFor(resource).pinnedVersion !== null || hasQueuedUpdate(resource)) return;
 		const repository = resource.repository;
 		if (!repository || isCfxDefaultResource(resource)) {
 			if (isCfxDefaultResource(resource)) message = `${resource.name} is a CFX default resource and is updated with FXServer artifacts.`;
@@ -227,6 +275,7 @@
 	}
 
 	function openSnapshots(resource: ResourceView) {
+		if (resourceOperationBusy || hasQueuedUpdate(resource)) return;
 		closeResourceContextMenu();
 		updateDialog = { resource, reinstall: false, history: true };
 	}
@@ -466,7 +515,7 @@
 	}
 
 	function canCheckResourceUpdates(resource: Pick<FxserverResourceInfo, "path" | "repository">) {
-		return Boolean(resource.repository) && !isCfxDefaultResource(resource);
+		return Boolean(resource.repository) && !isCfxDefaultResource(resource) && !preferenceFor(resource).ignored;
 	}
 
 	function isCfxDefaultResource(resource: Pick<FxserverResourceInfo, "path" | "repository">) {
@@ -487,7 +536,7 @@
 
 	function canRunGithubAction(resource: ResourceView) {
 		const status = getLiveUpdateStatus(resource);
-		return canCheckResourceUpdates(resource) && !isUpdatingResource(resource) && (status === "update-available" || status === "up-to-date");
+		return canCheckResourceUpdates(resource) && !resourceOperationBusy && !hasQueuedUpdate(resource) && preferenceFor(resource).pinnedVersion === null && !isUpdatingResource(resource) && (status === "update-available" || status === "up-to-date");
 	}
 
 	function githubActionLabel(resource: ResourceView) {
@@ -576,6 +625,7 @@
 
 	{#if message}<Notice tone="success" {message} onDismiss={() => (message = "")} />{/if}
 	{#if error}<Notice tone="error" message={error} onDismiss={() => (error = "")} />{/if}
+	{#if resourcePlanSession.preferenceErrors[workspaceId]}<Notice tone="error" title="Resource preferences unavailable" message={resourcePlanSession.preferenceErrors[workspaceId]} />{/if}
 	{#if showUpdateBackupNotice}
 		<Notice
 			tone="warn"
@@ -584,6 +634,8 @@
 			onDismiss={() => (showUpdateBackupNotice = false)}
 		/>
 	{/if}
+
+	<ResourceUpdatePlan {workspaceId} />
 
 	<div class="grid gap-4 xl:grid-cols-[minmax(0,1.1fr)_minmax(0,0.9fr)]">
 		<Card.Root class="rounded-md border-border bg-card shadow-sm">
@@ -672,6 +724,8 @@
 					<Button variant={filter === "updates" ? "default" : "outline"} size="sm" onclick={() => (filter = "updates")}>Updates</Button>
 					<Button variant={filter === "repos" ? "default" : "outline"} size="sm" onclick={() => (filter = "repos")}>Repos</Button>
 					<Button variant={filter === "missing-repo" ? "default" : "outline"} size="sm" onclick={() => (filter = "missing-repo")}>No Repo</Button>
+					<Button variant={filter === "pinned" ? "default" : "outline"} size="sm" onclick={() => (filter = "pinned")}><PinIcon />Pinned</Button>
+					<Button variant={filter === "ignored" ? "default" : "outline"} size="sm" onclick={() => (filter = "ignored")}><EyeOffIcon />Ignored</Button>
 				</div>
 			</div>
 		</Card.Header>
@@ -689,7 +743,13 @@
 								<div class="min-w-0">
 									<div class="flex flex-wrap items-center gap-2">
 										<p class="text-base font-semibold text-foreground">{resource.name}</p>
+										{#if liveResources.has(resource.name) && liveResources.get(resource.name) !== "unknown"}
+											<span title="Live bridge resource state" class={`inline-flex items-center gap-1.5 text-xs ${liveResources.get(resource.name) === "started" ? "text-emerald-400" : "text-muted-foreground"}`}><span class={`size-1.5 rounded-full ${liveResources.get(resource.name) === "started" ? "bg-emerald-400" : "bg-zinc-500"}`}></span>{liveResources.get(resource.name)}</span>
+										{/if}
 										<span class={`rounded-sm border px-2 py-0.5 text-[10px] font-semibold uppercase ${updateBadgeClass(resource.updateStatus)}`}>{updateLabel(resource)}</span>
+										{#if preferenceFor(resource).pinnedVersion !== null}<span class="break-all text-xs text-sky-300">Pinned: {preferenceFor(resource).pinnedVersion}</span>{/if}
+										{#if preferenceFor(resource).ignored}<span class="text-xs text-muted-foreground">Ignored</span>{/if}
+										{#if hasQueuedUpdate(resource)}<span class="text-xs text-amber-300">Reviewed update queued</span>{/if}
 									</div>
 								</div>
 								<div class="grid grid-cols-2 gap-2 text-xs sm:w-80 sm:max-w-full">
@@ -772,7 +832,12 @@
 											{/if}
 											{githubActionLabel(resource)}
 										</Button>
-										<Button size="xs" variant="outline" onclick={() => openSnapshots(resource)} disabled={isCfxDefaultResource(resource)} title="View resource snapshots and roll back"><HistoryIcon />Snapshots</Button>
+										<Button size="xs" variant="outline" onclick={() => openSnapshots(resource)} disabled={isCfxDefaultResource(resource) || resourceOperationBusy || hasQueuedUpdate(resource)} title="View resource snapshots and roll back"><HistoryIcon />Snapshots</Button>
+										{#if !isCfxDefaultResource(resource)}
+											<Button size="icon" variant={preferenceFor(resource).pinnedVersion !== null ? "default" : "ghost"} disabled={resourceOperationBusy || (!resource.version && preferenceFor(resource).pinnedVersion === null)} title={preferenceFor(resource).pinnedVersion !== null ? "Unpin resource" : "Pin installed version"} aria-label={`${preferenceFor(resource).pinnedVersion !== null ? "Unpin" : "Pin"} ${resource.name}`} onclick={() => changePreference(resource, "pin")}><PinIcon /></Button>
+											<Button size="icon" variant={preferenceFor(resource).ignored ? "default" : "ghost"} disabled={resourceOperationBusy} title={preferenceFor(resource).ignored ? "Include update checks" : "Ignore update checks"} aria-label={`${preferenceFor(resource).ignored ? "Include" : "Ignore"} ${resource.name}`} onclick={() => changePreference(resource, "ignore")}><EyeOffIcon /></Button>
+											{#if githubReleaseRepository(resource.repository || "")}<Button size="xs" variant="outline" onclick={() => openExternalUrl(`https://github.com/${githubReleaseRepository(resource.repository || "")}/releases`)} title="Inspect published release notes"><ExternalLinkIcon />Releases</Button>{/if}
+										{/if}
 									</div>
 								</div>
 							</div>
@@ -875,5 +940,6 @@
 		history={updateDialog.history}
 		onclose={() => (updateDialog = null)}
 		oncomplete={onUpdateComplete}
+		onqueue={onQueueReviewed}
 	/>
 {/if}

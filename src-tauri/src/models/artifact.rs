@@ -1,13 +1,13 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ArtifactIssue {
     pub artifact: String,
     pub reason: String,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ArtifactMetadata {
     pub recommended_artifact: String,
@@ -24,6 +24,28 @@ pub struct ArtifactInstallRequest {
     pub version: String,
     pub url: String,
     pub destination: String,
+    #[serde(default)]
+    pub acknowledge_risk: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArtifactBuild {
+    pub version: String,
+    pub download_url: String,
+    pub health: String,
+    pub issues: Vec<ArtifactIssue>,
+    pub recommended: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArtifactCatalog {
+    pub builds: Vec<ArtifactBuild>,
+    pub fetched_at: u64,
+    pub metadata_fetched_at: Option<u64>,
+    pub stale: bool,
+    pub warning: Option<String>,
 }
 
 #[derive(Debug, Serialize)]

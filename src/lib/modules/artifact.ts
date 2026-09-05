@@ -32,6 +32,33 @@ export interface ArtifactInstallResult {
 	markerPath: string;
 }
 
+export interface ArtifactBuild {
+	version: string;
+	downloadUrl: string;
+	health: "healthy" | "known-issue" | "unknown";
+	issues: ArtifactIssue[];
+	recommended: boolean;
+}
+
+export interface ArtifactCatalog {
+	builds: ArtifactBuild[];
+	fetchedAt: number;
+	metadataFetchedAt: number | null;
+	stale: boolean;
+	warning: string | null;
+}
+
+export function fetchArtifactCatalog(refresh = false) {
+	if (!hasTauriRuntime()) throw new Error("The official artifact browser is available in the desktop app.");
+	return invoke<ArtifactCatalog>("get_windows_artifact_catalog", { refresh });
+}
+
+export function installArtifactBuild(build: ArtifactBuild, destination: string, acknowledgeRisk: boolean) {
+	return invoke<ArtifactInstallResult>("install_windows_artifact", {
+		request: { version: build.version, url: build.downloadUrl, destination, acknowledgeRisk },
+	});
+}
+
 export interface InstalledArtifactInfo {
 	installed: boolean;
 	version?: string | null;
@@ -218,10 +245,11 @@ export function getArtifactHealthStatus(metadata: ArtifactMetadata | null, insta
 		};
 	}
 
+	const matchesRecommendation = installed.version === metadata.recommendedArtifact;
 	return {
-		urgency: "none",
-		label: "Up to date",
-		description: "Installed artifact has no reported issue and matches the current recommendation.",
+		urgency: matchesRecommendation ? "none" : "unknown",
+		label: matchesRecommendation ? "Up to date" : "Health unverified",
+		description: matchesRecommendation ? "Installed artifact matches the current recommendation." : "No issue is listed for this build, but it is not the JG recommendation. Its health is unverified.",
 		currentVersion: installed.version,
 		recommendedVersion: metadata.recommendedArtifact,
 	};

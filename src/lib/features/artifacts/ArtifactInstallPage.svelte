@@ -15,12 +15,16 @@
 	import { chooseInstallFolder } from "$lib/core/selectFolder";
 	import { getInstallPath, loadInstallPath, setInstallPath } from "$lib/core/paths.svelte";
 	import { log } from "$lib/core/logger.svelte";
+	import { taskSession } from "$lib/core/tasks.svelte";
+	import ArtifactBrowser from "./ArtifactBrowser.svelte";
 	import {
 		artifactIsFlagged,
 		fetchArtifactMetadata,
 		getArtifactHealthStatus,
 		getInstalledWindowsArtifactInfo,
 		installWindowsArtifact,
+		installArtifactBuild,
+		type ArtifactBuild,
 		type ArtifactHealthStatus,
 		type ArtifactInstallResult,
 		type ArtifactMetadata,
@@ -31,7 +35,7 @@
 	let metadata = $state<ArtifactMetadata | null>(null);
 	let installPath = $state("");
 	let busy = $state(false);
-	let installing = $state(false);
+	const installing = $derived(taskSession.items.some((task) => task.command === "install_windows_artifact" && task.status === "running"));
 	let error = $state("");
 	let message = $state("");
 	let result = $state<ArtifactInstallResult | null>(null);
@@ -85,9 +89,21 @@
 	function updateInstallPath(event: Event) {
 		installPath = (event.currentTarget as HTMLInputElement).value;
 		setInstallPath(installPath);
+		installed = null;
+	}
+
+	async function installSelected(build: ArtifactBuild, destination: string) {
+		if (installing || !destination) return;
+		error = ""; message = ""; result = null;
+		try {
+			result = await installArtifactBuild(build, destination, true);
+			installed = await getInstalledWindowsArtifactInfo(destination);
+			message = `Installed artifact ${result.version}.`;
+		} catch (caught) { error = String(caught); }
 	}
 
 	async function install() {
+		if (installing) return;
 		if (!metadata) {
 			error = "Refresh artifact metadata before installing.";
 			return;
@@ -98,7 +114,6 @@
 			return;
 		}
 
-		installing = true;
 		error = "";
 		message = "Downloading and extracting the Windows artifact. This can take a moment.";
 		result = null;
@@ -110,8 +125,6 @@
 		} catch (caught) {
 			error = caught instanceof Error ? caught.message : String(caught);
 			message = "";
-		} finally {
-			installing = false;
 		}
 	}
 
@@ -162,7 +175,7 @@
 				<div class="grid gap-3 md:grid-cols-[1fr_auto]">
 					<label class="grid gap-2">
 						<span class="text-xs font-medium text-muted-foreground">Install Folder</span>
-						<Input value={installPath} oninput={updateInstallPath} placeholder="C:\FXServer\server" title="Folder where FXServer artifact files will be extracted." class="rounded-sm font-mono" />
+						<Input value={installPath} disabled={installing} oninput={updateInstallPath} placeholder="C:\FXServer\server" title="Folder where FXServer artifact files will be extracted." class="rounded-sm font-mono" />
 					</label>
 					<div class="flex items-end">
 						<Button variant="outline" onclick={chooseFolder} disabled={installing} title="Pick the FXServer install folder">
@@ -251,4 +264,5 @@
 			</Card.Root>
 		</div>
 	</div>
+	<ArtifactBrowser destination={installPath} currentVersion={installed?.version} disabled={installing || busy} oninstall={installSelected} />
 </section>

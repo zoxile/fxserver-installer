@@ -2,7 +2,19 @@ use std::{
     fs,
     path::{Path, PathBuf},
     process::Command,
+    sync::Mutex,
 };
+
+#[path = "artifact/catalog.rs"]
+mod catalog;
+static INSTALL_OPERATION: Mutex<()> = Mutex::new(());
+
+#[tauri::command]
+pub async fn get_windows_artifact_catalog(
+    refresh: bool,
+) -> Result<crate::models::artifact::ArtifactCatalog, String> {
+    super::run_blocking(move || catalog::load_catalog(refresh)).await
+}
 
 use crate::{
     models::artifact::{
@@ -13,9 +25,7 @@ use crate::{
 
 #[tauri::command]
 pub async fn get_windows_artifact_metadata() -> Result<ArtifactMetadata, String> {
-    tokio::task::spawn_blocking(fetch_artifact_metadata_blocking)
-        .await
-        .map_err(|error| format!("Artifact metadata task failed: {error}"))?
+    super::run_blocking(fetch_artifact_metadata_blocking).await
 }
 
 #[tauri::command]
@@ -252,7 +262,8 @@ fn fetch_artifact_metadata_blocking() -> Result<ArtifactMetadata, String> {
     let script = r#"
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
-(Invoke-WebRequest -Uri "https://artifacts.jgscripts.com/jsonv2" -UseBasicParsing).Content
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+(Invoke-WebRequest -Uri "https://artifacts.jgscripts.com/jsonv2" -UseBasicParsing -TimeoutSec 30).Content
 "#;
 
     let output = Command::new("powershell")
@@ -289,11 +300,17 @@ $ProgressPreference = "SilentlyContinue"
 
 #[tauri::command]
 pub async fn install_windows_artifact(
+    manager: tauri::State<'_, super::fxserver::FxserverManager>,
     request: ArtifactInstallRequest,
 ) -> Result<ArtifactInstallResult, String> {
-    tokio::task::spawn_blocking(move || install_windows_artifact_blocking(request))
-        .await
-        .map_err(|error| format!("Artifact install task failed: {error}"))?
+    let manager = manager.inner().clone();
+    super::run_blocking(move || {
+        let _operation = INSTALL_OPERATION
+            .try_lock()
+            .map_err(|_| "Another artifact installation is in progress.")?;
+        manager.with_stopped_server(|| install_windows_artifact_blocking(request))
+    })
+    .await
 }
 
 fn install_windows_artifact_blocking(
@@ -303,11 +320,8 @@ fn install_windows_artifact_blocking(
         return Err("Artifact installation is only supported on Windows right now.".to_string());
     }
 
-    if !request.url.starts_with("https://") || !request.url.contains("runtime.fivem.net") {
-        return Err(
-            "Artifact download URL must be an official HTTPS FiveM runtime URL.".to_string(),
-        );
-    }
+    catalog::validate_download(&request.url, &request.version)?;
+    catalog::validate_install_risk(&request.version, request.acknowledge_risk)?;
 
     let destination = PathBuf::from(request.destination.trim());
     if destination.as_os_str().is_empty() {

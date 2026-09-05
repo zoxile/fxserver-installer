@@ -7,6 +7,9 @@
 	import ShieldCheckIcon from "@lucide/svelte/icons/shield-check";
 	import XIcon from "@lucide/svelte/icons/x";
 	import TrashIcon from "@lucide/svelte/icons/trash-2";
+	import ListPlusIcon from "@lucide/svelte/icons/list-plus";
+	import ResourceReleaseNotes from "./ResourceReleaseNotes.svelte";
+	import { protectedResourcePaths } from "$lib/modules/resourcePlan";
 	import { Button } from "$lib/components/ui/button/index.js";
 	import { Checkbox } from "$lib/components/ui/checkbox/index.js";
 	import { Input } from "$lib/components/ui/input/index.js";
@@ -16,9 +19,10 @@
 		type ResourceTarget, type ResourceSnapshot, type ResourceUpdatePreview,
 	} from "$lib/modules/resourceUpdates";
 
-	let { target, branch, name, reinstall = false, history = false, onclose, oncomplete }: {
+	let { target, branch, name, reinstall = false, history = false, onclose, oncomplete, onqueue }: {
 		target: ResourceTarget; branch: string; name: string; reinstall?: boolean; history?: boolean;
 		onclose: () => void; oncomplete: (message: string) => void;
+		onqueue?: (preview: ResourceUpdatePreview, protectedPaths: string[]) => void;
 	} = $props();
 	let open = $state(true);
 	let busy = $state(false);
@@ -33,6 +37,7 @@
 	let selectedSnapshot = $state<ResourceSnapshot | null>(null);
 	let deletingSnapshot = $state<ResourceSnapshot | null>(null);
 	let active = true;
+	let transferred = false;
 	const filtered = $derived(preview?.changes.filter((file) => file.path.toLowerCase().includes(search.trim().toLowerCase())) ?? []);
 	const pages = $derived(Math.max(1, Math.ceil(filtered.length / 100)));
 	const visible = $derived(filtered.slice(Math.min(page, pages - 1) * 100, (Math.min(page, pages - 1) + 1) * 100));
@@ -41,7 +46,7 @@
 	onMount(() => { void initialize(); });
 	onDestroy(() => {
 		active = false;
-		if (preview && !busy) void discardResourcePreview(preview.id).catch(() => {});
+		if (preview && !busy && !transferred) void discardResourcePreview(preview.id).catch(() => {});
 	});
 
 	async function initialize() {
@@ -60,17 +65,29 @@
 	}
 
 	function toggle(path: string, checked: boolean) {
+		if (preview?.changes.find((file) => file.path === path)?.preserve) return;
 		protectedPaths = checked ? [...protectedPaths, path] : protectedPaths.filter((value) => value !== path);
+	}
+
+	function queue() {
+		if (!preview || busy || !onqueue) return;
+		try {
+			transferred = true;
+			onqueue(preview, protectedResourcePaths(preview, protectedPaths));
+		} catch (caught) { transferred = false; error = String(caught); }
 	}
 
 	async function apply() {
 		if (!preview || busy) return;
 		busy = true; error = "";
 		try {
-			await applyResourceUpdate(target, preview.id, protectedPaths);
+			await applyResourceUpdate(target, preview.id, protectedResourcePaths(preview, protectedPaths));
 			if (active) oncomplete(`${name} ${reinstall ? "re-installed" : "updated"}. A verified rollback snapshot was saved.`);
 		} catch (caught) { if (active) error = String(caught); }
-		finally { busy = false; }
+		finally {
+			busy = false;
+			if (!active && preview && !transferred) void discardResourcePreview(preview.id).catch(() => {});
+		}
 	}
 
 	async function restore() {
@@ -118,6 +135,7 @@
 					<p class="break-all">{preview.repository} / {preview.branch} ({bytes(preview.archiveBytes)})</p>
 					<p class="break-all font-mono">SHA-256: {preview.archiveSha256}</p>
 				</div>
+				<ResourceReleaseNotes repository={preview.repository} />
 				<div class="flex flex-wrap items-center justify-between gap-2">
 					<p class="text-sm">{preview.changes.length} changes <span class="text-muted-foreground">/ {protectedPaths.length} protected</span></p>
 					<Button size="sm" variant="outline" disabled={busy} onclick={() => (protectedPaths = preview!.changes.filter((file) => file.preserve).map((file) => file.path))}><ShieldCheckIcon />Reset Protection</Button>
@@ -128,7 +146,7 @@
 						<thead class="sticky top-0 z-10 bg-muted text-muted-foreground"><tr><th class="w-16 p-3">Keep</th><th class="p-3">File</th><th class="w-24 p-3">Change</th><th class="hidden w-32 p-3 sm:table-cell">Size</th></tr></thead>
 						<tbody>
 							{#each visible as file (file.path)}
-								<tr class="border-t border-border"><td class="p-3"><Checkbox checked={preserved.has(file.path)} disabled={!file.canPreserve || busy} onCheckedChange={(checked) => toggle(file.path, checked)} aria-label={`Preserve ${file.path}`} /></td><td class="break-all p-3 font-mono">{file.path}</td><td class={`p-3 ${preserved.has(file.path) ? "text-sky-400" : file.kind === "removed" ? "text-red-400" : file.kind === "added" ? "text-emerald-400" : "text-amber-400"}`}>{preserved.has(file.path) ? "Protected" : file.kind}</td><td class="hidden p-3 font-mono text-muted-foreground sm:table-cell">{bytes(file.oldSize ?? 0)} / {bytes(file.newSize ?? 0)}</td></tr>
+								<tr class="border-t border-border"><td class="p-3"><Checkbox checked={preserved.has(file.path)} disabled={file.preserve || !file.canPreserve || busy} onCheckedChange={(checked) => toggle(file.path, checked)} aria-label={`Preserve ${file.path}`} /></td><td class="break-all p-3 font-mono">{file.path}</td><td class={`p-3 ${preserved.has(file.path) ? "text-sky-400" : file.kind === "removed" ? "text-red-400" : file.kind === "added" ? "text-emerald-400" : "text-amber-400"}`}>{preserved.has(file.path) ? "Protected" : file.kind}</td><td class="hidden p-3 font-mono text-muted-foreground sm:table-cell">{bytes(file.oldSize ?? 0)} / {bytes(file.newSize ?? 0)}</td></tr>
 							{:else}<tr><td colspan="4" class="p-5 text-center text-muted-foreground">{preview.changes.length ? "No matching files." : "All downloaded files match the local resource."}</td></tr>{/each}
 						</tbody>
 					</table>
@@ -143,8 +161,9 @@
 				{#if selectedSnapshot}<p class="text-sm text-amber-400">Restoring replaces all resource files with the selected snapshot. Current files will be snapshotted first.</p>{/if}
 				{#if deletingSnapshot}<div class="flex flex-wrap items-center justify-between gap-3 border-t border-border pt-3"><p class="text-sm text-destructive">Permanently delete the snapshot from {new Date(deletingSnapshot.createdAt * 1000).toLocaleString()}?</p><Button variant="destructive" size="sm" disabled={busy} onclick={removeSnapshot}><TrashIcon />Confirm Delete</Button></div>{/if}
 			{/if}
-			<div class="flex justify-end gap-2 border-t border-border pt-4">
+			<div class="flex flex-wrap justify-end gap-2 border-t border-border pt-4">
 				<Button variant="outline" onclick={onclose}>{busy ? "Close" : "Cancel"}</Button>
+				{#if !history && onqueue}<Button variant="outline" onclick={queue} disabled={!preview || busy}><ListPlusIcon />Queue Reviewed Update</Button>{/if}
 				{#if history}<Button onclick={restore} disabled={!selectedSnapshot || busy}>{#if busy}<LoaderCircleIcon class="animate-spin" />{:else}<HistoryIcon />{/if}{busy ? "Restoring..." : "Confirm Restore"}</Button>
 				{:else}<Button onclick={apply} disabled={!preview || busy}>{#if busy}<LoaderCircleIcon class="animate-spin" />{:else}<DownloadIcon />{/if}{busy ? "Applying..." : reinstall ? "Snapshot & Re-install" : "Snapshot & Update"}</Button>{/if}
 			</div>

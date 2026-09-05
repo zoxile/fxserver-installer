@@ -91,6 +91,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             commands::artifact::get_windows_artifact_metadata,
+            commands::artifact::get_windows_artifact_catalog,
             commands::artifact::get_installed_windows_artifact_info,
             commands::artifact::install_windows_artifact,
             commands::backup_manager::get_backup_manager,
