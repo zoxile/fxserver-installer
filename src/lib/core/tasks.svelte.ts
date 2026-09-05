@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { log } from "./logger.svelte";
+import { appendTaskIncident } from "./incidents.svelte";
 
 export type TaskStatus = "running" | "completed" | "failed" | "cancelled";
 export interface BackgroundTask {
@@ -50,6 +51,8 @@ const labels: Record<string, string> = {
 	preview_backup_restore: "Check database restore",
 	restore_backup_snapshot: "Restore database",
 	configure_health: "Configure health monitoring",
+	apply_live_bridge_change: "Change live bridge installation",
+	send_live_bridge_action: "Send live resource command",
 };
 
 export const taskSession = $state({
@@ -90,6 +93,7 @@ function finish(id: string, status: TaskStatus) {
 	if (task) {
 		task.status = status;
 		task.finishedAt = Date.now();
+		appendTaskIncident(task);
 	}
 }
 
@@ -99,7 +103,7 @@ export function taskInvoke<T>(command: string, args?: Record<string, unknown>): 
 }
 
 export function acceptBackupProgress(event: { workspaceId: string; scheduleId: string; stage: string; timestamp: number }) {
-	if (taskSession.items.some((item) => item.workspaceId === event.workspaceId && item.status === "running" && ["run_scheduled_backup_now", "restore_backup_snapshot"].includes(item.command))) return;
+	if (taskSession.items.some((item) => item.workspaceId === event.workspaceId && item.status === "running" && ["run_scheduled_backup_now", "restore_backup_snapshot", "test_backup_restore"].includes(item.command))) return;
 	const command = `scheduled-backup:${event.scheduleId}`;
 	const existing = taskSession.items.find((item) => item.command === command && item.workspaceId === event.workspaceId && item.status === "running");
 	if (event.stage === "running" && !existing) {

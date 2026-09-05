@@ -100,6 +100,7 @@ export function acceptBackgroundLog(value: unknown) {
 	if (entry && !logs.some((item) => item.id === entry.id)) {
 		logs.push(entry);
 		trimVisibleLogs();
+		window.dispatchEvent(new CustomEvent("app-log-entry", { detail: entry }));
 	}
 }
 
@@ -126,6 +127,7 @@ export function log(message: string, options: LogOptions = {}) {
 	logs.push(entry);
 	trimVisibleLogs();
 	persistEntry(entry);
+	window.dispatchEvent(new CustomEvent("app-log-entry", { detail: entry }));
 
 	const consoleMethod = entry.level === "error" ? "error" : entry.level === "warn" ? "warn" : "info";
 	console[consoleMethod](`[${entry.scope}] ${entry.message}`, entry.detail ?? "");
