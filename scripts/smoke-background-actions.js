@@ -3,7 +3,9 @@ async (page) => {
   page.on("pageerror", (error) => errors.push(error.message));
   await page.setViewportSize({ width: 1440, height: 1000 });
   await page.route("https://raw.githubusercontent.com/**", (route) => route.fulfill({ json: { version: "0.3.2" } }));
+  await page.route("**/jsonv2", (route) => route.fulfill({ json: { recommendedArtifact: "10000", windowsDownloadLink: "https://example.invalid/artifact.zip", brokenArtifacts: [] } }));
   await page.addInitScript(() => {
+    localStorage.removeItem("fxserver-installer.workspaces.v1");
     localStorage.setItem("installPath", "C:/mock/artifacts");
     const callbacks = new Map();
     const events = new Map();
@@ -23,6 +25,8 @@ async (page) => {
           case "append_app_log": state.logs.push(args.entry); return;
           case "get_fxserver_rcon_password": return "mock-password";
           case "save_fxserver_rcon_password": return;
+          case "initialize_health_workspace": return;
+          case "run_fxserver_preflight": return { checkedAt: Date.now(), blocking: false, errorCount: 0, warningCount: 0, resourceCount: 0, configCount: 0, checks: [] };
           case "get_windows_artifact_metadata": return { recommendedArtifact: "10000", windowsDownloadLink: "https://example.invalid/artifact.zip", brokenArtifacts: [] };
           case "get_installed_windows_artifact_info": return { installed: true, version: "10000", destination: "C:/mock/artifacts", markerPath: "", hasFxserverExecutable: true, detectionSource: "marker" };
           case "get_fxserver_status": return { running: state.running, pid: 123, startedAt: "2026-09-05T10:00:00Z", resources: { cpuPercent: 15, memoryBytes: 104857600, totalMemoryBytes: 1073741824, memoryPercent: 10, threadCount: 30, handleCount: 150 } };
@@ -48,7 +52,7 @@ async (page) => {
     };
     state.progress = (message) => callbacks.get(events.get("mariadb-progress"))({ payload: message });
   });
-  await page.reload();
+  await page.reload({ waitUntil: "domcontentloaded", timeout: 120000 });
   const nav = page.getByRole("navigation", { name: "Workspace navigation" });
   const manage = async () => {
     const parent = nav.getByTitle("FXServer", { exact: true });
