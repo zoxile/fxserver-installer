@@ -26,6 +26,11 @@ export const commandPaletteSettings = $state<CommandPaletteSettings>({
 });
 
 export const commandDefinitions: CommandDefinition[] = [
+	{ id: "open-workspaces", title: "Open Workspaces", description: "Switch saved server setups.", category: "Setup", page: "workspaces", keywords: ["profile", "staging", "production"] },
+	{ id: "open-tasks", title: "Open Task Center", description: "View background operations and session history.", category: "Tools", page: "tasks", keywords: ["progress", "jobs"] },
+	{ id: "open-backup-manager", title: "Open Backups & Restore", description: "Schedule database backups and preview restores.", category: "Database", page: "backup-manager", keywords: ["schedule", "retention", "restore"] },
+	{ id: "open-diagnostics", title: "Open Diagnostics", description: "Check server readiness and export a redacted report.", category: "FXServer", page: "diagnostics", keywords: ["preflight", "dependencies", "support"] },
+	{ id: "open-health", title: "Open Health & Recovery", description: "Configure health alerts and bounded crash recovery.", category: "FXServer", page: "health", keywords: ["cpu", "memory", "disk", "restart"] },
 	{ id: "open-home", title: "Open Home", description: "Go to the workspace overview.", category: "Navigate", page: "home", keywords: ["dashboard", "overview"] },
 	{ id: "open-onboarding", title: "Open First Run Wizard", description: "Walk through first-time setup checks.", category: "Setup", page: "onboarding", keywords: ["wizard", "setup", "first run"] },
 	{ id: "open-mariadb", title: "Manage MariaDB", description: "Install, manage, and inspect MariaDB.", category: "Database", page: "mariadb", keywords: ["database", "mysql", "users"] },

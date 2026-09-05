@@ -2,6 +2,10 @@
 	import { onMount } from "svelte";
 	import PanelLeftCloseIcon from "@lucide/svelte/icons/panel-left-close";
 	import PanelLeftOpenIcon from "@lucide/svelte/icons/panel-left-open";
+	import ListTodoIcon from "@lucide/svelte/icons/list-todo";
+	import LoaderCircleIcon from "@lucide/svelte/icons/loader-circle";
+	import { taskSession } from "$lib/core/tasks.svelte";
+	import { workspaceSession } from "$lib/core/workspaces.svelte";
 	import SidebarNavButton from "./SidebarNavButton.svelte";
 	import { Kbd } from "$lib/components/ui/kbd/index.js";
 	import type { PageId } from "$lib/navigation";
@@ -21,6 +25,8 @@
 	let syncedActiveParentId = "";
 	let expandTimer: ReturnType<typeof setTimeout> | null = null;
 	let effectiveCollapsed = $derived(collapsed || isNarrow);
+	const runningTasks = $derived(taskSession.items.filter((task) => task.status === "running").length);
+	const workspaceName = $derived(workspaceSession.items.find((item) => item.id === workspaceSession.activeId)?.name ?? "Default");
 	let activeParentId = $derived(
 		navigation.find((item) => item.children?.some((child) => child.id === activePage))?.id,
 	);
@@ -111,11 +117,11 @@
 				]}
 			>
 				<p class="text-xs font-semibold tracking-wide text-muted-foreground uppercase">FXServer Installer</p>
-				<h2 class="mt-1 text-lg font-semibold leading-7 tracking-normal">Setup Workspace</h2>
+				<h2 class="mt-1 truncate text-lg font-semibold leading-7 tracking-normal" title={workspaceName}>{workspaceName}</h2>
 			</div>
 		</div>
 
-		<nav class="flex-1 space-y-1" aria-label="Workspace navigation">
+		<nav class="min-h-0 flex-1 space-y-1 overflow-y-auto scrollbar-hidden" aria-label="Workspace navigation">
 			{#each navigation as item}
 				{@const parentIsDirectPage = !item.children}
 				{@const sectionActive = isSectionActive(item)}
@@ -158,6 +164,10 @@
 				{/if}
 			{/each}
 		</nav>
+
+		<div class="mt-3 shrink-0 border-t border-sidebar-border pt-2">
+			<SidebarNavButton icon={runningTasks ? LoaderCircleIcon : ListTodoIcon} label={`Task Center${runningTasks ? ` (${runningTasks})` : ""}`} active={activePage === "tasks"} collapsed={effectiveCollapsed} labelVisible={showExpandedContent} onclick={() => onNavigate("tasks")} />
+		</div>
 
 		<div class={["mt-4 shrink-0 border-t border-sidebar-border pt-3", effectiveCollapsed ? "flex justify-center" : "px-2"]} title="Open command palette with Ctrl + K">
 			{#if effectiveCollapsed}

@@ -2,6 +2,7 @@
 	import DatabaseIcon from "@lucide/svelte/icons/database";
 	import Titlebar from "./Titlebar.svelte";
 	import Sidebar from "$lib/components/layout/Sidebar.svelte";
+	import BackgroundAlerts from "$lib/components/layout/BackgroundAlerts.svelte";
 	import ArtifactInfoPage from "$lib/features/artifacts/ArtifactInfoPage.svelte";
 	import ArtifactInstallPage from "$lib/features/artifacts/ArtifactInstallPage.svelte";
 	import ClientLogsPage from "$lib/features/client-logs/ClientLogsPage.svelte";
@@ -11,6 +12,9 @@
 	import ConfiguratorPage from "$lib/features/configurator/ConfiguratorPage.svelte";
 	import FxserverLogsPage from "$lib/features/fxserver/FxserverLogsPage.svelte";
 	import HomePage from "$lib/features/home/HomePage.svelte";
+	import TaskCenterPage from "$lib/features/tasks/TaskCenterPage.svelte";
+	import WorkspacesPage from "$lib/features/workspaces/WorkspacesPage.svelte";
+	import { initializeWorkspaces, workspaceSession } from "$lib/core/workspaces.svelte";
 	import ManageServerPage from "$lib/features/fxserver/ManageServerPage.svelte";
 	import OnboardingPage from "$lib/features/onboarding/OnboardingPage.svelte";
 	import ResourceManagerPage from "$lib/features/fxserver/ResourceManagerPage.svelte";
@@ -40,6 +44,11 @@
 		Exclude<
 			PageId,
 			| "home"
+			| "workspaces"
+			| "tasks"
+			| "backup-manager"
+			| "diagnostics"
+			| "health"
 			| "onboarding"
 			| "mariadb"
 			| "sql-runner"
@@ -61,6 +70,7 @@
 	> = {};
 
 	onMount(() => {
+		initializeWorkspaces();
 		loadCommandPaletteSettings();
 		void (async () => {
 			await initializeLogger();
@@ -136,6 +146,7 @@
 <svelte:window onkeydown={handleGlobalKeydown} oncontextmenu={handleGlobalContextMenu} />
 
 <Titlebar />
+<BackgroundAlerts />
 <CommandPalette open={commandPaletteOpen} onClose={() => (commandPaletteOpen = false)} onNavigate={navigate} />
 
 <main class="dark h-screen overflow-hidden bg-background text-foreground">
@@ -151,8 +162,19 @@
 			</div>
 
 			<div class="mx-auto max-w-7xl px-4 pt-6 pb-12 sm:px-6 lg:px-8">
+				{#key workspaceSession.revision}
 				{#if activePage === "home"}
 					<HomePage onNavigate={navigate} />
+				{:else if activePage === "workspaces"}
+					<WorkspacesPage />
+				{:else if activePage === "tasks"}
+					<TaskCenterPage onNavigate={navigate} />
+				{:else if activePage === "backup-manager"}
+					{#await import("$lib/features/mariadb/BackupManagerPage.svelte")}<p role="status" class="text-sm text-muted-foreground">Loading backups...</p>{:then { default: Page }}<Page />{/await}
+				{:else if activePage === "diagnostics"}
+					{#await import("$lib/features/diagnostics/DiagnosticsPage.svelte")}<p role="status" class="text-sm text-muted-foreground">Loading diagnostics...</p>{:then { default: Page }}<Page />{/await}
+				{:else if activePage === "health"}
+					{#await import("$lib/features/fxserver/HealthPage.svelte")}<p role="status" class="text-sm text-muted-foreground">Loading health settings...</p>{:then { default: Page }}<Page />{/await}
 				{:else if activePage === "onboarding"}
 					<OnboardingPage onNavigate={navigate} />
 				{:else if activePage === "mariadb"}
@@ -188,6 +210,7 @@
 				{:else}
 					<PlaceholderPage title={getPageLabel(activePage)} description={placeholders[activePage]} />
 				{/if}
+				{/key}
 			</div>
 		</section>
 	</div>

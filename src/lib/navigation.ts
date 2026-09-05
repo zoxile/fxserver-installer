@@ -1,4 +1,7 @@
 import ArchiveIcon from "@lucide/svelte/icons/archive";
+import ActivityIcon from "@lucide/svelte/icons/activity";
+import ClipboardCheckIcon from "@lucide/svelte/icons/clipboard-check";
+import FolderKanbanIcon from "@lucide/svelte/icons/folder-kanban";
 import DatabaseIcon from "@lucide/svelte/icons/database";
 import FileJsonIcon from "@lucide/svelte/icons/file-json";
 import FolderCogIcon from "@lucide/svelte/icons/folder-cog";
@@ -19,6 +22,11 @@ import type { Component } from "svelte";
 
 export type PageId =
 	| "home"
+	| "workspaces"
+	| "tasks"
+	| "backup-manager"
+	| "diagnostics"
+	| "health"
 	| "onboarding"
 	| "mariadb"
 	| "sql-runner"
@@ -60,6 +68,7 @@ export const navigation: NavigationItem[] = [
 		label: "First Run Wizard",
 		icon: RocketIcon,
 	},
+	{ id: "workspaces", label: "Workspaces", icon: FolderKanbanIcon },
 	{
 		id: "database",
 		label: "MariaDB",
@@ -75,6 +84,7 @@ export const navigation: NavigationItem[] = [
 				label: "Queries & Files",
 				icon: TablePropertiesIcon,
 			},
+			{ id: "backup-manager", label: "Backups & Restore", icon: ArchiveIcon },
 		],
 	},
 	{
@@ -114,6 +124,8 @@ export const navigation: NavigationItem[] = [
 				label: "Configure Server",
 				icon: FolderCogIcon,
 			},
+			{ id: "diagnostics", label: "Diagnostics", icon: ClipboardCheckIcon },
+			{ id: "health", label: "Health & Recovery", icon: ActivityIcon },
 		],
 	},
 	{
@@ -173,6 +185,7 @@ export const navigation: NavigationItem[] = [
 ];
 
 export function getPageLabel(pageId: PageId) {
+	if (pageId === "tasks") return "Task Center";
 	for (const item of navigation) {
 		if (item.id === pageId) return item.label;
 		const child = item.children?.find((entry) => entry.id === pageId);

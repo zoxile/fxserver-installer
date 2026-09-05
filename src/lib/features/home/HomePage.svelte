@@ -21,6 +21,7 @@
 	import { compareVersions, fetchLatestAppRelease, getCurrentAppVersion, type AppReleaseInfo } from "$lib/modules/appRelease";
 	import HomeArtifactStatusCard from "./HomeArtifactStatusCard.svelte";
 	import HomeBentoCard from "./HomeBentoCard.svelte";
+	import { workspaceSession } from "$lib/core/workspaces.svelte";
 	import type { PageId } from "$lib/navigation";
 
 	type Props = {
@@ -135,6 +136,15 @@
 	</div>
 
 	<Separator.Root class="bg-border/80" />
+	<div class="flex flex-wrap items-center justify-between gap-3 border-b border-border pb-5">
+		<h2 class="text-sm font-semibold">{workspaceSession.items.find((item) => item.id === workspaceSession.activeId)?.name ?? "Default"}</h2>
+		<div class="flex flex-wrap gap-2">
+			<Button variant="outline" size="sm" onclick={() => onNavigate("workspaces")}><ServerCogIcon class="size-4" />Workspaces</Button>
+			<Button variant="outline" size="sm" onclick={() => onNavigate("diagnostics")}><CheckCircle2Icon class="size-4" />Diagnostics</Button>
+			<Button variant="outline" size="sm" onclick={() => onNavigate("health")}><GaugeIcon class="size-4" />Health</Button>
+			<Button variant="outline" size="sm" onclick={() => onNavigate("tasks")}><TerminalIcon class="size-4" />Tasks</Button>
+		</div>
+	</div>
 
 	<div class="bento-grid grid gap-4">
 		<HomeBentoCard
@@ -158,6 +168,7 @@
 			actions={[
 				{ label: "Manage", onclick: () => onNavigate("mariadb") },
 				{ label: "Queries & Files", onclick: () => onNavigate("sql-runner") },
+				{ label: "Backups & Restore", onclick: () => onNavigate("backup-manager") },
 			]}
 			onclick={() => onNavigate("mariadb")}
 		/>
