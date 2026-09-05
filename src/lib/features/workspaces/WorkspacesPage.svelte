@@ -7,6 +7,8 @@
 	import PencilIcon from "@lucide/svelte/icons/pencil";
 	import ArrowRightLeftIcon from "@lucide/svelte/icons/arrow-right-left";
 	import LoaderCircleIcon from "@lucide/svelte/icons/loader-circle";
+	import CopyIcon from "@lucide/svelte/icons/copy";
+	import WorkspaceClone from "./WorkspaceClone.svelte";
 	import { Button } from "$lib/components/ui/button/index.js";
 	import { Input } from "$lib/components/ui/input/index.js";
 	import { Notice } from "$lib/components/ui/notice/index.js";
@@ -16,6 +18,7 @@
 	import { taskSession } from "$lib/core/tasks.svelte";
 
 	let draft = $state<Workspace | null>(null);
+	let cloneSource = $state<Workspace | null>(null);
 	let busy = $state(false);
 	let error = $state("");
 	let message = $state("");
@@ -51,6 +54,7 @@
 					<p class="mt-1 break-all text-xs text-muted-foreground">{workspace.txDataPath || "No txData folder"}{workspace.profile ? ` / ${workspace.profile}` : ""}</p>
 				</div>
 				<div class="flex items-center gap-2">
+					<Button size="icon" variant="ghost" title={`Clone or migrate ${workspace.name}`} aria-label={`Clone or migrate ${workspace.name}`} disabled={busy || taskSession.switching || taskSession.items.some((item) => item.status === "running")} onclick={() => { cloneSource = JSON.parse(JSON.stringify(workspace)); draft = null; }}><CopyIcon class="size-4" /></Button>
 					<Button size="sm" variant="outline" disabled={busy || taskSession.switching || workspace.id === workspaceSession.activeId} onclick={() => run(async () => { await switchWorkspace(workspace.id); message = `Switched to ${workspace.name}.`; })}>{#if taskSession.switching}<LoaderCircleIcon class="size-4 animate-spin" />{:else}<ArrowRightLeftIcon class="size-4" />{/if}Switch</Button>
 					<Button size="icon" variant="ghost" title={`Edit ${workspace.name}`} aria-label={`Edit ${workspace.name}`} disabled={busy} onclick={() => edit(workspace)}><PencilIcon class="size-4" /></Button>
 					<Button size="icon" variant="ghost" title={`Remove ${workspace.name}`} aria-label={`Remove ${workspace.name}`} disabled={busy || workspace.id === workspaceSession.activeId} onclick={() => run(async () => { if (window.confirm(`Remove saved workspace "${workspace.name}", its backup schedules, and its saved RCON password? Server files, backups, and databases will not be deleted.`)) await removeWorkspace(workspace.id); })}><Trash2Icon class="size-4 text-destructive" /></Button>
@@ -58,6 +62,9 @@
 			</div>
 		{/each}
 	</div>
+	{#if cloneSource}
+		{#key cloneSource.id}<WorkspaceClone source={cloneSource} onClose={() => cloneSource = null} />{/key}
+	{/if}
 	{#if draft}
 		<form class="space-y-5 border-b border-border pb-6" onsubmit={(event) => { event.preventDefault(); void run(async () => { if (!draft) return; await saveWorkspace(draft); draft = null; message = "Workspace saved."; }); }}>
 			<h2 class="text-lg font-semibold">{workspaceSession.items.some((item) => item.id === draft?.id) ? "Edit workspace" : "New workspace"}</h2>

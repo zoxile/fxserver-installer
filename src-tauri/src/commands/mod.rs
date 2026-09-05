@@ -10,6 +10,7 @@ pub mod logs;
 pub mod mariadb;
 pub mod resource_updates;
 pub mod system;
+pub mod workspace_clone;
 
 use std::sync::{Condvar, Mutex};
 
