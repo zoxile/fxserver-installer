@@ -30,6 +30,7 @@ async (page) => {
       invoke: async (command, args = {}) => {
         state.calls.push({ command, args });
         switch (command) {
+          case "fetch_latest_app_release": return { version: "0.3.2", tagName: "v0.3.2", htmlUrl: "https://github.com/zoxile/fxserver-installer/releases/tag/v0.3.2", installerUrl: "https://github.com/zoxile/fxserver-installer/releases/download/v0.3.2/FXServer.Installer_0.3.2_windows_x64-setup.exe" };
           case "plugin:window|title": return "FXServer Installer";
           case "plugin:app|version": return "0.3.2";
           case "plugin:event|listen": { const ids = events.get(args.event) || []; ids.push(args.handler); events.set(args.event, ids); return args.handler; }

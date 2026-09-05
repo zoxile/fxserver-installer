@@ -90,6 +90,7 @@ pub fn run() {
         .manage(commands::live_bridge::LiveBridge::default())
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
+            commands::app_release::fetch_latest_app_release,
             commands::artifact::get_windows_artifact_metadata,
             commands::artifact::get_windows_artifact_catalog,
             commands::artifact::get_installed_windows_artifact_info,

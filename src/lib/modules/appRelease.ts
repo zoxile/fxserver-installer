@@ -1,7 +1,8 @@
 import { getVersion } from "@tauri-apps/api/app";
+import { invoke } from "@tauri-apps/api/core";
+import releasePolicy from "../../../release-policy.json";
 
 const repository = "zoxile/fxserver-installer";
-const latestVersionManifestUrl = `https://raw.githubusercontent.com/${repository}/main/src-tauri/tauri.conf.json`;
 const releaseBaseUrl = `https://github.com/${repository}/releases`;
 
 export interface AppReleaseInfo {
@@ -9,6 +10,7 @@ export interface AppReleaseInfo {
 	tagName: string;
 	htmlUrl: string;
 	installerUrl: string;
+	prerelease?: boolean;
 }
 
 function hasTauriRuntime() {
@@ -20,37 +22,24 @@ export async function getCurrentAppVersion() {
 	return getVersion();
 }
 
-export async function fetchLatestAppRelease(): Promise<AppReleaseInfo> {
-	const response = await fetch(latestVersionManifestUrl, {
-		cache: "no-store",
-		headers: {
-			Accept: "application/json,text/plain,*/*",
-		},
-	});
-
-	if (!response.ok) {
-		throw new Error(`Version manifest returned ${response.status} while checking the latest app release.`);
+export async function fetchLatestAppRelease(force = false): Promise<AppReleaseInfo> {
+	if (!hasTauriRuntime()) throw new Error("Published release checks require the desktop app.");
+	const release = await invoke<AppReleaseInfo>("fetch_latest_app_release", { force });
+	const current = await getCurrentAppVersion();
+	if (!release || !parseVersion(release.version) || release.version !== normalizeVersion(release.version) || !parseVersion(current)
+		|| ![release.version, `v${release.version}`].includes(release.tagName)
+		|| release.htmlUrl !== `${releaseBaseUrl}/tag/${release.tagName}`
+		|| release.installerUrl !== `${releaseBaseUrl}/download/${release.tagName}/FXServer.Installer_${release.version}_windows_x64-setup.exe`
+		|| (release.prerelease || releasePolicy.betaVersions.includes(release.version)) && !releasePolicy.betaVersions.includes(current)) {
+		throw new Error("No verified published installer is available for this release channel.");
 	}
-
-	const manifest = (await response.json()) as { version?: string };
-	const version = manifest.version?.trim();
-	if (!version) throw new Error("Version manifest did not include an app version.");
-
-	const tagName = `v${normalizeVersion(version)}`;
-	const fileName = `FXServer.Installer_${normalizeVersion(version)}_windows_x64-setup.exe`;
-	const htmlUrl = `${releaseBaseUrl}/tag/${encodeURIComponent(tagName)}`;
-
-	return {
-		version: normalizeVersion(tagName),
-		tagName,
-		htmlUrl,
-		installerUrl: `${releaseBaseUrl}/download/${encodeURIComponent(tagName)}/${encodeURIComponent(fileName)}`,
-	};
+	return release;
 }
 
 export function compareVersions(left: string, right: string) {
 	const leftParts = parseVersion(left);
 	const rightParts = parseVersion(right);
+	if (!leftParts || !rightParts) return 0;
 
 	for (let index = 0; index < 3; index += 1) {
 		const difference = leftParts[index] - rightParts[index];
@@ -65,7 +54,8 @@ export function normalizeVersion(version: string) {
 }
 
 function parseVersion(version: string) {
-	const match = normalizeVersion(version).match(/^(\d+)\.(\d+)\.(\d+)/);
-	if (!match) return [0, 0, 0];
+	if (typeof version !== "string") return null;
+	const match = normalizeVersion(version).match(/^(0|[1-9]\d{0,8})\.(0|[1-9]\d{0,8})\.(0|[1-9]\d{0,8})$/);
+	if (!match) return null;
 	return [Number(match[1]), Number(match[2]), Number(match[3])];
 }

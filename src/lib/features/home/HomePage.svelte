@@ -17,6 +17,9 @@
 	import * as Card from "$lib/components/ui/card/index.js";
 	import * as Separator from "$lib/components/ui/separator/index.js";
 	import { Button } from "$lib/components/ui/button/index.js";
+	import { Notice } from "$lib/components/ui/notice/index.js";
+	import releasePolicy from "../../../../release-policy.json";
+	import appPackage from "../../../../package.json";
 	import { openExternalUrl } from "$lib/core/openExternal";
 	import { compareVersions, fetchLatestAppRelease, getCurrentAppVersion, type AppReleaseInfo } from "$lib/modules/appRelease";
 	import HomeArtifactStatusCard from "./HomeArtifactStatusCard.svelte";
@@ -33,6 +36,7 @@
 	let latestRelease = $state<AppReleaseInfo | null>(null);
 	let releaseError = $state("");
 	let checkingRelease = $state(false);
+	const betaBuild = releasePolicy.betaVersions.includes(appPackage.version);
 
 	const latestVersion = $derived(latestRelease?.version ?? "");
 	const updateAvailable = $derived(Boolean(latestRelease && compareVersions(latestRelease.version, currentVersion) > 0));
@@ -50,12 +54,12 @@
 		void refreshProjectVersion();
 	});
 
-	async function refreshProjectVersion() {
+	async function refreshProjectVersion(force = false) {
 		checkingRelease = true;
 		releaseError = "";
 
 		try {
-			const [version, release] = await Promise.all([getCurrentAppVersion(), fetchLatestAppRelease()]);
+			const [version, release] = await Promise.all([getCurrentAppVersion(), fetchLatestAppRelease(force)]);
 			currentVersion = version;
 			latestRelease = release;
 		} catch (error) {
@@ -73,6 +77,9 @@
 </script>
 
 <section class="relative space-y-6 overflow-hidden">
+	{#if betaBuild}
+		<Notice tone="warn" title={`${appPackage.version} Beta`} message="This version is not fully tested on live servers or databases. Issues and breaking changes may occur. Keep independent backups and test changes on a disposable server first." />
+	{/if}
 	<div class="grid gap-4 xl:grid-cols-[1.15fr_0.85fr_0.85fr]">
 		<div>
 			<p class="text-xs font-semibold tracking-wide text-muted-foreground uppercase">Home</p>
@@ -82,7 +89,7 @@
 
 		<Card.Root class="flex flex-col rounded-md border-border bg-card shadow-sm">
 			<Card.Header class="border-b border-border pb-4">
-				<Card.Title>Project</Card.Title>
+				<div class="flex items-center justify-between gap-2"><Card.Title>Project</Card.Title>{#if betaBuild}<span class="rounded-sm border border-amber-400/30 bg-amber-400/10 px-2 py-0.5 text-xs font-medium text-amber-300">Beta</span>{/if}</div>
 				<Card.Description>Workspace details and repository context.</Card.Description>
 			</Card.Header>
 			<Card.Content class="flex flex-1 flex-col gap-3">
@@ -105,7 +112,7 @@
 					</div>
 					<div class="flex min-w-0 items-center gap-2">
 						<p class={["truncate text-xs font-medium", projectStatusTone]}>{projectStatus}</p>
-						<Button variant="ghost" size="icon" class="size-7 rounded-sm" onclick={refreshProjectVersion} disabled={checkingRelease} title="Refresh latest version status">
+						<Button variant="ghost" size="icon" class="size-7 rounded-sm" onclick={() => refreshProjectVersion(true)} disabled={checkingRelease} title="Refresh latest version status">
 							<RefreshCwIcon class={["size-3.5", checkingRelease && "animate-spin"]} />
 						</Button>
 					</div>

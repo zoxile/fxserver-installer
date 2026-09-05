@@ -11,8 +11,8 @@ async (page) => {
     const callbacks = new Map();
     const events = new Map();
     const state = window.bridgeFixture = { installed: false, counter: 0, calls: [], unknown: [], pending: null, refuse: false };
-    const installation = () => ({ workspaceId: "default", installed: state.installed, managed: state.installed, resourcePath: "C:/fixture/resources/fxserver_installer_bridge", version: state.installed ? "1.0.0" : null, cfgEnabled: state.installed, keyAvailable: state.installed, warning: null });
-    state.snapshot = { protocol: 1, version: "1.0.0", instanceId: "fixture-instance", timestamp: Date.now(), uptimeSeconds: 65, schedulerDelayMs: 2, hostname: "Fixture server", gameBuild: "3258", onesync: "on", maxPlayers: 48, playerCount: 2, resourceCount: 120,
+    const installation = () => ({ workspaceId: "default", installed: state.installed, managed: state.installed, resourcePath: "C:/fixture/resources/fxserver_installer_bridge", version: state.installed ? "1.1.0" : null, cfgEnabled: state.installed, keyAvailable: state.installed, warning: null });
+    state.snapshot = { protocol: 2, version: "1.1.0", instanceId: "fixture-instance", timestamp: Date.now(), uptimeSeconds: 65, schedulerDelayMs: 2, hostname: "Fixture server", gameBuild: "3258", onesync: "on", maxPlayers: 48, playerCount: 2, resourceCount: 120,
       resources: Array.from({ length: 120 }, (_, index) => ({ name: `resource_${index}`, state: index % 2 ? "stopped" : "started", version: "1.0.0" })),
       players: [{ id: "1", name: "Fixture player", ping: 32 }, { id: "2", name: "Another player", ping: 65 }],
       events: [{ id: 1, timestamp: Date.now(), kind: "resource-started", resource: "resource_0" }] };
@@ -25,6 +25,7 @@ async (page) => {
       invoke: async (command, args = {}) => {
         state.calls.push({ command, args });
         switch (command) {
+          case "fetch_latest_app_release": return { version: "0.3.2", tagName: "v0.3.2", htmlUrl: "https://github.com/zoxile/fxserver-installer/releases/tag/v0.3.2", installerUrl: "https://github.com/zoxile/fxserver-installer/releases/download/v0.3.2/FXServer.Installer_0.3.2_windows_x64-setup.exe" };
           case "plugin:window|title": return "FXServer Installer";
           case "plugin:app|version": return "0.3.2";
           case "plugin:event|listen": events.set(args.event, args.handler); return args.handler;

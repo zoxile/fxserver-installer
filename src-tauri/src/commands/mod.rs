@@ -1,3 +1,4 @@
+pub mod app_release;
 pub mod artifact;
 pub mod backup_manager;
 pub mod config_history;
