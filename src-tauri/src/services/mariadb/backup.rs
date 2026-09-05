@@ -1,8 +1,10 @@
 use std::{
-    fs,
+    fs::{self, OpenOptions},
+    io::Read,
     path::{Path, PathBuf},
-    process::Command,
-    time::{SystemTime, UNIX_EPOCH},
+    process::{Command, Stdio},
+    thread,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use crate::{
@@ -33,6 +35,7 @@ pub fn create_backup(
         .arg("--result-file")
         .arg(&output_path)
         .arg("--hex-blob")
+        .arg("--connect-timeout=10")
         .arg("--default-character-set=utf8mb4");
 
     if options.single_transaction {
@@ -86,18 +89,14 @@ pub fn create_backup(
         }
     }
 
-    let output = command
-        .output()
-        .map_err(|error| format!("Failed to run MariaDB backup: {error}"))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        let _ = fs::remove_file(&output_path);
-        return Err(if stderr.is_empty() {
-            "MariaDB backup failed.".to_string()
-        } else {
-            stderr
-        });
-    }
+    reserve_backup_file(&output_path)?;
+    let stderr = match run_backup_client(&mut command, "MariaDB backup") {
+        Ok(stderr) => stderr,
+        Err(error) => {
+            let _ = fs::remove_file(&output_path);
+            return Err(error);
+        }
+    };
 
     let metadata = fs::metadata(&output_path).map_err(|error| {
         format!("Backup finished but the output file could not be inspected: {error}")
@@ -106,8 +105,76 @@ pub fn create_backup(
     Ok(MariaDBBackupResult {
         path: output_path.to_string_lossy().to_string(),
         size_bytes: metadata.len(),
-        stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        stderr,
     })
+}
+
+fn reserve_backup_file(path: &Path) -> Result<(), String> {
+    OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map(|_| ())
+        .map_err(|error| {
+            format!("Cannot create backup without overwriting an existing file: {error}")
+        })
+}
+
+pub(crate) fn run_backup_client(command: &mut Command, operation: &str) -> Result<String, String> {
+    run_client_with_timeout(command, operation, Duration::from_secs(3600))
+}
+
+fn run_client_with_timeout(
+    command: &mut Command,
+    operation: &str,
+    timeout: Duration,
+) -> Result<String, String> {
+    let mut child = command
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("Failed to start {operation}: {error}"))?;
+    let mut stderr = child
+        .stderr
+        .take()
+        .ok_or("MariaDB stderr was unavailable.")?;
+    let reader = thread::spawn(move || {
+        let mut retained = Vec::new();
+        let mut buffer = [0; 8192];
+        while let Ok(count) = stderr.read(&mut buffer) {
+            if count == 0 {
+                break;
+            }
+            let keep = count.min(16384usize.saturating_sub(retained.len()));
+            retained.extend_from_slice(&buffer[..keep]);
+        }
+        String::from_utf8_lossy(&retained).trim().to_string()
+    });
+    let started = Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Ok(status),
+            Ok(None) if started.elapsed() < timeout => {
+                thread::sleep(Duration::from_millis(100));
+            }
+            outcome => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break Err(match outcome {
+                    Err(error) => format!("Failed to wait for {operation}: {error}"),
+                    _ => format!("{operation} exceeded its one-hour timeout."),
+                });
+            }
+        }
+    };
+    let stderr = reader.join().unwrap_or_default();
+    if status?.success() {
+        Ok(stderr)
+    } else if stderr.is_empty() {
+        Err(format!("{operation} failed."))
+    } else {
+        Err(stderr)
+    }
 }
 
 fn validate_backup_options(options: &MariaDBBackupOptions) -> Result<(), String> {
@@ -219,4 +286,89 @@ fn timestamp_label() -> String {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs().to_string())
         .unwrap_or_else(|_| "0".to_string())
+}
+
+#[cfg(test)]
+mod safety_tests {
+    use super::*;
+
+    #[test]
+    fn existing_backup_is_never_overwritten() {
+        let path = std::env::temp_dir().join(format!(
+            "fx-dump-reservation-{}-{}.sql",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::write(&path, b"existing backup").unwrap();
+        assert!(reserve_backup_file(&path).is_err());
+        assert_eq!(fs::read(&path).unwrap(), b"existing backup");
+        fs::remove_file(path).unwrap();
+    }
+
+    #[cfg(windows)]
+    fn mock_client(script: &str) -> Command {
+        let mut command = Command::new("powershell.exe");
+        command
+            .no_window()
+            .args(["-NoProfile", "-NonInteractive", "-Command", script]);
+        command
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn client_errors_and_large_stderr_are_bounded() {
+        let mut command = mock_client("[Console]::Error.Write(('x' * 100000)); exit 1");
+        let error = run_client_with_timeout(&mut command, "mock backup", Duration::from_secs(15))
+            .unwrap_err();
+        assert_eq!(error.len(), 16384);
+        let mut command = mock_client("[Console]::Error.Write('warning'); exit 0");
+        assert_eq!(
+            run_client_with_timeout(&mut command, "mock backup", Duration::from_secs(15)).unwrap(),
+            "warning"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn stuck_client_is_terminated_and_reaped() {
+        let mut command = mock_client("Start-Sleep -Seconds 30");
+        let started = Instant::now();
+        assert!(
+            run_client_with_timeout(&mut command, "mock backup", Duration::from_millis(200))
+                .unwrap_err()
+                .contains("timeout")
+        );
+        assert!(started.elapsed() < Duration::from_secs(10));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn restore_input_streams_from_a_file_without_loading_it_into_memory() {
+        use std::io::Write;
+        let path = std::env::temp_dir().join(format!(
+            "fx-restore-stream-{}-{}.sql",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .unwrap();
+        for _ in 0..128 {
+            file.write_all(&[b'x'; 65536]).unwrap();
+        }
+        drop(file);
+        let mut command = mock_client("$stream = [Console]::OpenStandardInput(); $buffer = New-Object byte[] 65536; $total = 0; while (($count = $stream.Read($buffer, 0, $buffer.Length)) -gt 0) { $total += $count }; [Console]::Error.Write($total)");
+        command.stdin(Stdio::from(fs::File::open(&path).unwrap()));
+        let result = run_client_with_timeout(&mut command, "mock restore", Duration::from_secs(20));
+        fs::remove_file(&path).unwrap();
+        assert_eq!(result.unwrap(), "8388608");
+    }
 }

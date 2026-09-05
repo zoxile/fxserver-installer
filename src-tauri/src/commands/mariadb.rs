@@ -1,4 +1,4 @@
-use std::sync::Mutex;
+use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use tauri::{AppHandle, Emitter};
 
 use crate::{
@@ -24,16 +24,25 @@ use crate::{
     },
 };
 
-static INSTALLER: Mutex<()> = Mutex::new(());
+static DATABASE_ACCESS: RwLock<()> = RwLock::new(());
+
+pub(crate) fn database_access() -> Result<RwLockReadGuard<'static, ()>, String> {
+    DATABASE_ACCESS.try_read().map_err(|_| {
+        "MariaDB maintenance or a restore is in progress. Try again after it finishes.".into()
+    })
+}
+
+pub(crate) fn maintenance_access() -> Result<RwLockWriteGuard<'static, ()>, String> {
+    DATABASE_ACCESS.try_write()
+        .map_err(|_| "A MariaDB operation is in progress. Wait for backups, restores, and queries to finish before changing the service.".into())
+}
 
 async fn run_installer(
     app: AppHandle,
     task: impl FnOnce(&dyn Fn(&str)) -> Result<String, String> + Send + 'static,
 ) -> Result<String, String> {
     super::run_blocking(move || {
-        let _guard = INSTALLER
-            .try_lock()
-            .map_err(|_| "A MariaDB installation action is already running.".to_string())?;
+        let _guard = maintenance_access()?;
         task(&|stage| {
             let _ = app.emit("mariadb-progress", stage);
         })
@@ -74,6 +83,7 @@ pub async fn update_mariadb(app: AppHandle) -> Result<String, String> {
 #[tauri::command]
 pub async fn start_mariadb_service(service_name: Option<String>) -> Result<MariaDBStatus, String> {
     super::run_blocking(move || {
+        let _guard = maintenance_access()?;
         start_service(service_name)?;
         Ok(detect_mariadb())
     })
@@ -83,6 +93,7 @@ pub async fn start_mariadb_service(service_name: Option<String>) -> Result<Maria
 #[tauri::command]
 pub async fn stop_mariadb_service(service_name: Option<String>) -> Result<MariaDBStatus, String> {
     super::run_blocking(move || {
+        let _guard = maintenance_access()?;
         stop_service(service_name)?;
         Ok(detect_mariadb())
     })
@@ -94,6 +105,7 @@ pub async fn restart_mariadb_service(
     service_name: Option<String>,
 ) -> Result<MariaDBStatus, String> {
     super::run_blocking(move || {
+        let _guard = maintenance_access()?;
         restart_service(service_name)?;
         Ok(detect_mariadb())
     })
@@ -105,19 +117,31 @@ pub async fn execute_mariadb_query(
     credentials: MariaDBCredentials,
     query: String,
 ) -> Result<MariaDBQueryResult, String> {
-    super::run_blocking(move || execute_query(credentials, query)).await
+    super::run_blocking(move || {
+        let _guard = database_access()?;
+        execute_query(credentials, query)
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn validate_mariadb_credentials(credentials: MariaDBCredentials) -> Result<(), String> {
-    super::run_blocking(move || validate_connection(credentials)).await
+    super::run_blocking(move || {
+        let _guard = database_access()?;
+        validate_connection(credentials)
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn list_mariadb_databases(
     credentials: MariaDBCredentials,
 ) -> Result<Vec<String>, String> {
-    super::run_blocking(move || list_databases(credentials)).await
+    super::run_blocking(move || {
+        let _guard = database_access()?;
+        list_databases(credentials)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -125,7 +149,11 @@ pub async fn list_mariadb_tables(
     credentials: MariaDBCredentials,
     database: String,
 ) -> Result<Vec<String>, String> {
-    super::run_blocking(move || list_tables(credentials, database)).await
+    super::run_blocking(move || {
+        let _guard = database_access()?;
+        list_tables(credentials, database)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -133,7 +161,11 @@ pub async fn backup_mariadb(
     credentials: MariaDBCredentials,
     options: MariaDBBackupOptions,
 ) -> Result<MariaDBBackupResult, String> {
-    super::run_blocking(move || create_backup(credentials, options)).await
+    super::run_blocking(move || {
+        let _guard = database_access()?;
+        create_backup(credentials, options)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -141,14 +173,22 @@ pub async fn save_mariadb_user(
     credentials: MariaDBCredentials,
     config: MariaDBUserConfig,
 ) -> Result<(), String> {
-    super::run_blocking(move || create_or_update_user(credentials, config)).await
+    super::run_blocking(move || {
+        let _guard = database_access()?;
+        create_or_update_user(credentials, config)
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn list_mariadb_users(
     credentials: MariaDBCredentials,
 ) -> Result<Vec<MariaDBUser>, String> {
-    super::run_blocking(move || list_users(credentials)).await
+    super::run_blocking(move || {
+        let _guard = database_access()?;
+        list_users(credentials)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -156,7 +196,11 @@ pub async fn update_mariadb_user(
     credentials: MariaDBCredentials,
     config: MariaDBUserUpdateConfig,
 ) -> Result<(), String> {
-    super::run_blocking(move || update_user(credentials, config)).await
+    super::run_blocking(move || {
+        let _guard = database_access()?;
+        update_user(credentials, config)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -165,7 +209,11 @@ pub async fn get_mariadb_user_access(
     username: String,
     host: String,
 ) -> Result<MariaDBUserAccess, String> {
-    super::run_blocking(move || get_user_access(credentials, username, host)).await
+    super::run_blocking(move || {
+        let _guard = database_access()?;
+        get_user_access(credentials, username, host)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -177,6 +225,7 @@ pub async fn grant_mariadb_permissions(
     privileges: Vec<String>,
 ) -> Result<(), String> {
     super::run_blocking(move || {
+        let _guard = database_access()?;
         grant_permissions(credentials, username, host, database, privileges)
     })
     .await
@@ -188,5 +237,27 @@ pub async fn delete_mariadb_user(
     username: String,
     host: String,
 ) -> Result<(), String> {
-    super::run_blocking(move || drop_user(credentials, username, host)).await
+    super::run_blocking(move || {
+        let _guard = database_access()?;
+        drop_user(credentials, username, host)
+    })
+    .await
+}
+
+#[cfg(test)]
+mod coordination_tests {
+    use super::*;
+
+    #[test]
+    fn service_changes_and_restores_do_not_overlap_database_work() {
+        let backup = database_access().unwrap();
+        assert!(database_access().is_ok());
+        assert!(maintenance_access().is_err());
+        drop(backup);
+        let maintenance = maintenance_access().unwrap();
+        assert!(database_access().is_err());
+        assert!(maintenance_access().is_err());
+        drop(maintenance);
+        assert!(database_access().is_ok());
+    }
 }
