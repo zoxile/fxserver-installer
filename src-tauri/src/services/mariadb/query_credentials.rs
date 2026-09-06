@@ -249,19 +249,29 @@ fn create_private_file(path: &Path) -> Result<File, String> {
 #[cfg(all(test, windows))]
 mod tests {
     use super::*;
-
-    fn file_dacl(file: &File) -> String {
-        use std::{os::windows::io::AsRawHandle, ptr};
-        use windows_sys::Win32::{
-            Foundation::LocalFree,
-            Security::{
-                Authorization::{
-                    ConvertSecurityDescriptorToStringSecurityDescriptorW, GetSecurityInfo,
-                    SE_FILE_OBJECT,
-                },
-                DACL_SECURITY_INFORMATION,
+    use std::{ffi::c_void, os::windows::io::AsRawHandle, ptr};
+    use windows_sys::Win32::{
+        Foundation::LocalFree,
+        Security::{
+            Authorization::{
+                ConvertStringSecurityDescriptorToSecurityDescriptorW, ConvertStringSidToSidW,
+                GetSecurityInfo, SE_FILE_OBJECT,
             },
-        };
+            EqualSid, GetAce, GetSecurityDescriptorControl, GetSecurityDescriptorDacl,
+            ACCESS_ALLOWED_ACE, DACL_SECURITY_INFORMATION, SE_DACL_PROTECTED,
+        },
+        Storage::FileSystem::FILE_ALL_ACCESS,
+    };
+
+    struct LocalBuffer(*mut c_void);
+
+    impl Drop for LocalBuffer {
+        fn drop(&mut self) {
+            unsafe { LocalFree(self.0) };
+        }
+    }
+
+    fn file_descriptor(file: &File) -> LocalBuffer {
         let mut descriptor = ptr::null_mut();
         assert_eq!(
             unsafe {
@@ -278,31 +288,69 @@ mod tests {
             },
             0
         );
-        let mut sddl = ptr::null_mut();
-        let converted = unsafe {
-            ConvertSecurityDescriptorToStringSecurityDescriptorW(
-                descriptor,
-                1,
-                DACL_SECURITY_INFORMATION,
-                &mut sddl,
-                ptr::null_mut(),
-            )
-        };
-        unsafe {
-            LocalFree(descriptor);
+        LocalBuffer(descriptor)
+    }
+
+    fn descriptor_from_sddl(sddl: &str) -> LocalBuffer {
+        let sddl: Vec<_> = sddl.encode_utf16().chain(Some(0)).collect();
+        let mut descriptor = ptr::null_mut();
+        assert_ne!(
+            unsafe {
+                ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                    sddl.as_ptr(),
+                    1,
+                    &mut descriptor,
+                    ptr::null_mut(),
+                )
+            },
+            0
+        );
+        LocalBuffer(descriptor)
+    }
+
+    fn sid_from_string(sid: &str) -> LocalBuffer {
+        let sid: Vec<_> = sid.encode_utf16().chain(Some(0)).collect();
+        let mut result = ptr::null_mut();
+        assert_ne!(
+            unsafe { ConvertStringSidToSidW(sid.as_ptr(), &mut result) },
+            0
+        );
+        LocalBuffer(result)
+    }
+
+    fn has_private_dacl(descriptor: &LocalBuffer, expected_sid: &LocalBuffer) -> bool {
+        let (mut control, mut revision) = (0, 0);
+        assert_ne!(
+            unsafe { GetSecurityDescriptorControl(descriptor.0, &mut control, &mut revision) },
+            0
+        );
+        let (mut present, mut defaulted) = (0, 0);
+        let mut acl = ptr::null_mut();
+        assert_ne!(
+            unsafe {
+                GetSecurityDescriptorDacl(descriptor.0, &mut present, &mut acl, &mut defaulted)
+            },
+            0
+        );
+        if control & SE_DACL_PROTECTED == 0 || present == 0 || defaulted != 0 || acl.is_null() {
+            return false;
         }
-        assert_ne!(converted, 0);
-        let mut length = 0;
-        unsafe {
-            while *sddl.add(length) != 0 {
-                length += 1;
-            }
+        if unsafe { (*acl).AceCount } != 1 {
+            return false;
         }
-        let result = String::from_utf16(unsafe { std::slice::from_raw_parts(sddl, length) });
-        unsafe {
-            LocalFree(sddl.cast());
-        }
-        result.unwrap()
+        let mut ace = ptr::null_mut();
+        assert_ne!(unsafe { GetAce(acl, 0, &mut ace) }, 0);
+        let entry = unsafe { &*ace.cast::<ACCESS_ALLOWED_ACE>() };
+        // ACCESS_ALLOWED_ACE_TYPE is zero. Compare the SID itself, not its SDDL alias.
+        entry.Header.AceType == 0
+            && entry.Header.AceFlags == 0
+            && entry.Mask == FILE_ALL_ACCESS
+            && unsafe {
+                EqualSid(
+                    ptr::addr_of!(entry.SidStart).cast_mut().cast(),
+                    expected_sid.0,
+                )
+            } != 0
     }
 
     #[test]
@@ -310,14 +358,46 @@ mod tests {
         let guard = CredentialFile::create("").unwrap();
         let path = guard.path.clone();
         assert_eq!(std::fs::metadata(&path).unwrap().len(), 0);
-        assert_eq!(
-            file_dacl(guard.file.as_ref().unwrap()),
-            format!("D:P(A;;FA;;;{})", current_user_sid().unwrap()),
+        assert!(
+            has_private_dacl(
+                &file_descriptor(guard.file.as_ref().unwrap()),
+                &sid_from_string(&current_user_sid().unwrap()),
+            ),
             "credential ACL must allow only the current user"
         );
         assert!(std::fs::OpenOptions::new().write(true).open(&path).is_err());
         drop(guard);
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn private_dacl_check_accepts_windows_sid_aliases() {
+        for (alias, sid) in [("SY", "S-1-5-18"), ("BA", "S-1-5-32-544"), ("LA", "LA")] {
+            assert!(has_private_dacl(
+                &descriptor_from_sddl(&format!("D:P(A;;FA;;;{alias})")),
+                &sid_from_string(sid),
+            ));
+        }
+    }
+
+    #[test]
+    fn private_dacl_check_rejects_changed_identity_or_permissions() {
+        let sid = sid_from_string("S-1-5-21-1-2-3-500");
+        for sddl in [
+            "D:P(A;;FA;;;S-1-5-21-1-2-4-500)",
+            "D:P(A;;FA;;;S-1-5-21-1-2-3-500)(A;;FR;;;WD)",
+            "D:(A;;FA;;;S-1-5-21-1-2-3-500)",
+            "D:P(A;ID;FA;;;S-1-5-21-1-2-3-500)",
+            "D:P(A;;FR;;;S-1-5-21-1-2-3-500)",
+            "D:P(D;;FA;;;S-1-5-21-1-2-3-500)",
+            "D:P",
+            "D:NO_ACCESS_CONTROL",
+        ] {
+            assert!(
+                !has_private_dacl(&descriptor_from_sddl(sddl), &sid),
+                "{sddl}"
+            );
+        }
     }
 
     #[test]
