@@ -2,7 +2,9 @@ pub mod app_release;
 pub mod artifact;
 pub mod backup_manager;
 pub mod config_history;
+pub mod database_admin;
 pub mod database_browser;
+pub mod database_inspection;
 pub mod diagnostics;
 pub mod fxserver;
 pub mod health;
@@ -12,6 +14,7 @@ pub mod logs;
 pub mod mariadb;
 pub mod resource_updates;
 pub(crate) mod server_exe;
+pub mod sql_diagnostics;
 pub mod system;
 pub mod workspace_clone;
 

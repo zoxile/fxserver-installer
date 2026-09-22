@@ -20,6 +20,10 @@
 	import { Checkbox } from "$lib/components/ui/checkbox/index.js";
 	import ConnectionCard from "./ConnectionCard.svelte";
 	import DatabaseRowEditor from "./DatabaseRowEditor.svelte";
+	import TableListView from "./TableListView.svelte";
+	import DatabaseInspection from "./DatabaseInspection.svelte";
+	import { inspectionTabs, type InspectionView } from "$lib/modules/databaseInspection";
+	import type { AdminResult } from "$lib/modules/databaseAdmin";
 	import { getWorkspaceId } from "$lib/core/workspaces.svelte";
 	import { databaseSession, rememberDatabaseCredentials } from "$lib/core/databaseSession.svelte";
 	import { listMariaDBDatabases, listMariaDBTables, validateMariaDBCredentials, type MariaDBCredentials } from "$lib/modules/mariadb";
@@ -39,10 +43,11 @@
 	let descending = $state(false);
 	let offset = $state(0);
 	let pageSize = $state("25");
-	let view = $state<"rows" | "columns" | "indexes">("rows");
+	let view = $state<"rows" | "columns" | "indexes" | "tables" | InspectionView>("rows");
 	let busy = $state(false);
 	let error = $state("");
 	let message = $state("");
+	let messageTone = $state<"success" | "warn">("success");
 	let connectionError = $state("");
 	let editMode = $state(false);
 	let editor = $state<{ kind: "insert" | "update" | "delete"; original: (string | null)[] | null } | null>(null);
@@ -59,12 +64,13 @@
 	const databaseOptions = $derived(databases.map((value) => ({ value, label: value })));
 	const tableOptions = $derived(tables.map((value) => ({ value, label: value })));
 	const columnOptions = $derived(metadata.columns.map(({ name }) => ({ value: name, label: name })));
+	const rowView = $derived(["rows", "columns", "indexes"].includes(view));
 
 	onMount(() => { active = true; if (databaseSession.credentials) void connect(); return () => { active = false; }; });
 
 	async function action(work: () => Promise<void>) {
 		if (busy || !active) return;
-		busy = true; error = ""; message = "";
+		busy = true; error = ""; message = ""; messageTone = "success";
 		try { await work(); } catch (caught) { if (active) error = String(caught); }
 		finally { if (active) busy = false; }
 	}
@@ -90,11 +96,20 @@
 	async function loadTables() {
 		const selected = database; const signature = JSON.stringify(credentials);
 		table = ""; tables = []; resetTable();
-		if (!selected || !credentialsReady) return;
+		if (!selected || !credentialsReady) { if (credentialsReady) view = "tables"; return; }
 		const available = await listMariaDBTables({ ...credentials, database: null }, selected);
 		if (!active || selected !== database || signature !== JSON.stringify(credentials)) return;
 		tables = available; table = available[0] ?? "";
+		if (!table && rowView) view = "tables";
 		await loadMetadata();
+	}
+	async function administrationChanged(result: AdminResult) {
+		await action(async () => {
+			databases = await listMariaDBDatabases({ ...credentials, database: null });
+			await loadTables();
+			message = [result.message, ...result.messages.map((row) => row.join(": "))].join("\n");
+			messageTone = result.hasIssues ? "warn" : "success";
+		});
 	}
 	async function loadMetadata() {
 		resetTable();
@@ -132,24 +147,40 @@
 
 <section class="min-w-0 space-y-5">
 	<header class="flex flex-wrap items-center justify-between gap-3">
-		<div class="flex flex-wrap items-center gap-3"><DatabaseIcon class="size-6 text-muted-foreground" /><h1 class="text-2xl font-semibold">Database Browser</h1><span class={editMode ? "text-xs text-amber-400" : "text-xs text-muted-foreground"}>{editMode ? "Editing enabled" : "Read-only"}</span></div>
+		<div class="flex flex-wrap items-center gap-3"><DatabaseIcon class="size-6 text-muted-foreground" /><h1 class="text-2xl font-semibold">Database Browser</h1><span class={editMode && rowView ? "text-xs text-amber-400" : "text-xs text-muted-foreground"}>{view === "tables" ? "Review required" : editMode && rowView ? "Editing enabled" : "Read-only"}</span></div>
 		<Button size="icon" variant="outline" disabled={busy || !credentialsReady || !table} onclick={() => action(loadMetadata)} title="Refresh table" aria-label="Refresh table"><RefreshCwIcon class={busy ? "animate-spin" : ""} /></Button>
 	</header>
 	{#if error}<Notice tone="error" message={error} onDismiss={() => error = ""} />{/if}
-	{#if message}<Notice tone="success" {message} onDismiss={() => message = ""} />{/if}
+	{#if message}<Notice tone={messageTone} {message} onDismiss={() => message = ""} />{/if}
 	<details open={!credentialsReady}><summary class="mb-3 cursor-pointer text-sm font-medium">Connection {credentialsReady ? ` / ${credentials.host}:${credentials.port}` : ""}</summary><ConnectionCard bind:credentials {busy} {credentialsReady} {connectionError} stretch={false} onApply={connect} /></details>
 	<div class="grid gap-4 border-y border-border py-4 sm:grid-cols-2">
 		<div class="grid min-w-0 gap-2"><label for="browser-database" class="text-xs font-medium">Database</label><Select.Root type="single" value={database} items={databaseOptions} disabled={busy || !credentialsReady} onValueChange={(value) => { database = value; void action(loadTables); }}><Select.Trigger id="browser-database" class="w-full min-w-0 font-mono text-xs"><span class="truncate">{database || "Choose database"}</span></Select.Trigger><Select.Content>{#each databaseOptions as option}<Select.Item value={option.value} label={option.label}>{option.label}</Select.Item>{/each}</Select.Content></Select.Root></div>
 		<div class="grid min-w-0 gap-2"><label for="browser-table" class="text-xs font-medium">Table</label><Select.Root type="single" value={table} items={tableOptions} disabled={busy || !credentialsReady || !database} onValueChange={(value) => { table = value; void action(loadMetadata); }}><Select.Trigger id="browser-table" class="w-full min-w-0 font-mono text-xs"><span class="truncate">{table || "Choose table"}</span></Select.Trigger><Select.Content>{#each tableOptions as option}<Select.Item value={option.value} label={option.label}>{option.label}</Select.Item>{/each}</Select.Content></Select.Root></div>
 	</div>
-	{#if table && credentialsReady}
+	{#if credentialsReady}
 		<Tabs.Root bind:value={view} class="space-y-5" loop>
 		<div class="flex flex-wrap items-center justify-between gap-3 border-b border-border">
-			<Tabs.List aria-label="Table views">{#each ["rows", "columns", "indexes"] as tab}<Tabs.Trigger value={tab}>{tab}</Tabs.Trigger>{/each}</Tabs.List>
-			<Button variant="outline" size="sm" disabled={busy} onclick={exportCsv} title="Export up to 5,000 filtered rows, maximum 8 MiB"><DownloadIcon />Export CSV</Button>
+			<Tabs.List aria-label="Table views" class="min-w-0 flex-wrap gap-x-4 gap-y-0">
+				{#each ["rows", "columns", "indexes"] as tab}
+					<Tabs.Trigger value={tab} disabled={busy || !table}>{tab}</Tabs.Trigger>
+				{/each}
+				<Tabs.Trigger value="tables" disabled={busy}>Tables</Tabs.Trigger>
+				{#each inspectionTabs as tab}
+					<Tabs.Trigger value={tab.value} disabled={busy || (tab.value === "overview" && !database)}>
+						{tab.label}
+					</Tabs.Trigger>
+				{/each}
+			</Tabs.List>
+			{#if rowView && table}
+				<Button variant="outline" size="sm" disabled={busy} onclick={exportCsv} title="Export up to 5,000 filtered rows, maximum 8 MiB">
+					<DownloadIcon />Export CSV
+				</Button>
+			{/if}
 		</div>
+		{#if rowView && table}
 		<div class="flex flex-wrap items-center justify-between gap-3 text-xs"><label class="flex items-center gap-2"><Checkbox bind:checked={editMode} disabled={busy || !metadata.editable} onCheckedChange={() => editor = null} />Enable row editing</label>{#if metadata.editReason}<span class="text-muted-foreground">{metadata.editReason}</span>{/if}{#if editMode}<Button variant="outline" size="sm" disabled={busy} onclick={() => editor = { kind: "insert", original: null }}><PlusIcon />Insert Row</Button>{/if}</div>
 		{#if editMode && editor}{#key editor}<DatabaseRowEditor {metadata} kind={editor.kind} original={editor.original} {database} {table} {workspaceId} {credentials} onClose={() => editor = null} onBusy={(value) => busy = value} onApplied={async () => { editor = null; busy = false; await action(loadRows); message = "One row changed."; }} />{/key}{/if}
+		{/if}
 		{#if view === "rows"}
 			<Tabs.Content value="rows" class="space-y-4">
 			<div class="space-y-2">
@@ -173,11 +204,27 @@
 			<Tabs.Content value="columns">
 			<div class="overflow-auto"><table class="w-full text-left text-xs"><thead><tr>{#each ["Column", "Type", "Nullable", "Default", "Extra"] as heading}<th class="border-b border-border p-3">{heading}</th>{/each}</tr></thead><tbody>{#each metadata.columns as column}<tr class="border-b border-border/50"><td class="p-3 font-mono">{column.name}</td><td class="p-3 font-mono">{column.columnType}</td><td class="p-3">{column.nullable ? "Yes" : "No"}</td><td class="max-w-64 truncate p-3" title={column.defaultValue ?? "NULL"}>{column.defaultValue ?? "NULL"}</td><td class="p-3">{column.extra || "-"}</td></tr>{/each}</tbody></table></div>
 			</Tabs.Content>
-		{:else}
+		{:else if view === "indexes"}
 			<Tabs.Content value="indexes">
 			<div class="overflow-auto"><table class="w-full text-left text-xs"><thead><tr>{#each ["Index", "Column", "Position", "Unique", "Type"] as heading}<th class="border-b border-border p-3">{heading}</th>{/each}</tr></thead><tbody>{#each metadata.indexes as index}<tr class="border-b border-border/50"><td class="p-3 font-mono">{index.name}</td><td class="p-3 font-mono">{index.column ?? "Expression"}</td><td class="p-3">{index.sequence}</td><td class="p-3">{index.unique ? "Yes" : "No"}</td><td class="p-3">{index.indexType}</td></tr>{:else}<tr><td colspan="5" class="p-6 text-center text-muted-foreground">No indexes.</td></tr>{/each}</tbody></table></div>
 			</Tabs.Content>
+		{:else if view === "tables"}
+			<Tabs.Content value="tables">
+				{#key `${database}/${table}/${validated}`}
+					<TableListView
+						{credentials} {database} {workspaceId} blocked={busy}
+						onBusy={(value) => busy = value} onChanged={administrationChanged}
+						onOpen={(name) => { table = name; view = "rows"; void action(loadMetadata); }}
+					/>
+				{/key}
+			</Tabs.Content>
+		{:else}
+			<Tabs.Content value={view}>
+				{#key `${view}/${database}/${validated}`}
+					<DatabaseInspection {credentials} {database} view={view as InspectionView} />
+				{/key}
+			</Tabs.Content>
 		{/if}
 		</Tabs.Root>
-	{:else if credentialsReady}<p class="py-8 text-sm text-muted-foreground">No accessible base tables in the selected database.</p>{/if}
+	{/if}
 </section>

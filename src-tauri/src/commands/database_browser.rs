@@ -1,22 +1,23 @@
 use std::{
     collections::HashMap,
     fs::OpenOptions,
-    io::{Read, Write},
+    io::Write,
     path::Path,
-    process::{Command, Stdio},
     sync::{Mutex, OnceLock},
-    thread,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use crate::{
     models::mariadb::MariaDBCredentials,
-    process::CommandNoWindowExt,
-    services::mariadb::query::{apply_credentials_args, find_mariadb_client},
+    services::mariadb::query::{
+        configure_query_command, configured_client as json_client, run_client, QUERY_TIMEOUT,
+    },
 };
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
+#[cfg(all(test, windows))]
+use {crate::process::CommandNoWindowExt, std::process::Command};
 
-const MAX_OUTPUT: usize = 16 * 1024 * 1024;
+const MAX_STRUCTURED_ROWS: usize = 10_000;
 const MAX_CELL: usize = 4096;
 const MAX_EXPORT: usize = 5000;
 const MAX_PAGE_CELLS: usize = 4000;
@@ -137,19 +138,36 @@ pub(crate) fn sql_text(value: &str) -> String {
     format!("CONVERT(0x{hex} USING utf8mb4)")
 }
 
-fn bounded_read(mut input: impl Read) -> Result<Vec<u8>, String> {
-    let mut bytes = Vec::new();
-    input
-        .by_ref()
-        .take((MAX_OUTPUT + 1) as u64)
-        .read_to_end(&mut bytes)
-        .map_err(|e| e.to_string())?;
-    if bytes.len() > MAX_OUTPUT {
-        return Err("Query output exceeded 16 MiB. Narrow the filters or page size.".into());
-    }
-    Ok(bytes)
+fn parse_json_output<T: DeserializeOwned>(stdout: Vec<u8>) -> Result<Vec<T>, String> {
+    let text = String::from_utf8(stdout).map_err(|_| "MariaDB output was not UTF-8.")?;
+    text.lines()
+        .filter(|line| !line.is_empty())
+        .enumerate()
+        .map(|(index, line)| {
+            if index >= MAX_STRUCTURED_ROWS {
+                return Err("Query returned more than 10,000 records. Narrow the query.".into());
+            }
+            // Deserializer errors can echo SQL data or credentials; expose only the location.
+            serde_json::from_str(line).map_err(|error| {
+                format!(
+                    "Invalid structured MariaDB result at line {} column {}.",
+                    error.line(),
+                    error.column()
+                )
+            })
+        })
+        .collect()
 }
 
+#[cfg(all(test, windows))]
+pub(crate) fn isolated_test_client(
+    credentials: &MariaDBCredentials,
+) -> Option<Result<(Command, crate::services::mariadb::query::CredentialFile), String>> {
+    tests::isolated_client(credentials)
+}
+
+/// Also used for commits and restores: this is deliberately a single-execution
+/// client path, with no native routing, SQL-prefix guessing, retries, or fallback.
 pub(crate) fn query_json<T: DeserializeOwned>(
     credentials: &MariaDBCredentials,
     sql: &str,
@@ -158,74 +176,16 @@ pub(crate) fn query_json<T: DeserializeOwned>(
         if sql.len() > 24000 {
             return Err("Query is too large. Reduce the number or length of filters.".into());
         }
-        let client = find_mariadb_client().ok_or("MariaDB client is unavailable.")?;
-        let mut command = Command::new(client);
-        command.no_window();
-        let _credentials_file = apply_credentials_args(&mut command, credentials)?;
-        command
-            .args([
-                "--batch",
-                "--raw",
-                "--skip-column-names",
-                "--quick",
-                "--binary-mode",
-                "--skip-reconnect",
-                "--local-infile=0",
-                "--connect-timeout=10",
-                "--default-character-set=utf8mb4",
-                "--init-command=SET SESSION sql_mode=''",
-            ])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        let mut child = command
-            .spawn()
-            .map_err(|e| format!("Cannot start MariaDB: {e}"))?;
-        let stdout = child.stdout.take().ok_or("MariaDB output unavailable.")?;
-        let stderr = child
-            .stderr
-            .take()
-            .ok_or("MariaDB error output unavailable.")?;
-        let output = thread::spawn(move || bounded_read(stdout));
-        let errors = thread::spawn(move || bounded_read(stderr));
-        let mut stdin = child.stdin.take().ok_or("MariaDB input unavailable.")?;
-        let sql = sql.to_owned();
-        // SQL can contain row data or ownership secrets; keep it out of process arguments.
-        let input = thread::spawn(move || stdin.write_all(sql.as_bytes()));
-        let started = Instant::now();
-        let status = loop {
-            match child.try_wait() {
-                Ok(Some(status)) => break Ok(status),
-                Ok(None) if started.elapsed() < Duration::from_secs(30) => {
-                    thread::sleep(Duration::from_millis(25))
-                }
-                outcome => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    break Err(match outcome {
-                        Err(e) => e.to_string(),
-                        _ => "Database query timed out after 30 seconds.".into(),
-                    });
-                }
-            }
-        };
-        let stdout = output.join().map_err(|_| "Query output worker failed.")??;
-        let stderr = errors.join().map_err(|_| "Query error worker failed.")??;
-        let input_result = input.join().map_err(|_| "Query input worker failed.")?;
-        if !status?.success() {
+        let (mut command, _credentials_file) = json_client(credentials)?;
+        configure_query_command(&mut command, None)?;
+        command.arg("--skip-column-names");
+        let output = run_client(&mut command, sql.to_owned(), QUERY_TIMEOUT)?;
+        if !output.status.success() {
             return Err(super::backup_manager::storage::client_failure(
-                &String::from_utf8_lossy(&stderr),
+                &String::from_utf8_lossy(&output.stderr),
             ));
         }
-        input_result.map_err(|_| "Could not send the complete database query.")?;
-        let text = String::from_utf8(stdout).map_err(|_| "MariaDB output was not UTF-8.")?;
-        text.lines()
-            .filter(|line| !line.is_empty())
-            .map(|line| {
-                serde_json::from_str(line)
-                    .map_err(|e| format!("Invalid structured MariaDB result: {e}"))
-            })
-            .collect()
+        parse_json_output(output.stdout)
     })();
     result.map_err(|error: String| redacted_error(&error, &credentials.password))
 }
@@ -240,42 +200,113 @@ fn redacted_error(error: &str, password: &str) -> String {
     error.chars().take(4000).collect()
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum MetadataRow {
+    TableType(String),
+    Column(BrowserColumn),
+    Index(BrowserIndex),
+    Safe(u8),
+}
+
+fn columns_sql(database: &str, table: &str) -> String {
+    let schema = sql_text(database);
+    let name = sql_text(table);
+    // The fork's columns-only optimization skipped the base-table check. Keep it
+    // in this query so every page/export still refuses views and inaccessible tables.
+    format!("SELECT JSON_OBJECT('column',JSON_OBJECT('name',COLUMN_NAME,'columnType',COLUMN_TYPE,'nullable',IF(IS_NULLABLE='YES',JSON_EXTRACT('true','$'),JSON_EXTRACT('false','$')),'defaultValue',COLUMN_DEFAULT,'extra',EXTRA,'binary',IF(DATA_TYPE IN ('binary','varbinary','tinyblob','blob','mediumblob','longblob','bit','geometry'),JSON_EXTRACT('true','$'),JSON_EXTRACT('false','$')))) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA={schema} AND TABLE_NAME={name} AND EXISTS(SELECT 1 FROM information_schema.TABLES WHERE TABLE_SCHEMA={schema} AND TABLE_NAME={name} AND TABLE_TYPE='BASE TABLE') ORDER BY ORDINAL_POSITION LIMIT 129;")
+}
+
+fn validate_columns(columns: &[BrowserColumn]) -> Result<(), String> {
+    if columns.is_empty() || columns.len() > 128 {
+        return Err(
+            "Choose an accessible base table with 1 to 128 columns. Views are not browsed.".into(),
+        );
+    }
+    Ok(())
+}
+
+/// Column-only reads and client caching are adapted from Hunter Corlett's fork
+/// 53f183437438109093b4a73a747b1d650ce31dc9; no native execution/fallback is reused.
+fn browser_columns(
+    credentials: &MariaDBCredentials,
+    database: &str,
+    table: &str,
+) -> Result<Vec<BrowserColumn>, String> {
+    quote_identifier(database)?;
+    quote_identifier(table)?;
+    let rows = query_json(
+        credentials,
+        &format!(
+            "SET SESSION max_statement_time=20; START TRANSACTION READ ONLY; {} ROLLBACK;",
+            columns_sql(database, table)
+        ),
+    )?;
+    decode_columns(rows)
+}
+
+fn decode_columns(rows: Vec<MetadataRow>) -> Result<Vec<BrowserColumn>, String> {
+    let columns = rows
+        .into_iter()
+        .map(|row| match row {
+            MetadataRow::Column(column) => Ok(column),
+            _ => Err("Unexpected column metadata result.".to_string()),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    validate_columns(&columns)?;
+    Ok(columns)
+}
+
+fn metadata_sql(database: &str, table: &str) -> Result<String, String> {
+    quote_identifier(database)?;
+    quote_identifier(table)?;
+    let schema = sql_text(database);
+    let name = sql_text(table);
+    // Tag each result so independent metadata reads share one connection and one
+    // 30-second client deadline without confusing result sets or caching editability.
+    Ok(format!(
+        "SET SESSION max_statement_time=20; START TRANSACTION READ ONLY; SELECT JSON_OBJECT('tableType',TABLE_TYPE) FROM information_schema.TABLES WHERE TABLE_SCHEMA={schema} AND TABLE_NAME={name} LIMIT 2; {} SELECT JSON_OBJECT('index',JSON_OBJECT('name',INDEX_NAME,'column',COLUMN_NAME,'sequence',SEQ_IN_INDEX,'unique',IF(NON_UNIQUE=0,JSON_EXTRACT('true','$'),JSON_EXTRACT('false','$')),'indexType',INDEX_TYPE,'prefixLength',SUB_PART)) FROM information_schema.STATISTICS WHERE TABLE_SCHEMA={schema} AND TABLE_NAME={name} ORDER BY INDEX_NAME,SEQ_IN_INDEX LIMIT 1025; SELECT JSON_OBJECT('safe',JSON_EXTRACT(IF({},'1','0'),'$')); ROLLBACK;",
+        columns_sql(database, table), safe_table(database, table)
+    ))
+}
+
 fn metadata(
     credentials: &MariaDBCredentials,
     database: &str,
     table: &str,
 ) -> Result<BrowserMetadata, String> {
-    quote_identifier(database)?;
-    quote_identifier(table)?;
-    let schema = sql_text(database);
-    let name = sql_text(table);
-    let kinds: Vec<String> = query_json(credentials, &format!("SELECT JSON_QUOTE(TABLE_TYPE) FROM information_schema.TABLES WHERE TABLE_SCHEMA={schema} AND TABLE_NAME={name};"))?;
+    decode_metadata(query_json(credentials, &metadata_sql(database, table)?)?)
+}
+
+fn decode_metadata(rows: Vec<MetadataRow>) -> Result<BrowserMetadata, String> {
+    let mut kinds = Vec::new();
+    let mut columns = Vec::new();
+    let mut indexes = Vec::new();
+    let mut safe = Vec::new();
+    for row in rows {
+        match row {
+            MetadataRow::TableType(kind) => kinds.push(kind),
+            MetadataRow::Column(column) => columns.push(column),
+            MetadataRow::Index(index) => indexes.push(index),
+            MetadataRow::Safe(value) => safe.push(value),
+        }
+    }
     if kinds != ["BASE TABLE"] {
         return Err("Choose an accessible base table. Views are not browsed.".into());
     }
-    let columns = query_json(credentials, &format!("SELECT JSON_OBJECT('name',COLUMN_NAME,'columnType',COLUMN_TYPE,'nullable',IF(IS_NULLABLE='YES',JSON_EXTRACT('true','$'),JSON_EXTRACT('false','$')),'defaultValue',COLUMN_DEFAULT,'extra',EXTRA,'binary',IF(DATA_TYPE IN ('binary','varbinary','tinyblob','blob','mediumblob','longblob','bit','geometry'),JSON_EXTRACT('true','$'),JSON_EXTRACT('false','$'))) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA={schema} AND TABLE_NAME={name} ORDER BY ORDINAL_POSITION LIMIT 129;"))?;
-    let indexes = query_json(credentials, &format!("SELECT JSON_OBJECT('name',INDEX_NAME,'column',COLUMN_NAME,'sequence',SEQ_IN_INDEX,'unique',IF(NON_UNIQUE=0,JSON_EXTRACT('true','$'),JSON_EXTRACT('false','$')),'indexType',INDEX_TYPE,'prefixLength',SUB_PART) FROM information_schema.STATISTICS WHERE TABLE_SCHEMA={schema} AND TABLE_NAME={name} ORDER BY INDEX_NAME,SEQ_IN_INDEX LIMIT 1024;"))?;
+    validate_columns(&columns)?;
+    if indexes.len() > 1024 || safe.len() != 1 {
+        return Err("Incomplete table safety metadata. Refresh the table.".into());
+    }
     let mut value = BrowserMetadata {
         columns,
         indexes,
         editable: false,
         edit_reason: None,
     };
-    if value.columns.is_empty() || value.columns.len() > 128 {
-        return Err("Browser supports tables with 1 to 128 columns.".into());
-    }
     value.edit_reason = edit_columns(&value).err();
-    if value.edit_reason.is_none() {
-        let safe: Vec<u8> = query_json(
-            credentials,
-            &format!(
-                "SELECT JSON_EXTRACT(IF({},'1','0'),'$');",
-                safe_table(database, table)
-            ),
-        )?;
-        if safe != [1] {
-            value.edit_reason = Some("Editing requires InnoDB without triggers, check constraints or foreign-key relationships.".into());
-        }
+    if value.edit_reason.is_none() && safe != [1] {
+        value.edit_reason = Some("Editing requires InnoDB without triggers, check constraints or foreign-key relationships.".into());
     }
     value.editable = value.edit_reason.is_none();
     Ok(value)
@@ -801,7 +832,7 @@ pub async fn get_database_browser_rows(
 ) -> Result<BrowserPage, String> {
     super::run_blocking(move || {
         let _guard = super::mariadb::database_access()?;
-        let columns = metadata(&credentials, &request.database, &request.table)?.columns;
+        let columns = browser_columns(&credentials, &request.database, &request.table)?;
         let page_size = bounded_page_size(request.page_size, columns.len());
         let sql = select_sql(&request, &columns, page_size + 1, false)?;
         let mut rows: Vec<Vec<Option<String>>> = query_json(&credentials, &sql)?;
@@ -857,7 +888,7 @@ pub async fn export_database_browser_csv(
         {
             return Err("Choose an absolute CSV output path.".into());
         }
-        let columns = metadata(&credentials, &request.database, &request.table)?.columns;
+        let columns = browser_columns(&credentials, &request.database, &request.table)?;
         let sql = select_sql(&request, &columns, MAX_EXPORT + 1, true)?;
         let mut rows: Vec<Vec<Option<String>>> = query_json(&credentials, &sql)?;
         let has_more = rows.len() > MAX_EXPORT;
@@ -904,6 +935,594 @@ pub async fn export_database_browser_csv(
 mod tests {
     use super::*;
 
+    #[cfg(windows)]
+    static ISOLATED_CLIENT: Mutex<Option<(std::path::PathBuf, u16)>> = Mutex::new(None);
+
+    #[cfg(windows)]
+    pub(super) fn isolated_client(
+        credentials: &MariaDBCredentials,
+    ) -> Option<Result<(Command, crate::services::mariadb::query::CredentialFile), String>> {
+        let fixture = ISOLATED_CLIENT.lock().unwrap().clone()?;
+        Some((|| {
+            if credentials.host != "127.0.0.1" || credentials.port != fixture.1 {
+                return Err("Disposable test refused credentials for an unowned endpoint.".into());
+            }
+            let mut command = Command::new(fixture.0);
+            command.no_window();
+            let guard = crate::services::mariadb::query::isolated_credentials_args(
+                &mut command,
+                credentials,
+            )?;
+            Ok((command, guard))
+        })())
+    }
+
+    #[cfg(windows)]
+    struct OwnedDatabase {
+        child: std::process::Child,
+        directory: std::path::PathBuf,
+        credentials: MariaDBCredentials,
+        stopped: bool,
+    }
+
+    #[cfg(windows)]
+    impl OwnedDatabase {
+        fn start() -> Result<Self, String> {
+            use std::{fs, net::TcpListener, process::Stdio, time::Instant};
+            let bin =
+                std::path::PathBuf::from(std::env::var_os("FXI_ISOLATED_MARIADB_BIN").ok_or(
+                    "Set FXI_ISOLATED_MARIADB_BIN to an explicit installed bin directory.",
+                )?);
+            if !bin.is_absolute() || bin.to_string_lossy().starts_with("\\\\") {
+                return Err("Fixture binaries require an ordinary absolute local path.".into());
+            }
+            for name in ["mariadb.exe", "mariadbd.exe", "mariadb-install-db.exe"] {
+                if !bin.join(name).is_file() {
+                    return Err(format!("Missing fixture binary: {name}"));
+                }
+            }
+            let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .unwrap()
+                .to_path_buf();
+            let output = workspace.join("output").join("database-performance");
+            fs::create_dir_all(&output).map_err(|e| e.to_string())?;
+            if !output
+                .canonicalize()
+                .map_err(|e| e.to_string())?
+                .starts_with(&workspace.canonicalize().map_err(|e| e.to_string())?)
+            {
+                return Err("Fixture output escaped the workspace.".into());
+            }
+            let token = super::super::backup_manager::storage::secure_token()?;
+            let directory = output.join(&token[..12]);
+            fs::create_dir(&directory).map_err(|e| e.to_string())?;
+            let data = directory.join("data");
+            let temp = directory.join("tmp");
+            fs::create_dir(&temp).map_err(|e| e.to_string())?;
+            let listener = TcpListener::bind(("127.0.0.1", 0)).map_err(|e| e.to_string())?;
+            let port = listener.local_addr().map_err(|e| e.to_string())?.port();
+            let credentials = MariaDBCredentials {
+                host: "127.0.0.1".into(),
+                port,
+                username: "root".into(),
+                password: format!("fixture-{token}"),
+                database: None,
+            };
+            let template = directory.join("bootstrap.ini");
+            fs::write(&template, "[mysqld]\nskip-networking\nlocal-infile=0\n")
+                .map_err(|e| e.to_string())?;
+            let mut initialize = Command::new(bin.join("mariadb-install-db.exe"));
+            initialize
+                .no_window()
+                .current_dir(&directory)
+                .arg(format!("--datadir={}", data.display()))
+                .arg(format!("--config={}", template.display()))
+                .arg(format!("--port={port}"))
+                .arg(format!("--password={}", credentials.password));
+            // No --service, remote-root, existing datadir, or existing configuration.
+            let initialized = run_client(&mut initialize, String::new(), QUERY_TIMEOUT)?;
+            fs::write(directory.join("initialize.stdout.log"), &initialized.stdout)
+                .map_err(|e| e.to_string())?;
+            fs::write(directory.join("initialize.stderr.log"), &initialized.stderr)
+                .map_err(|e| e.to_string())?;
+            if !initialized.status.success() {
+                return Err(format!(
+                    "Fixture initialization failed; logs in {}",
+                    directory.display()
+                ));
+            }
+            let log = directory.join("server.log");
+            let mut server = Command::new(bin.join("mariadbd.exe"));
+            server
+                .no_window()
+                .current_dir(&directory)
+                .arg("--no-defaults")
+                .arg(format!("--basedir={}", bin.parent().unwrap().display()))
+                .arg(format!("--datadir={}", data.display()))
+                .arg(format!("--tmpdir={}", temp.display()))
+                .arg(format!("--log-error={}", log.display()))
+                .arg(format!(
+                    "--pid-file={}",
+                    directory.join("server.pid").display()
+                ))
+                .arg(format!("--port={port}"))
+                .args([
+                    "--bind-address=127.0.0.1",
+                    "--skip-named-pipe",
+                    "--skip-log-bin",
+                    "--local-infile=0",
+                    "--innodb-buffer-pool-size=32M",
+                    "--max-allowed-packet=32M",
+                ])
+                .stdin(Stdio::null())
+                .stdout(
+                    fs::File::create(directory.join("server.stdout.log"))
+                        .map_err(|e| e.to_string())?,
+                )
+                .stderr(
+                    fs::File::create(directory.join("server.stderr.log"))
+                        .map_err(|e| e.to_string())?,
+                );
+            drop(listener);
+            let child = server.spawn().map_err(|e| e.to_string())?;
+            let mut owned = Self {
+                child,
+                directory,
+                credentials,
+                stopped: false,
+            };
+            let started = Instant::now();
+            loop {
+                if owned.child.try_wait().map_err(|e| e.to_string())?.is_some() {
+                    return Err(format!(
+                        "Owned server exited before readiness; logs in {}",
+                        owned.directory.display()
+                    ));
+                }
+                if fs::read_to_string(&log)
+                    .unwrap_or_default()
+                    .contains("ready for connections")
+                {
+                    break;
+                }
+                if started.elapsed() > QUERY_TIMEOUT {
+                    return Err("Owned server readiness timed out.".into());
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            *ISOLATED_CLIENT.lock().unwrap() = Some((bin.join("mariadb.exe"), port));
+            // The freshly generated password and this datadir check bind all subsequent
+            // reads/writes to our own server even if another process raced the free port.
+            let actual: Vec<String> =
+                query_json(&owned.credentials, "SELECT JSON_QUOTE(@@datadir);")?;
+            if actual.len() != 1
+                || Path::new(&actual[0])
+                    .canonicalize()
+                    .map_err(|e| e.to_string())?
+                    != data.canonicalize().map_err(|e| e.to_string())?
+            {
+                return Err("Refusing a server outside the newly created fixture datadir.".into());
+            }
+            Ok(owned)
+        }
+
+        fn stop(&mut self) -> Result<(), String> {
+            if !self.stopped {
+                // Child owns the process handle: never stop a service or kill by image name.
+                if self.child.try_wait().map_err(|e| e.to_string())?.is_none() {
+                    self.child.kill().map_err(|e| e.to_string())?;
+                }
+                self.child.wait().map_err(|e| e.to_string())?;
+                self.stopped = true;
+                *ISOLATED_CLIENT.lock().unwrap_or_else(|e| e.into_inner()) = None;
+            }
+            Ok(())
+        }
+    }
+
+    #[cfg(windows)]
+    impl Drop for OwnedDatabase {
+        fn drop(&mut self) {
+            let _ = self.stop();
+        }
+    }
+
+    #[cfg(windows)]
+    fn exercise_admin_commands(
+        runtime: &tokio::runtime::Runtime,
+        credentials: &MariaDBCredentials,
+    ) -> Result<(), String> {
+        use crate::commands::database_admin::{
+            apply_database_admin_action, preview_database_admin_action, AdminRequest,
+        };
+        let database = "fxi_admin_fixture";
+        let table = "admin_rows";
+        let preview = |database: &str,
+                       action: &str,
+                       table: Option<&str>,
+                       columns: serde_json::Value|
+         -> Result<serde_json::Value, String> {
+            let request: AdminRequest = serde_json::from_value(serde_json::json!({
+                "workspaceId": "fixture", "database": database, "table": table,
+                "action": action, "columns": columns,
+            }))
+            .map_err(|e| e.to_string())?;
+            serde_json::to_value(
+                runtime.block_on(preview_database_admin_action(credentials.clone(), request))?,
+            )
+            .map_err(|e| e.to_string())
+        };
+        let apply = |preview: &serde_json::Value| -> Result<serde_json::Value, String> {
+            assert_eq!(preview["host"], "127.0.0.1");
+            assert_eq!(preview["port"], credentials.port);
+            serde_json::to_value(runtime.block_on(apply_database_admin_action(
+                "fixture".into(),
+                preview["token"].as_str().unwrap().into(),
+                preview["confirmation"].as_str().unwrap().into(),
+            ))?)
+            .map_err(|e| e.to_string())
+        };
+        let created = preview(database, "createDatabase", None, serde_json::json!([]))?;
+        assert!(created["sql"]
+            .as_str()
+            .unwrap()
+            .starts_with("CREATE DATABASE"));
+        assert_eq!(apply(&created)?["hasIssues"], false);
+        assert!(apply(&created).unwrap_err().contains("already used"));
+        let columns = serde_json::json!([
+            {"name":"id","dataType":"INT","length":null,"unsigned":false,"nullable":false,"defaultKind":"none","defaultValue":null,"autoIncrement":true,"primary":true,"unique":false},
+            {"name":"label","dataType":"VARCHAR","length":"128","unsigned":false,"nullable":false,"defaultKind":"value","defaultValue":"O'Reilly \u{65e5}","autoIncrement":false,"primary":false,"unique":false}
+        ]);
+        let created = preview(database, "createTable", Some(table), columns)?;
+        assert!(created["sql"].as_str().unwrap().starts_with("CREATE TABLE"));
+        assert_eq!(apply(&created)?["hasIssues"], false);
+        let _: Vec<serde_json::Value> = query_json(
+            credentials,
+            &format!("INSERT INTO `{database}`.`{table}` (`id`) VALUES (1),(2);"),
+        )?;
+        let defaults: Vec<String> = query_json(
+            credentials,
+            &format!("SELECT JSON_QUOTE(`label`) FROM `{database}`.`{table}` ORDER BY id;"),
+        )?;
+        assert_eq!(defaults, ["O'Reilly \u{65e5}", "O'Reilly \u{65e5}"]);
+        let checked = preview(database, "check", Some(table), serde_json::json!([]))?;
+        let checked = apply(&checked)?;
+        assert_eq!(checked["hasIssues"], false);
+        assert!(!checked["messages"].as_array().unwrap().is_empty());
+        let stale = preview(database, "empty", Some(table), serde_json::json!([]))?;
+        let _: Vec<serde_json::Value> = query_json(
+            credentials,
+            &format!("ALTER TABLE `{database}`.`{table}` ADD COLUMN `new_column` INT NULL;"),
+        )?;
+        let error = apply(&stale).unwrap_err();
+        assert!(error.contains("changed since preview"));
+        let count: Vec<u64> = query_json(
+            credentials,
+            &format!("SELECT COUNT(*) FROM `{database}`.`{table}`;"),
+        )?;
+        assert_eq!(count, [2]);
+        assert!(apply(&stale).unwrap_err().contains("already used"));
+        for protected in [
+            "mysql",
+            "sys",
+            "information_schema",
+            "performance_schema",
+            "MySQL",
+        ] {
+            for action in ["check", "empty", "drop"] {
+                let error =
+                    preview(protected, action, Some("user"), serde_json::json!([])).unwrap_err();
+                assert!(error.contains("System databases cannot be changed"));
+            }
+        }
+        let empty = preview(database, "empty", Some(table), serde_json::json!([]))?;
+        assert!(empty["sql"].as_str().unwrap().starts_with("TRUNCATE TABLE"));
+        assert_eq!(apply(&empty)?["hasIssues"], false);
+        let count: Vec<u64> = query_json(
+            credentials,
+            &format!("SELECT COUNT(*) FROM `{database}`.`{table}`;"),
+        )?;
+        assert_eq!(count, [0]);
+        let drop = preview(database, "drop", Some(table), serde_json::json!([]))?;
+        assert!(drop["sql"].as_str().unwrap().starts_with("DROP TABLE"));
+        assert_eq!(apply(&drop)?["hasIssues"], false);
+        let count: Vec<u64> = query_json(credentials, &format!("SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA={} AND TABLE_NAME={};", sql_text(database), sql_text(table)))?;
+        assert_eq!(count, [0]);
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    fn exercise_user_commands(credentials: &MariaDBCredentials) -> Result<(), String> {
+        use crate::{
+            models::mariadb::{MariaDBUserConfig, MariaDBUserUpdateConfig},
+            services::mariadb::{permissions, users},
+        };
+        let modes: Vec<String> = query_json(credentials, "SELECT JSON_QUOTE(@@GLOBAL.sql_mode);")?;
+        for mode in [
+            "STRICT_TRANS_TABLES,ANSI_QUOTES",
+            "NO_BACKSLASH_ESCAPES,STRICT_ALL_TABLES,ANSI_QUOTES",
+        ] {
+            let _: Vec<serde_json::Value> = query_json(
+                credentials,
+                &format!("SET GLOBAL sql_mode={};", sql_text(mode)),
+            )?;
+            let username = "fxi\\'; DROP USER 'root'@'localhost'; --";
+            let password = "fixture\\'; SELECT 'not SQL' --";
+            let next_password = "updated\\'\" fixture password";
+            let generated = permissions::generated_sql(&format!(
+                "SELECT JSON_ARRAY(@@SESSION.sql_mode,{});",
+                permissions::escape_string(password)
+            ));
+            let literals: Vec<Vec<String>> = query_json(credentials, &generated)?;
+            assert_eq!(literals[0][1], password);
+            for expected in mode.split(',') {
+                assert!(literals[0][0].split(',').any(|actual| actual == expected));
+            }
+            assert_eq!(literals[0][0].matches("NO_BACKSLASH_ESCAPES").count(), 1);
+            let rejected = "fxi_rejected_privilege";
+            assert!(users::create_or_update_user(
+                credentials.clone(),
+                MariaDBUserConfig {
+                    native_password: false,
+                    username: rejected.into(),
+                    password: password.into(),
+                    host: "localhost".into(),
+                    database: Some("fxi_read_fixture".into()),
+                    privileges: vec!["SELECT ON *.* TO 'root'@'localhost'; --".into()],
+                }
+            )
+            .is_err());
+            let absent: Vec<u64> = query_json(
+                credentials,
+                &format!(
+                    "SELECT COUNT(*) FROM mysql.user WHERE User={};",
+                    sql_text(rejected)
+                ),
+            )?;
+            assert_eq!(absent, [0]);
+            users::create_or_update_user(
+                credentials.clone(),
+                MariaDBUserConfig {
+                    native_password: false,
+                    username: username.into(),
+                    password: password.into(),
+                    host: "localhost".into(),
+                    database: Some("fxi_read_fixture".into()),
+                    privileges: vec!["SELECT".into()],
+                },
+            )?;
+            let mut login = MariaDBCredentials {
+                username: username.into(),
+                password: password.into(),
+                ..credentials.clone()
+            };
+            let who: Vec<String> = query_json(&login, "SELECT JSON_QUOTE(CURRENT_USER());")?;
+            assert_eq!(who, [format!("{username}@localhost")]);
+            let plugin_sql = format!(
+                "SELECT JSON_QUOTE(plugin) FROM mysql.user WHERE User={} AND Host='localhost';",
+                sql_text(username)
+            );
+            let before: Vec<String> = query_json(credentials, &plugin_sql)?;
+            assert!(users::update_user(
+                credentials.clone(),
+                MariaDBUserUpdateConfig {
+                    native_password: false,
+                    username: username.into(),
+                    host: "localhost".into(),
+                    password: Some("must-not-apply".into()),
+                    database: Some("fxi_read_fixture".into()),
+                    privileges: vec!["SELECT; DROP DATABASE fxi_read_fixture".into()],
+                }
+            )
+            .is_err());
+            let _: Vec<u8> = query_json(&login, "SELECT 1;")?;
+            users::update_user(
+                credentials.clone(),
+                MariaDBUserUpdateConfig {
+                    native_password: false,
+                    username: username.into(),
+                    host: "localhost".into(),
+                    password: Some(next_password.into()),
+                    database: None,
+                    privileges: vec![],
+                },
+            )?;
+            assert!(query_json::<u8>(&login, "SELECT 1;").is_err());
+            login.password = next_password.into();
+            let _: Vec<u8> = query_json(&login, "SELECT 1;")?;
+            let after: Vec<String> = query_json(credentials, &plugin_sql)?;
+            assert_eq!(before, after);
+            users::update_user(
+                credentials.clone(),
+                MariaDBUserUpdateConfig {
+                    native_password: true,
+                    username: username.into(),
+                    host: "localhost".into(),
+                    password: Some(password.into()),
+                    database: None,
+                    privileges: vec![],
+                },
+            )?;
+            login.password = password.into();
+            let _: Vec<u8> = query_json(&login, "SELECT 1;")?;
+            let native: Vec<String> = query_json(credentials, &plugin_sql)?;
+            assert_eq!(native, ["mysql_native_password"]);
+            users::drop_user(credentials.clone(), username.into(), "localhost".into())?;
+            let absent: Vec<u64> = query_json(
+                credentials,
+                &format!(
+                    "SELECT COUNT(*) FROM mysql.user WHERE User={};",
+                    sql_text(username)
+                ),
+            )?;
+            assert_eq!(absent, [0]);
+        }
+        let _: Vec<serde_json::Value> = query_json(
+            credentials,
+            &format!("SET GLOBAL sql_mode={};", sql_text(&modes[0])),
+        )?;
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "Opt-in only: creates and stops a new disposable MariaDB under workspace/output; requires FXI_ISOLATED_MARIADB_BIN"]
+    fn isolated_database_read_integration() -> Result<(), String> {
+        let mut owned = OwnedDatabase::start()?;
+        let pid = owned.child.id();
+        let mut checks = Vec::new();
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+            || -> Result<(), String> {
+                let credentials = &owned.credentials;
+                let database = "fxi_read_fixture";
+                let table = "rows` \u{e5}";
+                let target = format!(
+                    "{}.{}",
+                    quote_identifier(database)?,
+                    quote_identifier(table)?
+                );
+                let unicode =
+                    "\u{1f642} \u{e9} \u{4e2d} quote' double\" slash\\ newline\n tab\t nul\0";
+                let values = (10..211)
+                    .map(|id| format!("({id},'short')"))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let _: Vec<serde_json::Value> = query_json(credentials, &format!(
+                "CREATE DATABASE `{database}` CHARACTER SET utf8mb4; CREATE TABLE {target} (`id` INT NOT NULL PRIMARY KEY, `note` TEXT NULL) ENGINE=InnoDB; INSERT INTO {target} VALUES (1,{}),(2,NULL),(3,REPEAT('x',5000)),{values}; CREATE VIEW `{database}`.`fixture_view` AS SELECT * FROM {target}; CREATE TABLE `{database}`.`once_only` (`n` INT) ENGINE=InnoDB;", sql_text(unicode)))?;
+                let metadata = metadata(credentials, database, table)?;
+                assert_eq!(metadata.columns.len(), 2);
+                assert_eq!(metadata.indexes.len(), 1);
+                assert!(metadata.editable);
+                assert_eq!(browser_columns(credentials, database, table)?.len(), 2);
+                assert!(browser_columns(credentials, database, "fixture_view").is_err());
+                assert!(super::metadata(credentials, database, "fixture_view").is_err());
+                checks.push("batched metadata, editability and base-table/view refusal");
+                let runtime = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
+                let request = BrowserRequest {
+                    database: database.into(),
+                    table: table.into(),
+                    filters: vec![],
+                    sort_column: Some("id".into()),
+                    descending: false,
+                    offset: 0,
+                    page_size: 200,
+                };
+                let page =
+                    runtime.block_on(get_database_browser_rows(credentials.clone(), request))?;
+                assert_eq!(page.rows.len(), 200);
+                assert!(page.has_more && page.truncated_cells);
+                assert_eq!(page.rows[0][1].as_deref(), Some(unicode));
+                assert_eq!(page.rows[1][1], None);
+                assert!(page.rows[2][1].as_ref().unwrap().ends_with(" [truncated]"));
+                checks.push("awaited browser command, Unicode/control/identifier escaping, NULL, paging and cell bounds");
+                let inspection =
+                    runtime.block_on(crate::commands::sql_diagnostics::inspect_database_sql(
+                        credentials.clone(),
+                        database.into(),
+                        Some(table.into()),
+                    ))?;
+                let inspection = serde_json::to_value(inspection).map_err(|e| e.to_string())?;
+                assert_eq!(inspection["columns"].as_array().unwrap().len(), 2);
+                assert_eq!(inspection["columns"][0]["table"], table);
+                assert_eq!(inspection["environment"]["charset"], "utf8mb4");
+                assert!(inspection["environment"]["sqlMode"]
+                    .as_str()
+                    .unwrap()
+                    .contains("STRICT"));
+                assert_eq!(inspection["foreignKeys"], serde_json::json!([]));
+                assert_eq!(inspection["truncated"], false);
+                checks.push(
+                    "awaited inspect_database_sql command and strict-mode/utf8mb4 environment",
+                );
+                let error = query_json::<serde_json::Value>(
+                    credentials,
+                    &format!(
+                        "SELECT missing_function({});",
+                        sql_text(&credentials.password)
+                    ),
+                )
+                .unwrap_err();
+                assert!(error.contains("MariaDB client failed"));
+                assert!(!error.contains(&credentials.password));
+                let _: Vec<u8> = query_json(credentials, "SELECT JSON_EXTRACT('1','$');")?;
+                checks.push("safe query errors and fresh connection after failure");
+                let error = query_json::<String>(credentials, &format!("SELECT JSON_QUOTE(REPEAT('x',1024)) FROM {target} a, {target} b LIMIT 17000;")).unwrap_err();
+                assert!(error.contains("exceeded 16 MiB"));
+                let error = query_json::<u8>(
+                    credentials,
+                    &format!("SELECT 0 FROM {target} a, {target} b LIMIT 10001;"),
+                )
+                .unwrap_err();
+                assert!(error.contains("10,000 records"));
+                checks.push("16 MiB output and 10,000-record caps");
+                let error = query_json::<serde_json::Value>(credentials, &format!("INSERT INTO `{database}`.`once_only` VALUES (1); SELECT missing_function();")).unwrap_err();
+                assert!(error.contains("MariaDB client failed"));
+                let count: Vec<u64> = query_json(
+                    credentials,
+                    &format!("SELECT COUNT(*) FROM `{database}`.`once_only`;"),
+                )?;
+                assert_eq!(count, [1]);
+                checks
+                    .push("submitted fixture write is not replayed after a later statement fails");
+                assert!(query_json::<serde_json::Value>(credentials, &format!("START TRANSACTION READ ONLY; INSERT INTO `{database}`.`once_only` VALUES (2);")).is_err());
+                let count: Vec<u64> = query_json(
+                    credentials,
+                    &format!("SELECT COUNT(*) FROM `{database}`.`once_only`;"),
+                )?;
+                assert_eq!(count, [1]);
+                let started = std::time::Instant::now();
+                assert!(query_json::<u8>(
+                    credentials,
+                    "SET SESSION max_statement_time=0.1; SELECT SLEEP(5);"
+                )
+                .is_err());
+                assert!(started.elapsed() < Duration::from_secs(5));
+                let (mut client, _guard) = json_client(credentials)?;
+                configure_query_command(&mut client, None)?;
+                let started = std::time::Instant::now();
+                let error = run_client(
+                    &mut client,
+                    "SELECT SLEEP(5);".into(),
+                    Duration::from_millis(300),
+                )
+                .err()
+                .ok_or("Expected client timeout")?;
+                assert!(error.contains("timed out"));
+                assert!(started.elapsed() < Duration::from_secs(5));
+                checks.push("read-only transaction refusal, server statement timeout and client deadline cancellation");
+                exercise_admin_commands(&runtime, credentials)?;
+                checks.push(
+                    "actual admin preview/apply CREATE DATABASE/TABLE, CHECK, TRUNCATE and DROP",
+                );
+                checks.push("admin stale-schema refusal preserves rows, one-shot permits and protected-schema refusal");
+                exercise_user_commands(credentials)?;
+                checks.push("actual account create/update/drop with quoted/backslash SQL-fragment inputs, password/plugin preservation, strict/ANSI/NO_BACKSLASH mode retention and privilege-injection refusal");
+                Ok(())
+            },
+        ));
+        let stopped = owned.stop();
+        let passed = matches!(&outcome, Ok(Ok(()))) && stopped.is_ok();
+        let report = serde_json::json!({
+            "passed": passed, "checks": checks, "serverPid": pid,
+            "port": owned.credentials.port, "ownedProcessStoppedAndReaped": stopped.is_ok(),
+            "datadir": owned.directory.join("data"), "existingServicesOrDatabasesUsed": false,
+            "clientConfiguration": "fixture defaults-file only", "serverConfiguration": "no-defaults",
+        });
+        let report_path = owned.directory.join("results.json");
+        std::fs::write(
+            &report_path,
+            serde_json::to_vec_pretty(&report).map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| e.to_string())?;
+        println!("Disposable database results: {}", report_path.display());
+        stopped?;
+        match outcome {
+            Ok(result) => result,
+            Err(panic) => std::panic::resume_unwind(panic),
+        }
+    }
+
     #[test]
     fn wide_tables_stay_within_the_cell_budget() {
         assert_eq!(bounded_page_size(200, 128), 31);
@@ -922,6 +1541,107 @@ mod tests {
         assert!(clean.len() <= 4000);
         assert!(!clean.contains("fixture"));
         assert!(clean.contains("[redacted]"));
+    }
+
+    #[test]
+    fn structured_output_limits_records_and_does_not_echo_sensitive_values() {
+        let values: Vec<serde_json::Value> =
+            parse_json_output(b"null\n[\"\",null,\"a\\nb\"]\n".to_vec()).unwrap();
+        assert_eq!(values.len(), 2);
+        assert!(parse_json_output::<u8>(b"\xff".to_vec()).is_err());
+        let error = parse_json_output::<u8>(b"\"fixture-sensitive-value\"".to_vec()).unwrap_err();
+        assert!(!error.contains("fixture-sensitive"));
+        assert!(parse_json_output::<u8>("0\n".repeat(MAX_STRUCTURED_ROWS).into_bytes()).is_ok());
+        assert!(
+            parse_json_output::<u8>("0\n".repeat(MAX_STRUCTURED_ROWS + 1).into_bytes()).is_err()
+        );
+    }
+
+    fn metadata_fixture(kind: Option<&str>, safe: Option<u8>) -> Vec<MetadataRow> {
+        let (_, metadata) = edit_fixture();
+        let mut rows = Vec::new();
+        if let Some(kind) = kind {
+            rows.push(MetadataRow::TableType(kind.into()));
+        }
+        rows.extend(metadata.columns.into_iter().map(MetadataRow::Column));
+        rows.extend(metadata.indexes.into_iter().map(MetadataRow::Index));
+        if let Some(safe) = safe {
+            rows.push(MetadataRow::Safe(safe));
+        }
+        rows
+    }
+
+    #[test]
+    fn batched_metadata_preserves_base_table_and_editability_refusals() {
+        assert!(
+            decode_metadata(metadata_fixture(Some("BASE TABLE"), Some(1)))
+                .unwrap()
+                .editable
+        );
+        assert!(
+            !decode_metadata(metadata_fixture(Some("BASE TABLE"), Some(0)))
+                .unwrap()
+                .editable
+        );
+        for kind in [None, Some("VIEW"), Some("SYSTEM VIEW")] {
+            assert!(decode_metadata(metadata_fixture(kind, Some(1))).is_err());
+        }
+        assert!(decode_metadata(metadata_fixture(Some("BASE TABLE"), None)).is_err());
+        let mut duplicate = metadata_fixture(Some("BASE TABLE"), Some(1));
+        duplicate.push(MetadataRow::Safe(1));
+        assert!(decode_metadata(duplicate).is_err());
+        let mut duplicate = metadata_fixture(Some("BASE TABLE"), Some(1));
+        duplicate.push(MetadataRow::TableType("BASE TABLE".into()));
+        assert!(decode_metadata(duplicate).is_err());
+    }
+
+    #[test]
+    fn column_only_reads_refuse_views_and_incomplete_or_mistagged_results() {
+        let sql = columns_sql("qbx", "players");
+        assert!(sql.contains("EXISTS(SELECT 1 FROM information_schema.TABLES"));
+        assert!(sql.contains("TABLE_TYPE='BASE TABLE'"));
+        assert!(sql.contains("LIMIT 129"));
+        assert!(decode_columns(Vec::new()).is_err());
+        assert!(decode_columns(vec![MetadataRow::TableType("VIEW".into())]).is_err());
+        let (_, metadata) = edit_fixture();
+        let column = metadata.columns[0].clone();
+        assert!(decode_columns(vec![MetadataRow::Column(column.clone())]).is_ok());
+        assert!(decode_columns(
+            (0..129)
+                .map(|_| MetadataRow::Column(column.clone()))
+                .collect()
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn tagged_metadata_queries_are_bounded_read_only_and_keep_all_edit_guards() {
+        let sql = metadata_sql("qbx", "players").unwrap();
+        assert!(sql.contains("START TRANSACTION READ ONLY"));
+        assert!(sql.ends_with("ROLLBACK;"));
+        assert!(sql.contains("max_statement_time=20"));
+        assert!(sql.contains("LIMIT 2;"));
+        assert!(sql.contains("LIMIT 129;"));
+        assert!(sql.contains("LIMIT 1025;"));
+        for guard in [
+            "ENGINE='InnoDB'",
+            "information_schema.TRIGGERS",
+            "information_schema.TABLE_CONSTRAINTS",
+            "information_schema.KEY_COLUMN_USAGE",
+        ] {
+            assert!(sql.contains(guard));
+        }
+        assert!(!sql.contains("sql_mode"));
+        assert!(!metadata_sql("qbx' OR 1=1", "players")
+            .unwrap()
+            .contains("OR 1=1"));
+        assert!(metadata_sql("qbx", "bad\0table").is_err());
+        let rows: Vec<MetadataRow> = parse_json_output(br#"{"tableType":"BASE TABLE"}
+{"column":{"name":"id","columnType":"int","nullable":0,"defaultValue":null,"extra":"","binary":false}}
+{"index":{"name":"PRIMARY","column":"id","sequence":1,"unique":true,"indexType":"BTREE","prefixLength":null}}
+{"safe":1}
+"#.to_vec()).unwrap();
+        assert!(decode_metadata(rows).unwrap().editable);
     }
 
     fn edit_fixture() -> (BrowserChange, BrowserMetadata) {
@@ -1137,7 +1857,6 @@ mod tests {
             .contains("`id` IS NULL"));
         request.page_size = 0;
         assert!(select_sql(&request, &columns, 26, false).is_err());
-        assert!(bounded_read(vec![0; MAX_OUTPUT + 1].as_slice()).is_err());
     }
     #[test]
     fn csv_preserves_null_empty_and_multiline_and_neutralizes_formulas() {

@@ -7,6 +7,7 @@
 	import { Input } from "$lib/components/ui/input/index.js";
 	import * as Select from "$lib/components/ui/select/index.js";
 	import type { MariaDBQueryResult } from "$lib/modules/mariadb";
+	import type { Snippet } from "svelte";
 
 	type Props = {
 		busy: boolean;
@@ -16,9 +17,10 @@
 		query: string;
 		result: MariaDBQueryResult | null;
 		onExecute: () => void;
+		children?: Snippet;
 	};
 
-	let { busy, canExecute, databases, selectedDatabase = $bindable(), query = $bindable(), result, onExecute }: Props = $props();
+	let { busy, canExecute, databases, selectedDatabase = $bindable(), query = $bindable(), result, onExecute, children }: Props = $props();
 	const globalQueryValue = "__global__";
 	let selectedHelperId = $state("select-filtered");
 	let helperTable = $state("users");
@@ -364,5 +366,6 @@
 				>{result.stdout || result.stderr || "No output."}</pre>
 			{/if}
 		{/if}
+		{@render children?.()}
 	</Card.Content>
 </Card.Root>

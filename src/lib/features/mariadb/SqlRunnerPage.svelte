@@ -6,6 +6,7 @@
 	import BackupCard from "./BackupCard.svelte";
 	import ConnectionCard from "./ConnectionCard.svelte";
 	import QueryConsole from "./QueryConsole.svelte";
+	import SqlDiagnostics from "./SqlDiagnostics.svelte";
 	import * as Card from "$lib/components/ui/card/index.js";
 	import { Button } from "$lib/components/ui/button/index.js";
 	import { Input } from "$lib/components/ui/input/index.js";
@@ -43,9 +44,11 @@
 	let sqlContent = $state("");
 	let busy = $state(false);
 	let message = $state("");
+	let messageTone = $state<"success" | "warn">("success");
 	let error = $state("");
 	let result = $state<MariaDBQueryResult | null>(null);
-	let credentialsReady = $state(Boolean(databaseSession.credentials));
+	let validatedCredentials = $state("");
+	const credentialsReady = $derived(Boolean(validatedCredentials) && validatedCredentials === JSON.stringify(credentials));
 	let connectionError = $state("");
 	let backupWarningDismissed = $state(false);
 	let backupTables = $state<string[]>([]);
@@ -75,12 +78,12 @@
 		{ value: globalScope, label: "Global connection" },
 		...databases.map((database) => ({ value: database, label: database })),
 	]);
-	const canRun = $derived(sqlContent.trim() && credentials.host.trim() && credentials.username.trim());
+	const canRun = $derived(credentialsReady && sqlContent.trim() && credentials.host.trim() && credentials.username.trim());
 
 	onMount(() => {
 		void initializeBackupOutputDir();
 
-		if (!credentialsReady) return;
+		if (!databaseSession.credentials) return;
 		const loadTimer = window.setTimeout(() => {
 			void validateAndLoadDatabases(false);
 		}, 120);
@@ -114,17 +117,26 @@
 
 	async function browseSqlFile() {
 		error = "";
-		const selected = await chooseSqlFile(sqlPath || undefined);
-		if (!selected) return;
-		sqlPath = selected;
-		sqlContent = await readTextFile(selected);
-		message = `Loaded ${selected}.`;
+		try {
+			const selected = await chooseSqlFile(sqlPath || undefined);
+			if (!selected || !active) return;
+			const content = await readTextFile(selected);
+			if (!active) return;
+			sqlPath = selected;
+			sqlContent = content;
+			result = null;
+			messageTone = "success";
+			message = `Loaded ${selected}.`;
+		} catch (caught) {
+			if (active) error = String(caught);
+		}
 	}
 
 	async function validateAndLoadDatabases(showLoadedMessage = true) {
 		if (busy || !active) return;
 		const original = { ...credentials };
 		const revision = databaseSession.revision;
+		validatedCredentials = "";
 		busy = true;
 		error = "";
 		message = "";
@@ -132,15 +144,15 @@
 		try {
 			await validateMariaDBCredentials(original);
 			if (!active || !rememberDatabaseCredentials(original, revision)) return;
-			credentialsReady = true;
+			validatedCredentials = JSON.stringify(original);
 			databases = await listMariaDBDatabases(original);
 			if (!active) return;
 			selectedScope = credentials.database && databases.includes(credentials.database) ? credentials.database : selectedScope;
 			queryDatabase = credentials.database && databases.includes(credentials.database) ? credentials.database : queryDatabase;
 			backupDatabaseName ||= credentials.database && databases.includes(credentials.database) ? credentials.database : databases[0] || "";
-			if (showLoadedMessage) message = `Loaded ${databases.length} database${databases.length === 1 ? "" : "s"}.`;
+			if (showLoadedMessage) { messageTone = "success"; message = `Loaded ${databases.length} database${databases.length === 1 ? "" : "s"}.`; }
 		} catch (caught) {
-			credentialsReady = false;
+			validatedCredentials = "";
 			connectionError = caught instanceof Error ? caught.message : String(caught);
 			error = connectionError;
 		} finally {
@@ -149,7 +161,7 @@
 	}
 
 	async function runSql() {
-		if (!canRun) return;
+		if (!canRun || busy || !active) return;
 		busy = true;
 		error = "";
 		message = "";
@@ -160,6 +172,7 @@
 				database: selectedScope === globalScope ? null : selectedScope,
 			};
 			result = await executeMariaDBQuery(scopedCredentials, sqlContent);
+			messageTone = result.success ? "success" : "warn";
 			message = result.success ? "SQL file executed." : "SQL file returned an error.";
 		} catch (caught) {
 			error = caught instanceof Error ? caught.message : String(caught);
@@ -169,6 +182,7 @@
 	}
 
 	async function executeQuery() {
+		if (busy || !active) return;
 		if (!credentialsReady) {
 			error = "Validate MariaDB credentials before running queries.";
 			return;
@@ -177,6 +191,7 @@
 		busy = true;
 		error = "";
 		message = "";
+		queryResult = null;
 		try {
 			queryResult = await executeMariaDBQuery(
 				{
@@ -186,6 +201,7 @@
 				query,
 			);
 			message = queryResult.success ? "Query executed." : "Query returned an error.";
+			messageTone = queryResult.success ? "success" : "warn";
 		} catch (caught) {
 			error = caught instanceof Error ? caught.message : String(caught);
 		} finally {
@@ -233,6 +249,7 @@
 				fileName: backupOptions.fileName?.trim() || null,
 				whereClause: backupOptions.whereClause?.trim() || null,
 			});
+			messageTone = "success";
 			message = `Backup created: ${backup.path}`;
 		} catch (caught) {
 			error = caught instanceof Error ? caught.message : String(caught);
@@ -249,7 +266,7 @@
 		<p class="mt-2 max-w-2xl text-sm leading-6 text-muted-foreground">Run SQL files, create backups, and use the query console from one database-focused workspace.</p>
 	</div>
 
-	{#if message}<Notice tone={result?.success === false ? "warn" : "success"} {message} onDismiss={() => (message = "")} />{/if}
+	{#if message}<Notice tone={messageTone} {message} onDismiss={() => (message = "")} />{/if}
 	{#if error}<Notice tone="error" message={error} onDismiss={() => (error = "")} />{/if}
 	{#if !backupWarningDismissed}
 		<Notice
@@ -303,6 +320,7 @@
 					<PlayIcon />
 					Run SQL
 				</Button>
+				<SqlDiagnostics {credentials} database={selectedScope} error={result?.success === false ? result.stderr : ""} disabled={busy || !credentialsReady} />
 			</Card.Content>
 		</Card.Root>
 	</div>
@@ -323,5 +341,7 @@
 		onBackup={backupDatabase}
 	/>
 
-	<QueryConsole bind:query bind:selectedDatabase={queryDatabase} {busy} canExecute={credentialsReady} {databases} result={queryResult} onExecute={executeQuery} />
+	<QueryConsole bind:query bind:selectedDatabase={queryDatabase} {busy} canExecute={credentialsReady} {databases} result={queryResult} onExecute={executeQuery}>
+		<SqlDiagnostics {credentials} database={queryDatabase} error={queryResult?.success === false ? queryResult.stderr : ""} disabled={busy || !credentialsReady} />
+	</QueryConsole>
 </section>

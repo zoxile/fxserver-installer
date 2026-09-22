@@ -38,6 +38,8 @@ async (page) => {
           case "plugin:event|unlisten":
           case "append_app_log":
           case "initialize_health_workspace": return;
+          case "load_database_login": return null;
+          case "clear_database_login": return;
           case "configure_live_bridge": return { workspaceId: "default", enabled: false, connected: false, receivedAt: null, error: null, snapshot: null };
           case "read_app_logs": return { path: "mock.log", entries: [] };
           case "get_windows_artifact_metadata": return { recommendedArtifact: "10000", windowsDownloadLink: "https://example.invalid/artifact.zip", brokenArtifacts: [] };
