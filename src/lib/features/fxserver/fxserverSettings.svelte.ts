@@ -77,25 +77,29 @@ export function setServerProfile(profile: string) {
 	window.dispatchEvent(new Event("workspace-settings-changed"));
 }
 
-export async function refreshTxDataProfiles() {
+export async function refreshTxDataProfiles(artifactPath = "", discover = false) {
 	loadFxserverSettings();
 	const request = ++profileRequest;
 	const path = fxserverSettings.txDataPath.trim();
+	const selectedProfile = fxserverSettings.profile;
 	fxserverSettings.profileError = "";
 	fxserverSettings.profiles = [];
 	fxserverSettings.hasRootLogs = false;
 
-	if (!path) { fxserverSettings.loadingProfiles = false; return; }
+	if (!path && !artifactPath.trim()) { fxserverSettings.loadingProfiles = false; return; }
 
 	fxserverSettings.loadingProfiles = true;
 	try {
-		const result = await listTxDataProfiles(path);
+		const result = await listTxDataProfiles(path, { artifactPath, discover });
 		if (request !== profileRequest || path !== fxserverSettings.txDataPath.trim()) return;
+		// Only empty configurations or a newly chosen folder may be normalized.
+		if ((!path || discover) && result.dataPath && result.dataPath !== path) {
+			fxserverSettings.txDataPath = result.dataPath;
+			writeSavedEnvironment({ ...readSavedEnvironment(), TXHOST_DATA_PATH: result.dataPath });
+		}
 		fxserverSettings.profiles = result.profiles;
 		fxserverSettings.hasRootLogs = result.hasRootLogs;
-		if (fxserverSettings.profile && !result.profiles.includes(fxserverSettings.profile)) {
-			setServerProfile("");
-		}
+		if (discover && result.selectedProfile && fxserverSettings.profile === selectedProfile) setServerProfile(result.selectedProfile);
 	} catch (error) {
 		if (request !== profileRequest || path !== fxserverSettings.txDataPath.trim()) return;
 		fxserverSettings.profileError = error instanceof Error ? error.message : String(error);

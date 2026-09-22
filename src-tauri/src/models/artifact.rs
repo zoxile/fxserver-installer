@@ -67,5 +67,29 @@ pub struct InstalledArtifactInfo {
     pub file_version: Option<String>,
     pub product_version: Option<String>,
     pub has_fxserver_executable: bool,
+    pub edition: Option<String>,
     pub detection_source: String,
+}
+
+// Enhanced wire types adapted from Huntercorlett's fork (53f1834).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EnhancedArtifactBuild {
+    pub version: String,
+    pub download_url: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EnhancedArtifactCatalog {
+    pub builds: Vec<EnhancedArtifactBuild>,
+    pub source_url: String,
+    pub warning: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EnhancedInstallRequest {
+    pub url: String,
+    pub destination: String,
 }

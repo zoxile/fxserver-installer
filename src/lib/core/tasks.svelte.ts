@@ -20,6 +20,7 @@ const labels: Record<string, string> = {
 	send_fxserver_command: "Send console command",
 	send_fxserver_rcon_command: "Send resource command",
 	install_windows_artifact: "Install artifact",
+	install_enhanced_artifact: "Install Enhanced artifact",
 	install_mariadb: "Install MariaDB",
 	update_mariadb: "Update MariaDB",
 	uninstall_mariadb: "Uninstall MariaDB",

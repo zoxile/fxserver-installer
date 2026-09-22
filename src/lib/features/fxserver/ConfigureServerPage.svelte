@@ -12,6 +12,7 @@
 	import SearchIcon from "@lucide/svelte/icons/search";
 	import Undo2Icon from "@lucide/svelte/icons/undo-2";
 	import { onDestroy, onMount } from "svelte";
+	import { getInstallPath } from "$lib/core/paths.svelte";
 	import { confirm } from "@tauri-apps/plugin-dialog";
 	import * as Card from "$lib/components/ui/card/index.js";
 	import { Button } from "$lib/components/ui/button/index.js";
@@ -124,7 +125,7 @@
 		dataPath = fxserverSettings.txDataPath;
 		profile = fxserverSettings.profile;
 		void (async () => {
-			await refreshTxDataProfiles();
+			await refreshTxDataProfiles(getInstallPath());
 			if (!active) return;
 			dataPath = fxserverSettings.txDataPath;
 			profile = fxserverSettings.profile;
@@ -225,7 +226,8 @@
 		clearLoadedConfig();
 		setTxDataPath(selectedFolder);
 		setServerProfile("");
-		await refreshTxDataProfiles();
+		await refreshTxDataProfiles(getInstallPath(), true);
+		if (active) { dataPath = fxserverSettings.txDataPath; profile = fxserverSettings.profile; }
 	}
 
 	async function handleTxDataChange(event: Event) {
@@ -237,7 +239,8 @@
 		clearLoadedConfig();
 		setTxDataPath(dataPath);
 		setServerProfile("");
-		await refreshTxDataProfiles();
+		await refreshTxDataProfiles(getInstallPath(), true);
+		if (active) { dataPath = fxserverSettings.txDataPath; profile = fxserverSettings.profile; }
 	}
 
 	function handleProfileChange(nextProfile: string) {

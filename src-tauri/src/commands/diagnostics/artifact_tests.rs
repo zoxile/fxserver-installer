@@ -2,6 +2,28 @@ use super::tests::{link_directory, Fixture};
 use super::*;
 
 #[test]
+fn enhanced_artifacts_resolve_resources_and_mixed_editions_block() {
+    let fixture = Fixture::new();
+    fs::rename(
+        fixture.root.join("artifacts/FXServer.exe"),
+        fixture.root.join("artifacts/cfx-server.exe"),
+    )
+    .unwrap();
+    fixture.artifact_resource("chat", "fx_version 'cerulean'");
+    fs::write(fixture.root.join("data/server.cfg"), "ensure chat").unwrap();
+    let result = report(&inspect(&fixture.request()));
+    assert!(!result.blocking);
+    assert_eq!(result.resource_count, 1);
+    fs::write(fixture.root.join("artifacts/FXServer.exe"), "fixture").unwrap();
+    let result = report(&inspect(&fixture.request()));
+    assert!(result.blocking);
+    assert!(result
+        .checks
+        .iter()
+        .any(|check| check.code == "artifact-conflict"));
+}
+
+#[test]
 fn artifact_manifests_resolve_startup_groups_dependencies_providers_and_execs() {
     let fixture = Fixture::new();
     fixture.artifact_resource("chat", "dependency 'build-api'");

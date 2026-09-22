@@ -17,6 +17,8 @@
 	import { log } from "$lib/core/logger.svelte";
 	import { taskSession } from "$lib/core/tasks.svelte";
 	import ArtifactBrowser from "./ArtifactBrowser.svelte";
+	import EnhancedInstallCard from "./EnhancedInstallCard.svelte";
+	import * as ToggleGroup from "$lib/components/ui/toggle-group/index.js";
 	import {
 		artifactIsFlagged,
 		fetchArtifactMetadata,
@@ -35,7 +37,8 @@
 	let metadata = $state<ArtifactMetadata | null>(null);
 	let installPath = $state("");
 	let busy = $state(false);
-	const installing = $derived(taskSession.items.some((task) => task.command === "install_windows_artifact" && task.status === "running"));
+	const installing = $derived(taskSession.items.some((task) => ["install_windows_artifact", "install_enhanced_artifact"].includes(task.command) && task.status === "running"));
+	let edition = $state("legacy");
 	let error = $state("");
 	let message = $state("");
 	let result = $state<ArtifactInstallResult | null>(null);
@@ -56,10 +59,16 @@
 		message = "";
 
 		try {
-			const [nextMetadata, nextInstalled] = await Promise.all([fetchArtifactMetadata(), installPath ? getInstalledWindowsArtifactInfo(installPath) : Promise.resolve(null)]);
-			metadata = nextMetadata;
-			installed = nextInstalled;
-			message = `Artifact ${metadata.recommendedArtifact} is ready to install for Windows.`;
+			const destination = installPath;
+			const [nextMetadata, nextInstalled] = await Promise.allSettled([fetchArtifactMetadata(), destination ? getInstalledWindowsArtifactInfo(destination) : Promise.resolve(null)]);
+			if (nextInstalled.status === "fulfilled" && destination === installPath) {
+				installed = nextInstalled.value;
+				if (installed?.edition) edition = installed.edition;
+			}
+			if (nextInstalled.status === "rejected") throw nextInstalled.reason;
+			if (nextMetadata.status === "rejected") throw nextMetadata.reason;
+			metadata = nextMetadata.value;
+			if (edition === "legacy") message = `Artifact ${metadata.recommendedArtifact} is ready to install for Windows.`;
 		} catch (caught) {
 			error = caught instanceof Error ? caught.message : String(caught);
 			log("Artifact install page could not refresh metadata.", { level: "error", scope: "artifacts.install-page", detail: error });
@@ -141,11 +150,11 @@
 		<div>
 			<p class="text-xs font-semibold tracking-wide text-muted-foreground uppercase">Artifacts</p>
 			<h1 class="mt-2 text-3xl font-semibold tracking-normal text-foreground">Install Artifact</h1>
-			<p class="mt-2 max-w-2xl text-sm leading-6 text-muted-foreground">Download and extract the healthy Windows FXServer artifact recommended by the JG Scripts artifacts database.</p>
+			<p class="mt-2 max-w-2xl text-sm leading-6 text-muted-foreground">Windows server artifacts for FiveM Legacy and GTAV Enhanced.</p>
 		</div>
 		<Button variant="outline" onclick={refreshMetadata} disabled={busy || installing} title="Refresh the recommended Windows artifact from JG Scripts">
 			<RefreshCwIcon class={busy ? "animate-spin" : undefined} />
-			Refresh Metadata
+			Refresh
 		</Button>
 	</div>
 
@@ -155,6 +164,17 @@
 		<Notice tone="success" message={message} onDismiss={() => (message = "")} class="px-4 py-3 text-sm" />
 	{/if}
 
+	<ToggleGroup.Root type="single" value={edition} onValueChange={(value) => { if (typeof value === "string" && value) { edition = value; message = ""; } }} disabled={installing} aria-label="Server edition">
+		<ToggleGroup.Item value="legacy">Legacy</ToggleGroup.Item>
+		<ToggleGroup.Item value="enhanced">Enhanced</ToggleGroup.Item>
+	</ToggleGroup.Root>
+	<div class="grid items-end gap-3 sm:grid-cols-[minmax(0,1fr)_auto]">
+		<label class="grid min-w-0 gap-2"><span class="text-xs font-medium text-muted-foreground">Install Folder</span><Input value={installPath} disabled={installing} oninput={updateInstallPath} placeholder="C:\FXServer\server" class="font-mono" /></label>
+		<Button variant="outline" onclick={chooseFolder} disabled={installing}><FolderOpenIcon />Browse</Button>
+	</div>
+	{#if edition === "enhanced"}
+		<EnhancedInstallCard destination={installPath} blocked={installed?.edition === "legacy"} oninstalled={(next) => { result = next; message = `Installed Enhanced build ${next.version}.`; void getInstalledWindowsArtifactInfo(next.destination).then((info) => { installed = info; }).catch((caught) => { error = String(caught); }); }} />
+	{:else}
 	<div class="grid gap-4 xl:grid-cols-12">
 		<Card.Root class="group relative overflow-hidden rounded-sm border-border bg-card shadow-sm transition-shadow duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] xl:col-span-7">
 			<div
@@ -172,23 +192,10 @@
 				</div>
 			</Card.Header>
 			<Card.Content class="space-y-4">
-				<div class="grid gap-3 md:grid-cols-[1fr_auto]">
-					<label class="grid gap-2">
-						<span class="text-xs font-medium text-muted-foreground">Install Folder</span>
-						<Input value={installPath} disabled={installing} oninput={updateInstallPath} placeholder="C:\FXServer\server" title="Folder where FXServer artifact files will be extracted." class="rounded-sm font-mono" />
-					</label>
-					<div class="flex items-end">
-						<Button variant="outline" onclick={chooseFolder} disabled={installing} title="Pick the FXServer install folder">
-							<FolderOpenIcon />
-							Browse
-						</Button>
-					</div>
-				</div>
-
 				<div class="grid gap-3 md:grid-cols-3">
 					<div class="rounded-sm border border-border bg-background/70 p-3">
 						<p class="text-xs text-muted-foreground">Installed Build</p>
-						<p class="mt-1 font-mono text-xl font-semibold text-foreground">{health.currentVersion ?? (installed?.installed ? "Unknown" : "None")}</p>
+						<p class="mt-1 break-all font-mono text-base font-semibold text-foreground">{health.currentVersion ?? (installed?.installed ? "Unknown" : "None")}</p>
 					</div>
 					<div class="rounded-sm border border-border bg-background/70 p-3">
 						<p class="text-xs text-muted-foreground">Recommended Build</p>
@@ -211,7 +218,7 @@
 					</div>
 				{/if}
 
-				<Button class="w-full rounded-sm" onclick={install} disabled={installing || busy || !metadata || !installPath.trim()} title="Download and extract the recommended Windows artifact">
+				<Button class="w-full rounded-sm" onclick={install} disabled={installing || busy || !metadata || !installPath.trim() || installed?.edition === "enhanced"} title="Download and extract the recommended Windows artifact">
 					{#if installing}
 						<LoaderCircleIcon class="animate-spin" />
 						Installing...
@@ -264,5 +271,6 @@
 			</Card.Root>
 		</div>
 	</div>
-	<ArtifactBrowser destination={installPath} currentVersion={installed?.version} disabled={installing || busy} oninstall={installSelected} />
+	<ArtifactBrowser destination={installPath} currentVersion={installed?.edition === "enhanced" ? null : installed?.version} disabled={installing || busy} oninstall={installSelected} />
+	{/if}
 </section>

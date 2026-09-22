@@ -1,3 +1,6 @@
+// Enhanced executable support adapted from Huntercorlett's fork (53f1834).
+use super::server_exe;
+
 use std::{
     collections::VecDeque,
     env, fs,
@@ -499,10 +502,7 @@ fn start_fxserver_blocking(
         return Err("Choose an FXServer artifact folder before starting the server.".to_string());
     }
 
-    let executable_path = artifact_path.join("FXServer.exe");
-    if !executable_path.is_file() {
-        return Err("FXServer.exe was not found in the selected artifact folder.".to_string());
-    }
+    let executable_path = server_exe::require_server_executable(&artifact_path)?;
 
     let mut command = Command::new(&executable_path);
     command.no_window();
@@ -529,7 +529,7 @@ fn start_fxserver_blocking(
         .map_err(|_| "FXServer process state is unavailable.".to_string())?;
     let mut child = command
         .spawn()
-        .map_err(|error| format!("Failed to start FXServer.exe: {error}"))?;
+        .map_err(|error| format!("Failed to start {}: {error}", executable_path.display()))?;
     let pid = child.id();
     let started_at = SystemTime::now();
     let started_at_label = system_time_to_label(started_at);
@@ -575,7 +575,11 @@ fn start_fxserver_blocking(
         &manager.terminal,
         "system",
         format!(
-            "Started FXServer.exe from {}",
+            "Started {} from {}",
+            executable_path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy(),
             artifact_path.to_string_lossy()
         ),
     );
@@ -628,12 +632,7 @@ pub async fn restart_fxserver(
             .lifecycle
             .try_lock()
             .map_err(|_| "Another FXServer action is in progress.".to_string())?;
-        if !Path::new(request.artifact_path.trim())
-            .join("FXServer.exe")
-            .is_file()
-        {
-            return Err("FXServer.exe was not found in the selected artifact folder.".to_string());
-        }
+        server_exe::require_server_executable(Path::new(request.artifact_path.trim()))?;
         request.environment = sanitize_environment(request.environment)?;
         manager.disarm_recovery();
         manager.stop_process()?;
@@ -922,10 +921,21 @@ fn read_txdata_log_blocking(request: TxDataLogRequest) -> Result<TxDataLogResult
     let profile = request.profile.unwrap_or_default();
     let profile = profile.trim();
     let max_lines = request.max_lines.unwrap_or(500).clamp(50, 5000);
-    let log_path = resolve_log_path(data_path, profile, log_name);
-
-    let content = fs::read_to_string(&log_path)
-        .map_err(|error| format!("Failed to read {}: {error}", log_path.to_string_lossy()))?;
+    if profile == "."
+        || profile == ".."
+        || profile.contains(['/', '\\', ':', '\0'])
+        || profile.ends_with([' ', '.'])
+    {
+        return Err("Choose a valid txData profile name.".into());
+    }
+    let root = data_path.canonicalize().map_err(|e| e.to_string())?;
+    let log_path = resolve_log_path(data_path, profile, log_name)
+        .canonicalize()
+        .map_err(|e| e.to_string())?;
+    if !log_path.starts_with(&root) {
+        return Err("Log file must stay inside the selected txData directory.".into());
+    }
+    let content = read_log_tail(&log_path)?;
     let lines: Vec<&str> = content.lines().collect();
     let start = lines.len().saturating_sub(max_lines);
     let tailed = lines[start..].join("\n");
@@ -939,8 +949,87 @@ fn read_txdata_log_blocking(request: TxDataLogRequest) -> Result<TxDataLogResult
 }
 
 #[tauri::command]
-pub async fn list_txdata_profiles(data_path: String) -> Result<TxDataProfilesResult, String> {
-    super::run_blocking(move || list_txdata_profiles_blocking(data_path)).await
+pub async fn list_txdata_profiles(
+    data_path: String,
+    artifact_path: Option<String>,
+    discover: Option<bool>,
+) -> Result<TxDataProfilesResult, String> {
+    super::run_blocking(move || {
+        discover_txdata(
+            data_path,
+            artifact_path.unwrap_or_default(),
+            discover.unwrap_or(false),
+        )
+    })
+    .await
+}
+
+fn discover_txdata(
+    data_path: String,
+    artifact_path: String,
+    discover: bool,
+) -> Result<TxDataProfilesResult, String> {
+    let path = if data_path.trim().is_empty() {
+        let artifact = Path::new(artifact_path.trim());
+        if !artifact.is_absolute() {
+            return Err("Choose an absolute artifact folder or configure TXHOST_DATA_PATH.".into());
+        }
+        let sibling = artifact
+            .parent()
+            .ok_or("The artifact folder has no parent.")?
+            .join("txData");
+        let internal = artifact.join("txData");
+        match (sibling.is_dir(), internal.is_dir()) {
+            (true, true) => {
+                return Err(format!(
+                "Multiple txData folders found: {} and {}. Select the intended folder explicitly.",
+                sibling.display(),
+                internal.display()
+            ))
+            }
+            (false, true) => internal,
+            _ => sibling,
+        }
+    } else {
+        PathBuf::from(data_path.trim())
+    };
+    let direct = list_txdata_profiles_blocking(path.to_string_lossy().into())?;
+    if !discover || !direct.exists {
+        return Ok(direct);
+    }
+    // Normalize only a new selection. A saved path is always scanned exactly as configured.
+    if let Some(parent) = path.parent() {
+        let parent_is_txdata = parent
+            .file_name()
+            .is_some_and(|name| name.eq_ignore_ascii_case("txData"))
+            || parent.join("admins.json").is_file();
+        if parent_is_txdata && (direct.has_root_config || direct.has_root_logs) {
+            let name = path
+                .file_name()
+                .ok_or("Invalid profile directory.")?
+                .to_string_lossy()
+                .to_string();
+            let mut result = list_txdata_profiles_blocking(parent.to_string_lossy().into())?;
+            if result.profiles.contains(&name) {
+                result.selected_profile = Some(name);
+                return Ok(result);
+            }
+        }
+    }
+    if direct.has_root_config
+        || direct.has_root_logs
+        || direct
+            .profiles
+            .iter()
+            .any(|name| !name.eq_ignore_ascii_case("txData"))
+    {
+        return Ok(direct);
+    }
+    let child = path.join("txData");
+    if child.is_dir() {
+        return list_txdata_profiles_blocking(child.to_string_lossy().into());
+    }
+    Ok(direct)
 }
 
 fn list_txdata_profiles_blocking(data_path: String) -> Result<TxDataProfilesResult, String> {
@@ -949,11 +1038,31 @@ fn list_txdata_profiles_blocking(data_path: String) -> Result<TxDataProfilesResu
         return Err("Choose a txData folder before scanning profiles.".to_string());
     }
 
-    let entries = fs::read_dir(&data_path)
-        .map_err(|error| format!("Failed to inspect {}: {error}", data_path.to_string_lossy()))?;
+    let entries = match fs::read_dir(&data_path) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(TxDataProfilesResult {
+                data_path: data_path.to_string_lossy().into(),
+                profiles: Vec::new(),
+                has_root_logs: false,
+                has_root_config: false,
+                exists: false,
+                selected_profile: None,
+            })
+        }
+        Err(error) => {
+            return Err(format!(
+                "Failed to inspect {}: {error}",
+                data_path.display()
+            ))
+        }
+    };
     let mut profiles = Vec::new();
 
-    for entry in entries {
+    for (index, entry) in entries.enumerate() {
+        if index >= 4096 {
+            return Err("Too many entries in the selected txData directory.".into());
+        }
         let entry = entry.map_err(|error| format!("Failed to inspect txData profile: {error}"))?;
         let file_type = entry
             .file_type()
@@ -968,6 +1077,11 @@ fn list_txdata_profiles_blocking(data_path: String) -> Result<TxDataProfilesResu
             continue;
         }
 
+        // Ignore resources, cache, artifacts, and other unrelated directories.
+        if !entry.path().join("config.json").is_file() && !entry.path().join("logs").is_dir() {
+            continue;
+        }
+
         profiles.push(name);
     }
 
@@ -977,6 +1091,9 @@ fn list_txdata_profiles_blocking(data_path: String) -> Result<TxDataProfilesResu
         data_path: data_path.to_string_lossy().to_string(),
         profiles,
         has_root_logs: data_path.join("logs").is_dir(),
+        has_root_config: data_path.join("config.json").is_file(),
+        exists: true,
+        selected_profile: None,
     })
 }
 
@@ -2023,11 +2140,38 @@ where
 
 fn resolve_log_path(data_path: PathBuf, profile: &str, log_name: &str) -> PathBuf {
     let direct_logs = data_path.join("logs").join(log_name);
-    if direct_logs.is_file() || profile.is_empty() {
+    if profile.is_empty() {
         return direct_logs;
     }
 
     data_path.join(profile).join("logs").join(log_name)
+}
+
+fn read_log_tail(path: &Path) -> Result<String, String> {
+    use std::io::{Read, Seek, SeekFrom};
+    const MAX_LOG_BYTES: u64 = 8 * 1024 * 1024;
+    let mut file = fs::File::open(path).map_err(|e| e.to_string())?;
+    let metadata = file.metadata().map_err(|e| e.to_string())?;
+    if !metadata.is_file() {
+        return Err("The selected log is not a regular file.".into());
+    }
+    let start = metadata.len().saturating_sub(MAX_LOG_BYTES);
+    file.seek(SeekFrom::Start(start))
+        .map_err(|e| e.to_string())?;
+    let mut bytes = Vec::new();
+    file.take(MAX_LOG_BYTES)
+        .read_to_end(&mut bytes)
+        .map_err(|e| e.to_string())?;
+    let start = if start > 0 {
+        bytes
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map(|i| i + 1)
+            .unwrap_or(0)
+    } else {
+        0
+    };
+    Ok(String::from_utf8_lossy(&bytes[start..]).into_owned())
 }
 
 fn read_cfg_file(path: &Path) -> Result<ServerConfigFile, String> {
@@ -2257,7 +2401,7 @@ fn windows_fxserver_processes(root_pid: u32) -> Result<Vec<WindowsProcessInfo>, 
     let processes = windows_process_tree(root_pid)?;
     Ok(processes
         .into_iter()
-        .filter(|process| process.exe_name.eq_ignore_ascii_case("fxserver.exe"))
+        .filter(|process| server_exe::is_server_process_name(&process.exe_name))
         .collect())
 }
 
@@ -2713,6 +2857,121 @@ mod tests {
 
     use super::*;
     use std::sync::mpsc;
+
+    #[test]
+    fn txdata_discovery_preserves_explicit_paths_and_normalizes_only_new_selections() {
+        let root = fixture_secret_directory();
+        let artifacts = root.join("artifacts");
+        let nested = artifacts.join("my-custom-data");
+        let txdata = root.join("txData");
+        for path in [&nested, &txdata] {
+            fs::create_dir_all(path.join("default/logs")).unwrap();
+            fs::create_dir_all(path.join("cache")).unwrap();
+            fs::write(path.join("default/config.json"), "{}").unwrap();
+        }
+        let artifact = artifacts.to_string_lossy().to_string();
+        for path in [&nested, &txdata, &root] {
+            let explicit = path.to_string_lossy().to_string();
+            assert_eq!(
+                discover_txdata(explicit.clone(), artifact.clone(), false)
+                    .unwrap()
+                    .data_path,
+                explicit
+            );
+        }
+        assert_eq!(
+            discover_txdata(nested.to_string_lossy().into(), artifact.clone(), true)
+                .unwrap()
+                .profiles,
+            vec!["default"]
+        );
+        let picked_profile = discover_txdata(
+            txdata.join("default").to_string_lossy().into(),
+            artifact.clone(),
+            true,
+        )
+        .unwrap();
+        assert_eq!(picked_profile.data_path, txdata.to_string_lossy());
+        assert_eq!(picked_profile.selected_profile.as_deref(), Some("default"));
+        let picked_parent =
+            discover_txdata(root.to_string_lossy().into(), artifact.clone(), true).unwrap();
+        assert_eq!(picked_parent.data_path, txdata.to_string_lossy());
+        let automatic = discover_txdata(String::new(), artifact, false).unwrap();
+        assert_eq!(automatic.data_path, txdata.to_string_lossy());
+        fs::create_dir_all(artifacts.join("txData")).unwrap();
+        assert!(
+            discover_txdata(String::new(), artifacts.to_string_lossy().into(), false)
+                .unwrap_err()
+                .contains("Multiple txData")
+        );
+        assert_eq!(
+            discover_txdata(
+                nested.to_string_lossy().into(),
+                artifacts.to_string_lossy().into(),
+                false
+            )
+            .unwrap()
+            .data_path,
+            nested.to_string_lossy()
+        );
+        let internal_artifacts = root.join("other/artifacts");
+        fs::create_dir_all(internal_artifacts.join("txData/default")).unwrap();
+        fs::write(internal_artifacts.join("txData/default/config.json"), "{}").unwrap();
+        let internal = discover_txdata(
+            String::new(),
+            internal_artifacts.to_string_lossy().into(),
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            internal.data_path,
+            internal_artifacts.join("txData").to_string_lossy()
+        );
+        let fresh = discover_txdata(
+            String::new(),
+            root.join("fresh/artifacts").to_string_lossy().into(),
+            false,
+        )
+        .unwrap();
+        assert!(!fresh.exists);
+        assert!(fresh.profiles.is_empty());
+        assert!(!root.join("fresh").exists());
+        let file = root.join("not-a-directory");
+        fs::write(&file, "fixture").unwrap();
+        assert!(list_txdata_profiles_blocking(file.to_string_lossy().into()).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn txdata_selected_profile_logs_win_over_root_and_reads_are_bounded() {
+        let root = fixture_secret_directory();
+        fs::create_dir_all(root.join("logs")).unwrap();
+        fs::create_dir_all(root.join("chosen/logs")).unwrap();
+        fs::write(root.join("logs/fxserver.log"), "root").unwrap();
+        fs::write(root.join("chosen/logs/fxserver.log"), "chosen").unwrap();
+        assert_eq!(
+            resolve_log_path(root.clone(), "chosen", "fxserver.log"),
+            root.join("chosen/logs/fxserver.log")
+        );
+        let result = read_txdata_log_blocking(TxDataLogRequest {
+            data_path: root.to_string_lossy().into(),
+            profile: Some("chosen".into()),
+            log_name: "fxserver.log".into(),
+            max_lines: Some(500),
+        })
+        .unwrap();
+        assert_eq!(result.content, "chosen");
+        fs::write(
+            root.join("logs/fxserver.log"),
+            format!("{}\nfinal line\n", "x".repeat(9 * 1024 * 1024)),
+        )
+        .unwrap();
+        assert_eq!(
+            read_log_tail(&root.join("logs/fxserver.log")).unwrap(),
+            "final line\n"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
 
     fn fixture_secret_directory() -> PathBuf {
         let path = env::temp_dir().join(format!(

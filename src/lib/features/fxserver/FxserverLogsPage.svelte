@@ -1,11 +1,13 @@
 <script lang="ts">
+	// Log loop/cap fixes adapted from Huntercorlett's fork (53f1834).
 	import AlertCircleIcon from "@lucide/svelte/icons/alert-circle";
 	import CheckCircle2Icon from "@lucide/svelte/icons/check-circle-2";
 	import FileTextIcon from "@lucide/svelte/icons/file-text";
 	import FolderOpenIcon from "@lucide/svelte/icons/folder-open";
 	import RefreshCwIcon from "@lucide/svelte/icons/refresh-cw";
 	import ScrollTextIcon from "@lucide/svelte/icons/scroll-text";
-	import { onMount } from "svelte";
+	import { onMount, untrack } from "svelte";
+	import { getInstallPath } from "$lib/core/paths.svelte";
 	import * as Card from "$lib/components/ui/card/index.js";
 	import { Button } from "$lib/components/ui/button/index.js";
 	import { Input } from "$lib/components/ui/input/index.js";
@@ -27,6 +29,8 @@
 		raw: string;
 	}
 
+	const maxLineLength = 4000;
+	const maxRenderedEntries = 1500;
 	const logNames: LogName[] = ["fxserver.log", "admin.log", "server.log"];
 	const levels: LogLevel[] = ["all", "info", "success", "warn", "error"];
 
@@ -42,6 +46,8 @@
 	let noticeLevel = $state<"success" | "error">("success");
 	let storageReady = false;
 	let previousProfile: string | undefined;
+	let active = true;
+	let requestId = 0;
 
 	const entries = $derived(parseLines(result?.content ?? "", logName));
 	const filteredEntries = $derived(
@@ -50,6 +56,7 @@
 			return (level === "all" || entry.level === level) && (!query.trim() || haystack.includes(query.trim().toLowerCase()));
 		}),
 	);
+	const visibleEntries = $derived(filteredEntries.slice(-maxRenderedEntries));
 	const pathPreview = $derived(dataPath.trim() ? `${dataPath.trim()}${profile.trim() ? `\\${profile.trim()}` : ""}\\logs\\${logName}` : "Set TXHOST_DATA_PATH to view FXServer logs.");
 	const profileOptions = $derived([
 		...(fxserverSettings.hasRootLogs ? [{ value: "", label: "Root logs folder" }] : []),
@@ -62,50 +69,64 @@
 		profile = fxserverSettings.profile;
 		storageReady = true;
 		void (async () => {
-			await refreshTxDataProfiles();
+			await refreshTxDataProfiles(getInstallPath());
+			if (!active) return;
 			dataPath = fxserverSettings.txDataPath;
 			profile = fxserverSettings.profile;
 			if (dataPath.trim()) {
 				await refresh();
 			}
 		})();
+		return () => { active = false; requestId++; };
 	});
 
 	$effect(() => {
+		const nextPath = dataPath;
+		const nextProfile = profile;
 		if (!storageReady) return;
-		const profileChanged = previousProfile !== undefined && previousProfile !== profile;
-		previousProfile = profile;
 
-		setTxDataPath(dataPath);
-		setServerProfile(profile);
+		// Only react to the two inputs above; the shared setters read/write global state and must not be tracked.
+		untrack(() => {
+			const profileChanged = previousProfile !== undefined && previousProfile !== nextProfile;
+			previousProfile = nextProfile;
 
-		if (profileChanged && result && dataPath.trim() && !busy) {
-			void refresh();
-		}
+			if (fxserverSettings.txDataPath !== nextPath.trim()) setTxDataPath(nextPath);
+			if (fxserverSettings.profile !== nextProfile.trim()) setServerProfile(nextProfile);
+
+			if (profileChanged && result && nextPath.trim() && !busy) void refresh();
+		});
 	});
 
 	async function refresh() {
+		if (!active || busy) return;
+		const request = ++requestId;
+		const selectedPath = dataPath;
+		const selectedProfile = profile;
+		const selectedLog = logName;
 		busy = true;
 		notice = "";
 		setTxDataPath(dataPath);
 		setServerProfile(profile);
 
 		try {
-			result = await readTxDataLog({
+			const next = await readTxDataLog({
 				dataPath: dataPath.trim(),
 				profile: profile.trim() || null,
 				logName,
 				maxLines: Number.parseInt(maxLines, 10) || 500,
 			});
+			if (!active || request !== requestId || selectedPath !== dataPath || selectedProfile !== profile || selectedLog !== logName) return;
+			result = next;
 			notice = `${logName} refreshed.`;
 			noticeLevel = "success";
 			log("FXServer log viewer refreshed a txData log.", { level: "debug", scope: "fxserver.logs-page", detail: result.path });
 		} catch (error) {
+			if (!active || request !== requestId) return;
 			notice = error instanceof Error ? error.message : String(error);
 			noticeLevel = "error";
 			log("FXServer log viewer could not refresh txData logs.", { level: "error", scope: "fxserver.logs-page", detail: notice });
 		} finally {
-			busy = false;
+			if (active && request === requestId) busy = false;
 		}
 	}
 
@@ -117,25 +138,40 @@
 
 		dataPath = selectedPath;
 		setTxDataPath(selectedPath);
-		await refreshTxDataProfiles();
+		await refreshTxDataProfiles(getInstallPath(), true);
+		if (!active) return;
+		dataPath = fxserverSettings.txDataPath;
+		profile = fxserverSettings.profile;
 	}
 
 	async function handleTxDataChange(event: Event) {
 		dataPath = (event.currentTarget as HTMLInputElement).value;
 		setTxDataPath(dataPath);
-		await refreshTxDataProfiles();
+		await refreshTxDataProfiles(getInstallPath(), true);
+		if (!active) return;
+		dataPath = fxserverSettings.txDataPath;
+		profile = fxserverSettings.profile;
+	}
+
+	function splitBracketPrefix(line: string): { tag: string; rest: string } | null {
+		if (!line.startsWith("[")) return null;
+		const end = line.indexOf("]");
+		if (end < 2) return null;
+		const tag = line.slice(1, end).trim();
+		return tag ? { tag, rest: line.slice(end + 1).trimStart() } : null;
 	}
 
 	function parseLines(content: string, currentLog: LogName): ParsedLine[] {
 		return content
 			.split("\n")
 			.filter((line) => line.trim())
-			.map((line, index) => {
-				const txAdmin = line.match(/^\[(?<time>[^\]]+)\]\s*(?<message>.*)$/);
-				const fxserver = line.match(/^\[\s*(?<source>[^\]]+?)\s*\]\s*(?<message>.*)$/);
-				const source = currentLog === "fxserver.log" ? (fxserver?.groups?.source ?? "fxserver") : currentLog.replace(".log", "");
-				const message = currentLog === "fxserver.log" ? (fxserver?.groups?.message ?? line) : (txAdmin?.groups?.message ?? line);
-				const time = currentLog === "fxserver.log" ? "" : (txAdmin?.groups?.time ?? "");
+			.map((fullLine, index) => {
+				const line = fullLine.length > maxLineLength ? `${fullLine.slice(0, maxLineLength)}...` : fullLine;
+				const prefix = splitBracketPrefix(line);
+				const isFxserver = currentLog === "fxserver.log";
+				const source = isFxserver ? (prefix?.tag ?? "fxserver") : currentLog.replace(".log", "");
+				const message = prefix ? prefix.rest : line;
+				const time = isFxserver ? "" : (prefix?.tag ?? "");
 
 				return {
 					id: `${currentLog}-${index}-${line.length}`,
@@ -175,7 +211,7 @@
 		</div>
 		<div class="inline-flex items-center gap-2 rounded-sm border border-border bg-card px-3 py-2 text-xs text-muted-foreground">
 			<ScrollTextIcon class="size-3.5" />
-			{filteredEntries.length} visible entries
+			{visibleEntries.length}{filteredEntries.length > visibleEntries.length ? ` of ${filteredEntries.length}` : ""} visible entries
 		</div>
 	</div>
 
@@ -284,9 +320,9 @@
 			{/if}
 
 			<div class="max-h-160 overflow-auto rounded-sm border border-border bg-background/60">
-				{#if filteredEntries.length}
+				{#if visibleEntries.length}
 					<div class="divide-y divide-border/70">
-						{#each filteredEntries as entry (entry.id)}
+						{#each visibleEntries as entry (entry.id)}
 							<article class="grid gap-3 px-4 py-3 text-sm lg:grid-cols-[7rem_7rem_minmax(0,12rem)_minmax(0,1fr)] lg:items-start">
 								<time class="font-mono text-xs text-muted-foreground">{entry.time || "-"}</time>
 								<span class={`w-fit rounded-xs border px-2 py-0.5 text-xs font-medium uppercase ${levelClass(entry.level)}`}>{entry.level}</span>

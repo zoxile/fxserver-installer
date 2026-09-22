@@ -305,7 +305,7 @@
 		if (!pageActive) return;
 		storageReady = true;
 		void refreshAll();
-		void refreshTxDataProfiles();
+		void refreshTxDataProfiles(artifactPath);
 		if (!terminalEntries.length) void refreshTerminal({ reset: true, scrollToBottom: false });
 	}
 
@@ -412,14 +412,16 @@
 
 		envValues = { ...envValues, TXHOST_DATA_PATH: selectedPath };
 		setTxDataPath(selectedPath);
-		await refreshTxDataProfiles();
+		await refreshTxDataProfiles(artifactPath, true);
+		if (pageActive) envValues = { ...envValues, TXHOST_DATA_PATH: fxserverSettings.txDataPath };
 	}
 
 	async function handleTxDataInput(event: Event) {
 		const nextPath = (event.currentTarget as HTMLInputElement).value;
 		envValues = { ...envValues, TXHOST_DATA_PATH: nextPath };
 		setTxDataPath(nextPath);
-		await refreshTxDataProfiles();
+		await refreshTxDataProfiles(artifactPath, true);
+		if (pageActive) envValues = { ...envValues, TXHOST_DATA_PATH: fxserverSettings.txDataPath };
 	}
 
 	function handleProfileChange(profile: string) {
@@ -875,7 +877,7 @@
 					</div>
 					<div>
 						<Card.Title>Artifact Path</Card.Title>
-						<Card.Description>Use the saved artifact folder or choose the folder that contains FXServer.exe.</Card.Description>
+						<Card.Description>Server executable: {artifact?.edition === "enhanced" ? "cfx-server.exe (Enhanced)" : "FXServer.exe (Legacy) or cfx-server.exe (Enhanced)"}.</Card.Description>
 					</div>
 				</div>
 			</Card.Header>
@@ -883,7 +885,7 @@
 				<div class="grid gap-3 md:grid-cols-[1fr_auto]">
 					<label class="grid gap-2">
 						<span class="text-xs font-medium text-muted-foreground">Artifact Folder</span>
-						<Input value={artifactPath} oninput={updateArtifactPath} placeholder="C:\FXServer\server" title="Folder that contains FXServer.exe" class="rounded-sm font-mono" />
+						<Input value={artifactPath} oninput={updateArtifactPath} placeholder="C:\FXServer\server" title="Folder containing FXServer.exe or cfx-server.exe" class="rounded-sm font-mono" />
 					</label>
 					<div class="flex items-end">
 						<Button variant="outline" onclick={chooseFolder} disabled={starting || stopping} title="Pick the FXServer artifact folder">
@@ -896,7 +898,7 @@
 				<div class="grid gap-3 md:grid-cols-3">
 					<div class="rounded-sm border border-border bg-background/70 p-3">
 						<p class="text-xs text-muted-foreground">Installed Build</p>
-						<p class="mt-1 font-mono text-xl font-semibold text-foreground">{artifact?.version ?? (artifact?.installed ? "Unknown" : "None")}</p>
+						<p class="mt-1 break-all font-mono text-base font-semibold text-foreground">{artifact?.version ?? (artifact?.installed ? "Unknown" : "None")}</p>
 					</div>
 					<div class="rounded-sm border border-border bg-background/70 p-3">
 						<p class="text-xs text-muted-foreground">Launch Ready</p>
@@ -936,7 +938,7 @@
 		</Card.Header>
 		<Card.Content class="space-y-4">
 			<div class="flex flex-wrap items-center gap-2">
-				<Button onclick={() => startServer()} disabled={!canStart} aria-busy={starting} title="Start FXServer.exe with the configured TXHOST variables">
+				<Button onclick={() => startServer()} disabled={!canStart} aria-busy={starting} title="Start the detected server executable with the configured TXHOST variables">
 					{#if starting}
 						<LoaderCircleIcon class="animate-spin" />
 					{:else}

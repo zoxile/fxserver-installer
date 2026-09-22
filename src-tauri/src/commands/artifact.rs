@@ -1,3 +1,4 @@
+// Enhanced edition integration adapted from Huntercorlett's fork (53f1834).
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -7,7 +8,41 @@ use std::{
 
 #[path = "artifact/catalog.rs"]
 mod catalog;
+#[path = "artifact/enhanced.rs"]
+mod enhanced;
+#[path = "artifact/install.rs"]
+mod install;
+use super::server_exe::{find_server_executable, ServerEdition};
 static INSTALL_OPERATION: Mutex<()> = Mutex::new(());
+
+#[tauri::command]
+pub async fn get_enhanced_artifact_catalog(
+) -> Result<crate::models::artifact::EnhancedArtifactCatalog, String> {
+    super::run_blocking(enhanced::load_catalog).await
+}
+
+#[tauri::command]
+pub async fn install_enhanced_artifact(
+    manager: tauri::State<'_, super::fxserver::FxserverManager>,
+    request: crate::models::artifact::EnhancedInstallRequest,
+) -> Result<crate::models::artifact::ArtifactInstallResult, String> {
+    let manager = manager.inner().clone();
+    super::run_blocking(move || {
+        let _operation = INSTALL_OPERATION
+            .try_lock()
+            .map_err(|_| "Another artifact installation is in progress.")?;
+        let version = enhanced::validate_enhanced_url(&request.url)?;
+        manager.with_stopped_server(|| {
+            install::install(
+                request.url.trim(),
+                &request.destination,
+                &version,
+                ServerEdition::Enhanced,
+            )
+        })
+    })
+    .await
+}
 
 #[tauri::command]
 pub async fn get_windows_artifact_catalog(
@@ -44,21 +79,32 @@ fn get_installed_windows_artifact_info_blocking(
     }
 
     let marker_path = destination.join(".fxserver-artifact-version");
-    let executable_path = destination.join("FXServer.exe");
-    let has_fxserver_executable = executable_path.exists();
+    let executable = find_server_executable(&destination)?;
+    let edition = executable.as_ref().map(|(_, edition)| *edition);
+    let has_fxserver_executable = executable.is_some();
     let citizen_server_impl_path = find_citizen_server_impl(&destination);
     let version_info = citizen_server_impl_path
         .as_deref()
         .and_then(read_file_version_info);
     let marker_version = read_marker_version(&marker_path)?;
-    let version = version_info
-        .as_ref()
-        .and_then(artifact_version_from_file_info)
-        .or(marker_version);
+    let version = if edition == Some(ServerEdition::Enhanced) {
+        marker_version
+    } else {
+        version_info
+            .as_ref()
+            .and_then(artifact_version_from_file_info)
+            .or(marker_version)
+    };
 
     let installed =
         version.is_some() || citizen_server_impl_path.is_some() || has_fxserver_executable;
-    let detection_source = if version_info.is_some() {
+    let detection_source = if edition == Some(ServerEdition::Enhanced) {
+        if version.is_some() {
+            "marker"
+        } else {
+            "executable"
+        }
+    } else if version_info.is_some() {
         "citizen-server-impl"
     } else if version.is_some() {
         "marker"
@@ -82,6 +128,7 @@ fn get_installed_windows_artifact_info_blocking(
             .and_then(|info| info.file_version.clone()),
         product_version: version_info.and_then(|info| info.product_version),
         has_fxserver_executable,
+        edition: edition.map(|edition| edition.as_str().to_string()),
         detection_source: detection_source.to_string(),
     })
 }
@@ -320,86 +367,42 @@ fn install_windows_artifact_blocking(
         return Err("Artifact installation is only supported on Windows right now.".to_string());
     }
 
-    catalog::validate_download(&request.url, &request.version)?;
+    let url = legacy_zip_url(&request.url, &request.version)?;
     catalog::validate_install_risk(&request.version, request.acknowledge_risk)?;
 
-    let destination = PathBuf::from(request.destination.trim());
-    if destination.as_os_str().is_empty() {
-        return Err("Choose a destination folder before installing artifacts.".to_string());
-    }
-
-    fs::create_dir_all(&destination)
-        .map_err(|error| format!("Failed to create artifact destination: {error}"))?;
-
-    let zip_path = destination.join(format!("fxserver-artifact-{}.zip", request.version));
-    let marker_path = destination.join(".fxserver-artifact-version");
-
-    run_install_script(
-        &request.url,
-        &zip_path,
-        &destination,
+    install::install(
+        &url,
+        &request.destination,
         &request.version,
-        &marker_path,
-    )?;
-
-    Ok(ArtifactInstallResult {
-        version: request.version,
-        destination: destination.to_string_lossy().to_string(),
-        marker_path: marker_path.to_string_lossy().to_string(),
-    })
+        ServerEdition::Legacy,
+    )
 }
 
-fn run_install_script(
-    url: &str,
-    zip_path: &Path,
-    destination: &Path,
-    version: &str,
-    marker_path: &Path,
-) -> Result<(), String> {
-    let url_literal = powershell_string_literal(url);
-    let zip_path_literal = powershell_string_literal(&zip_path.to_string_lossy());
-    let destination_literal = powershell_string_literal(&destination.to_string_lossy());
-    let version_literal = powershell_string_literal(version);
-    let marker_path_literal = powershell_string_literal(&marker_path.to_string_lossy());
-    let script = format!(
-        r#"
-$ErrorActionPreference = "Stop"
-$ProgressPreference = "SilentlyContinue"
+fn legacy_zip_url(url: &str, version: &str) -> Result<String, String> {
+    // The official listing exposes .7z links; the same build also publishes server.zip.
+    let url = url
+        .strip_suffix("/server.7z")
+        .map(|base| format!("{base}/server.zip"))
+        .unwrap_or_else(|| url.to_string());
+    catalog::validate_download(&url, version)?;
+    Ok(url)
+}
 
-$Url = {url_literal}
-$ZipPath = {zip_path_literal}
-$Destination = {destination_literal}
-$Version = {version_literal}
-$MarkerPath = {marker_path_literal}
-
-Invoke-WebRequest -Uri ([uri] $Url) -OutFile $ZipPath -UseBasicParsing
-Expand-Archive -LiteralPath $ZipPath -DestinationPath $Destination -Force
-Set-Content -LiteralPath $MarkerPath -Value $Version -Encoding UTF8
-Remove-Item -LiteralPath $ZipPath -Force
-"#
-    );
-
-    let output = Command::new("powershell")
-        .no_window()
-        .arg("-NoProfile")
-        .arg("-ExecutionPolicy")
-        .arg("Bypass")
-        .arg("-Command")
-        .arg(script)
-        .output()
-        .map_err(|error| format!("Failed to start PowerShell artifact installer: {error}"))?;
-
-    if output.status.success() {
-        return Ok(());
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn legacy_zip_and_seven_zip_links_resolve_to_the_same_validated_build() {
+        let base = "https://runtime.fivem.net/artifacts/fivem/build_server_windows/master/123-0123456789abcdef0123456789abcdef01234567";
+        assert_eq!(
+            legacy_zip_url(&format!("{base}/server.7z"), "123").unwrap(),
+            format!("{base}/server.zip")
+        );
+        assert_eq!(
+            legacy_zip_url(&format!("{base}/server.zip"), "123").unwrap(),
+            format!("{base}/server.zip")
+        );
+        assert!(legacy_zip_url(&format!("{base}/server.7z"), "124").is_err());
+        assert!(legacy_zip_url("https://evil.example/server.7z", "123").is_err());
     }
-
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    let detail = if stderr.is_empty() { stdout } else { stderr };
-
-    Err(if detail.is_empty() {
-        "Artifact installer failed without output.".to_string()
-    } else {
-        detail
-    })
 }

@@ -296,14 +296,24 @@ fn inspect(request: &PreflightRequest) -> Inspection {
         }
     }
     let artifact = Path::new(request.artifact_path.trim());
-    if !request.artifact_path.trim().is_empty() && artifact.join("FXServer.exe").is_file() {
+    let executable = super::server_exe::find_server_executable(artifact);
+    if let Err(error) = &executable {
+        check(
+            &mut inspection,
+            "Paths",
+            "artifact-conflict",
+            Severity::Error,
+            "Mixed server editions",
+            error,
+        );
+    } else if !request.artifact_path.trim().is_empty() && executable.ok().flatten().is_some() {
         check(
             &mut inspection,
             "Paths",
             "artifact-found",
             Severity::Pass,
             "FXServer executable",
-            "FXServer.exe is present in the artifact directory.",
+            "A Legacy or Enhanced server executable is present in the artifact directory.",
         );
     } else {
         check(
@@ -312,14 +322,15 @@ fn inspect(request: &PreflightRequest) -> Inspection {
             "artifact-missing",
             Severity::Error,
             "FXServer executable missing",
-            "Install an artifact or choose the directory containing FXServer.exe.",
+            "Choose the directory containing FXServer.exe (Legacy) or cfx-server.exe (Enhanced).",
         );
     }
     if request.profile.trim().is_empty() {
         if !request.tx_data_path.trim().is_empty()
             && !Path::new(request.tx_data_path.trim()).is_dir()
         {
-            check(&mut inspection, "Paths", "txdata-missing", Severity::Error, "Configured txData directory missing", "The configured txData directory does not exist. Correct the path or clear it for a fresh txAdmin setup.");
+            let missing = !Path::new(request.tx_data_path.trim()).exists();
+            check(&mut inspection, "Paths", "txdata-missing", if missing { Severity::Warning } else { Severity::Error }, "Configured txData directory missing", "For a fresh setup, txAdmin creates txData on first run. Otherwise verify the configured path; existing settings have not been changed.");
         } else {
             check(&mut inspection, "Paths", "profile-not-selected", Severity::Warning, "No txAdmin profile selected", "FXServer can open txAdmin for initial setup. Select a profile afterward to check server configs, resources, and ports.");
         }
@@ -476,7 +487,12 @@ struct ResourceScan {
 }
 
 fn scan_artifact_resources(artifact: &Path, scan: &mut ResourceScan, inspection: &mut Inspection) {
-    if artifact.as_os_str().is_empty() || !artifact.join("FXServer.exe").is_file() {
+    if artifact.as_os_str().is_empty()
+        || !matches!(
+            super::server_exe::find_server_executable(artifact),
+            Ok(Some(_))
+        )
+    {
         return;
     }
     // ServerResources.cpp scans data/resources, then citizen_dir/system_resources.

@@ -80,6 +80,9 @@ export interface TxDataProfilesResult {
 	dataPath: string;
 	profiles: string[];
 	hasRootLogs: boolean;
+	hasRootConfig?: boolean;
+	exists?: boolean;
+	selectedProfile?: string | null;
 }
 
 export interface ServerConfigRequest {
@@ -352,7 +355,7 @@ export async function readTxDataLog(request: TxDataLogRequest) {
 	}
 }
 
-export async function listTxDataProfiles(dataPath: string) {
+export async function listTxDataProfiles(dataPath: string, options: { artifactPath?: string; discover?: boolean } = {}): Promise<TxDataProfilesResult> {
 	if (!hasTauriRuntime()) {
 		return {
 			dataPath,
@@ -362,7 +365,7 @@ export async function listTxDataProfiles(dataPath: string) {
 	}
 
 	try {
-		const result = await invoke<TxDataProfilesResult>("list_txdata_profiles", { dataPath });
+		const result = await invoke<TxDataProfilesResult>("list_txdata_profiles", { dataPath, ...options });
 		log(`Detected ${result.profiles.length} txData profile${result.profiles.length === 1 ? "" : "s"}.`, {
 			level: "debug",
 			scope: "fxserver.profiles",

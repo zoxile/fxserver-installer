@@ -11,6 +11,7 @@ pub mod live_bridge;
 pub mod logs;
 pub mod mariadb;
 pub mod resource_updates;
+pub(crate) mod server_exe;
 pub mod system;
 pub mod workspace_clone;
 

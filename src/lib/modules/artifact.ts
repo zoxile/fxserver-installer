@@ -1,4 +1,6 @@
 import { taskInvoke as invoke } from "$lib/core/tasks.svelte";
+import { trackTask } from "$lib/core/tasks.svelte";
+import { invoke as rawInvoke } from "@tauri-apps/api/core";
 import { getInstallPath } from "$lib/core/paths.svelte";
 import { log } from "$lib/core/logger.svelte";
 
@@ -68,6 +70,7 @@ export interface InstalledArtifactInfo {
 	fileVersion?: string | null;
 	productVersion?: string | null;
 	hasFxserverExecutable: boolean;
+	edition?: "legacy" | "enhanced" | null;
 	detectionSource: "marker" | "executable" | "none" | string;
 }
 
@@ -189,6 +192,9 @@ function artifactNumber(version?: string | null) {
 }
 
 export function getArtifactHealthStatus(metadata: ArtifactMetadata | null, installed: InstalledArtifactInfo | null): ArtifactHealthStatus {
+	if (installed?.edition === "enhanced") {
+		return { urgency: "unknown", label: "Enhanced installed", description: "Legacy build recommendations do not apply to Enhanced.", currentVersion: installed.version, recommendedVersion: null };
+	}
 	if (!metadata) {
 		return {
 			urgency: "unknown",
@@ -253,6 +259,19 @@ export function getArtifactHealthStatus(metadata: ArtifactMetadata | null, insta
 		currentVersion: installed.version,
 		recommendedVersion: metadata.recommendedArtifact,
 	};
+}
+
+// Enhanced wire types adapted from Huntercorlett's fork (53f1834).
+export const enhancedDownloadUrl = "https://docs.fivem.net/docs/server-download/?platform=enhanced&os=windows";
+export interface EnhancedArtifactBuild { version: string; downloadUrl: string; }
+export interface EnhancedArtifactCatalog { builds: EnhancedArtifactBuild[]; sourceUrl: string; warning: string | null; }
+export function fetchEnhancedCatalog() {
+	if (!hasTauriRuntime()) throw new Error("Enhanced discovery is available in the desktop app.");
+	return rawInvoke<EnhancedArtifactCatalog>("get_enhanced_artifact_catalog");
+}
+export function installEnhancedArtifact(url: string, destination: string) {
+	if (!hasTauriRuntime()) throw new Error("Artifact installation is available in the desktop app.");
+	return trackTask("install_enhanced_artifact", "Install Enhanced artifact", () => rawInvoke<ArtifactInstallResult>("install_enhanced_artifact", { request: { url, destination } }));
 }
 
 export async function getInstalledWindowsArtifactInfo(destination = getInstallPath()) {

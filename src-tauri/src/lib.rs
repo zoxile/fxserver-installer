@@ -175,6 +175,8 @@ pub fn run() {
             commands::mariadb::restart_mariadb_service,
             commands::mariadb::execute_mariadb_query,
             commands::mariadb::validate_mariadb_credentials,
+            commands::artifact::get_enhanced_artifact_catalog,
+            commands::artifact::install_enhanced_artifact,
             commands::mariadb::list_mariadb_databases,
             commands::mariadb::list_mariadb_tables,
             commands::mariadb::backup_mariadb,

@@ -73,7 +73,7 @@ impl Drop for Fixture {
 }
 
 #[test]
-fn fresh_txadmin_can_start_without_a_profile_but_invalid_configured_paths_block() {
+fn fresh_txadmin_allows_absent_data_folder_but_existing_files_block() {
     let fixture = Fixture::new();
     let mut request = fixture.request();
     request.profile.clear();
@@ -89,6 +89,8 @@ fn fresh_txadmin_can_start_without_a_profile_but_invalid_configured_paths_block(
         .join("does-not-exist")
         .to_string_lossy()
         .into_owned();
+    assert!(!report(&inspect(&request)).blocking);
+    fs::write(&request.tx_data_path, "not a directory").unwrap();
     assert!(report(&inspect(&request)).blocking);
 }
 
