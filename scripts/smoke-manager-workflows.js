@@ -41,6 +41,8 @@ async (page) => {
           case "save_fxserver_rcon_password": state.passwords[args.workspaceId] = args.password; sessionStorage.setItem("passwords", JSON.stringify(state.passwords)); return;
           case "clear_fxserver_rcon_password": delete state.passwords[args.workspaceId]; sessionStorage.setItem("passwords", JSON.stringify(state.passwords)); return;
           case "initialize_health_workspace": state.workspaceId = args.workspaceId; return;
+          case "load_database_login": return null;
+          case "clear_database_login": return;
           case "configure_live_bridge": return { workspaceId: args.target.workspaceId, enabled: false, connected: false, snapshot: null };
           case "prepare_workspace_switch": if (state.running) throw new Error("Stop FXServer before switching workspaces."); state.workspaceId = args.workspaceId; return;
           case "get_windows_artifact_metadata": return { recommendedArtifact: "10000", windowsDownloadLink: "https://example.invalid/artifact.zip", brokenArtifacts: [] };

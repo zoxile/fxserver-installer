@@ -64,7 +64,7 @@ const environmentUrl = build("features/fxserver/fxserverEnv.ts");
 const workspaceModelUrl = build("core/workspaceSettings.ts", { "$lib/features/fxserver/fxserverEnv": environmentUrl });
 const { emptyWorkspace, publicEnvironment } = await import(workspaceModelUrl);
 assert.deepEqual(publicEnvironment({ TXHOST_DATA_PATH: "C:/fixture", txhost_default_dbpass: "hidden", txhost_default_account: "hidden", MYSQL_CONNECTION_STRING: "hidden", API_KEY: "hidden" }), { TXHOST_DATA_PATH: "C:/fixture" });
-const databaseUrl = build("core/databaseSession.svelte.ts");
+const databaseUrl = build("core/databaseSession.svelte.ts", { "@tauri-apps/api/core": transport });
 const database = await import(databaseUrl);
 const settingsUrl = build("features/fxserver/fxserverSettings.svelte.ts", {
   "$lib/core/logger.svelte": loggerUrl, "$lib/core/workspaceSettings": workspaceModelUrl,
@@ -73,6 +73,7 @@ const settingsUrl = build("features/fxserver/fxserverSettings.svelte.ts", {
 const settings = await import(settingsUrl);
 const pathsUrl = url('let path = ""; export const getInstallPath = () => path; export const setInstallPath = (value) => { path = value; };');
 const workspaceUrl = build("core/workspaces.svelte.ts", {
+	"svelte": url("export const untrack = (fn) => fn();"),
   "@tauri-apps/api/core": transport, "./databaseSession.svelte": databaseUrl, "./paths.svelte": pathsUrl,
   "./tasks.svelte": taskUrl, "$lib/features/fxserver/fxserverSettings.svelte": settingsUrl, "./workspaceSettings": workspaceModelUrl,
 });
@@ -166,7 +167,7 @@ for (const editorContent of ["x\n".repeat(20_000), "x".repeat(200_001)]) {
 
 const sqlSource = read("features/mariadb/SqlRunnerPage.svelte").match(/<script lang="ts">([\s\S]*?)<\/script>/)[1];
 const sqlAst = ts.createSourceFile("sql.ts", sqlSource, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
-const sqlVariables = new Set(["credentials", "credentialsReady", "backupTables", "selectedBackupTable", "backupMode", "backupDatabaseName", "backupOptions", "backupTableRequestId", "active", "error"]);
+const sqlVariables = new Set(["credentials", "validatedCredentials", "credentialsReady", "backupTables", "selectedBackupTable", "backupMode", "backupDatabaseName", "backupOptions", "backupTableRequestId", "active", "error"]);
 const sqlFixture = sqlAst.statements.filter((node) =>
   ts.isVariableStatement(node) && node.declarationList.declarations.some((entry) => sqlVariables.has(entry.name.getText(sqlAst)))
   || ts.isFunctionDeclaration(node) && node.name?.text === "refreshBackupTables"
@@ -180,7 +181,7 @@ const databaseSession = { credentials: null, defaults: { host: "localhost", port
 const listMariaDBTables = (...args) => globalThis.managerSafety.tables(...args);
 export function createFixture() {
 ${sqlFixture}
-return { select(database) { backupDatabaseName = database; credentialsReady = true; backupMode = "tables"; }, rows() { return backupTables; } };
+return { select(database) { backupDatabaseName = database; validatedCredentials = JSON.stringify(credentials); backupMode = "tables"; }, rows() { return backupTables; } };
 }`;
 let fixtureCode = compileModule(ts.transpile(fixtureSource, { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 }), { filename: "sql-effects.svelte.js", generate: "client" }).js.code;
 fixtureCode = fixtureCode.replace(/(from\s+|import\s+)["'](svelte\/[^"']+)["']/g, (_, prefix, name) => `${prefix}${JSON.stringify(import.meta.resolve(name))}`);

@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
-import { databaseSession, rememberDatabaseCredentials } from "./databaseSession.svelte";
+import { untrack } from "svelte";
+import { databaseSession, forgetDatabaseLogin, rememberDatabaseCredentials, restoreDatabaseLogin } from "./databaseSession.svelte";
 import type { MariaDBCredentials } from "$lib/modules/mariadb";
 import { getInstallPath, setInstallPath } from "./paths.svelte";
 import { hasRunningTasks, taskSession, trackTask } from "./tasks.svelte";
@@ -30,6 +31,8 @@ export function initializeWorkspaces() {
 	} else {
 		workspaceSession.items = [emptyWorkspace("default", "Default")];
 		captureActiveWorkspace();
+		persist();
+		void restoreDatabaseLogin(workspaceSession.activeId);
 	}
 	taskSession.workspaceId = workspaceSession.activeId;
 	if ("__TAURI_INTERNALS__" in window) {
@@ -44,15 +47,18 @@ function persist() {
 }
 
 export function captureActiveWorkspace() {
+	untrack(captureSettings);
+}
+
+function captureSettings() {
 	if (!loaded || applying) return;
 	const current = workspaceSession.items.find((item) => item.id === workspaceSession.activeId);
 	if (!current) return;
-	current.artifactPath = getInstallPath();
-	current.txDataPath = fxserverSettings.txDataPath;
-	current.profile = fxserverSettings.profile;
-	current.environment = publicEnvironment(readSavedEnvironment());
 	const { host, port, username, database } = databaseSession.defaults;
-	current.database = { host, port, username, database };
+	const next = { ...current, artifactPath: getInstallPath(), txDataPath: fxserverSettings.txDataPath,
+		profile: fxserverSettings.profile, environment: publicEnvironment(readSavedEnvironment()), database: { host, port, username, database } };
+	if (JSON.stringify(current) === JSON.stringify(next)) return;
+	Object.assign(current, next);
 	persist();
 }
 
@@ -66,10 +72,12 @@ function applySettings(workspace: Workspace) {
 		resetTxDataProfiles();
 		databaseSession.defaults = { ...workspace.database };
 		databaseSession.revision += 1;
+		databaseSession.rememberLogin = false;
 		databaseSession.credentials = null;
 		databaseSession.connectionString = "";
 		const credentials = databaseCredentials.get(workspace.id);
 		if (credentials) rememberDatabaseCredentials(credentials);
+		void restoreDatabaseLogin(workspace.id);
 	} finally {
 		applying = false;
 	}
@@ -91,7 +99,10 @@ export async function saveWorkspace(workspace: Workspace) {
 	if (active) taskSession.switching = true;
 	try {
 		if (active && "__TAURI_INTERNALS__" in window) await invoke("prepare_workspace_switch", { workspaceId: workspace.id });
-		if (index >= 0 && JSON.stringify(workspaceSession.items[index].database) !== JSON.stringify(saved.database)) databaseCredentials.delete(workspace.id);
+		if (index >= 0 && JSON.stringify(workspaceSession.items[index].database) !== JSON.stringify(saved.database)) {
+			await forgetDatabaseLogin(workspace.id);
+			databaseCredentials.delete(workspace.id);
+		}
 		if (active && databaseSession.credentials && JSON.stringify(databaseSession.defaults) === JSON.stringify(saved.database)) {
 			databaseCredentials.set(workspace.id, { ...databaseSession.credentials });
 		} else if (active) databaseCredentials.delete(workspace.id);
@@ -115,6 +126,7 @@ export async function removeWorkspace(id: string) {
 				await invoke("remove_backup_schedule", { workspaceId: id, scheduleId: schedule.config.id });
 			}
 			await invoke("clear_fxserver_rcon_password", { workspaceId: id });
+			await forgetDatabaseLogin(id);
 		}
 		workspaceSession.items = workspaceSession.items.filter((item) => item.id !== id);
 		databaseCredentials.delete(id);

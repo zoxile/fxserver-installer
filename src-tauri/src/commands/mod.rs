@@ -4,6 +4,7 @@ pub mod backup_manager;
 pub mod config_history;
 pub mod database_admin;
 pub mod database_browser;
+pub mod database_credentials;
 pub mod database_inspection;
 pub mod diagnostics;
 pub mod fxserver;

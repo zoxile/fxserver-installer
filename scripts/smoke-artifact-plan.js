@@ -26,6 +26,8 @@ async (page) => {
           case "plugin:event|unlisten":
           case "append_app_log":
           case "initialize_health_workspace": return;
+          case "load_database_login": return null;
+          case "clear_database_login": return;
           case "read_app_logs": return { path: "fixture.log", entries: [] };
           case "configure_live_bridge": return { workspaceId: args.target.workspaceId, enabled: false, connected: false, snapshot: null };
           case "get_fxserver_rcon_password": return "";

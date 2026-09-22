@@ -37,6 +37,8 @@ async (page) => {
           case "plugin:event|unlisten": for (const [name, ids] of events) events.set(name, ids.filter((id) => id !== args.eventId)); return;
           case "plugin:dialog|open": return "C:/fixture/reviewed.sql";
           case "initialize_health_workspace": return;
+          case "load_database_login": return null;
+          case "clear_database_login": return;
           case "configure_live_bridge": return { workspaceId: args.target.workspaceId, enabled: false, connected: false, snapshot: null };
           case "read_app_logs": return { path: "fixture.log", entries: state.logs };
           case "append_app_log": state.logs.push(args.entry); return;

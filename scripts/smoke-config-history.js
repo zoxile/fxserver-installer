@@ -88,6 +88,8 @@ async (page) => {
           case "read_app_logs": return { path: "mock.log", entries: [] };
           case "append_app_log": state.logs.push(args.entry); return;
           case "initialize_health_workspace": return;
+          case "load_database_login": return null;
+          case "clear_database_login": return;
           case "configure_live_bridge": return { workspaceId: args.target.workspaceId, enabled: false, connected: false, snapshot: null, receivedAt: null };
           case "get_windows_artifact_metadata": return { recommendedArtifact: "10000", windowsDownloadLink: "https://example.invalid/artifact.zip", brokenArtifacts: [] };
           case "get_installed_windows_artifact_info": return { installed: true, version: "10000", hasFxserverExecutable: true, detectionSource: "marker" };

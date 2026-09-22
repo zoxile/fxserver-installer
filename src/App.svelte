@@ -15,6 +15,7 @@
 	import TaskCenterPage from "$lib/features/tasks/TaskCenterPage.svelte";
 	import WorkspacesPage from "$lib/features/workspaces/WorkspacesPage.svelte";
 	import { initializeWorkspaces, workspaceSession } from "$lib/core/workspaces.svelte";
+	import { databaseSession } from "$lib/core/databaseSession.svelte";
 	import ManageServerPage from "$lib/features/fxserver/ManageServerPage.svelte";
 	import OnboardingPage from "$lib/features/onboarding/OnboardingPage.svelte";
 	import ResourceManagerPage from "$lib/features/fxserver/ResourceManagerPage.svelte";
@@ -176,7 +177,9 @@
 
 			<div class="mx-auto max-w-7xl px-4 pt-6 pb-12 sm:px-6 lg:px-8">
 				{#key workspaceSession.revision}
-				{#if activePage === "home"}
+				{#if databaseSession.restoringLogin && ["mariadb", "sql-runner", "database-browser", "backup-manager", "server-configure"].includes(activePage)}
+					<p role="status" class="text-sm text-muted-foreground">Unlocking saved database login...</p>
+				{:else if activePage === "home"}
 					<HomePage onNavigate={navigate} />
 				{:else if activePage === "workspaces"}
 					<WorkspacesPage />

@@ -31,6 +31,8 @@ async (page) => {
           case "plugin:event|listen": events.set(args.event, args.handler); return args.handler;
           case "plugin:event|unlisten":
           case "initialize_health_workspace":
+          case "load_database_login":
+          case "clear_database_login":
           case "append_app_log": return;
           case "read_app_logs": return { path: "fixture.log", entries: [] };
           case "get_windows_artifact_metadata": return { recommendedArtifact: "10000", brokenArtifacts: [] };

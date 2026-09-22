@@ -5,6 +5,8 @@
 	import { Button } from "$lib/components/ui/button/index.js";
 	import { Input } from "$lib/components/ui/input/index.js";
 	import PasswordInput from "$lib/components/ui/password-input.svelte";
+	import { Checkbox } from "$lib/components/ui/checkbox/index.js";
+	import { databaseSession, setRememberDatabaseLogin } from "$lib/core/databaseSession.svelte";
 	import type { MariaDBCredentials } from "$lib/modules/mariadb";
 
 	type Props = {
@@ -36,7 +38,7 @@
 		<div class="grid gap-4 sm:grid-cols-2">
 			<label class="grid gap-2">
 				<span class="text-xs font-medium text-muted-foreground">Host</span>
-				<Input bind:value={credentials.host} disabled={busy} placeholder="127.0.0.1" title="MariaDB host for admin actions." />
+				<Input bind:value={credentials.host} disabled={busy} placeholder="localhost" title="MariaDB host for admin actions." />
 			</label>
 			<label class="grid gap-2">
 				<span class="text-xs font-medium text-muted-foreground">Port</span>
@@ -55,6 +57,17 @@
 				<Input bind:value={credentials.database} disabled={busy} placeholder="Optional default schema" title="Optional database to use when running queries." />
 			</label>
 		</div>
+		<label class="flex items-center gap-2 text-sm">
+			<Checkbox checked={databaseSession.rememberLogin} onCheckedChange={(checked) => setRememberDatabaseLogin(checked === true, credentials)} disabled={databaseSession.restoringLogin} />
+			Remember login for this workspace
+		</label>
+		<p class="text-xs text-muted-foreground">{databaseSession.savingLogin ? "Updating saved login..." : "Saved logins are protected by your Windows account. Uncheck to forget."}</p>
+		{#if databaseSession.loginError}
+			<div role="alert" class="flex items-center gap-2 text-xs text-destructive">
+				<span class="min-w-0 flex-1">{databaseSession.loginError}</span>
+				<Button variant="outline" size="sm" onclick={() => setRememberDatabaseLogin(false)} disabled={databaseSession.savingLogin}>Forget</Button>
+			</div>
+		{/if}
 		<Button class="w-full" onclick={onApply} disabled={busy} title="Apply admin credentials and refresh MariaDB status, users, and selected user details">
 			<RefreshCwIcon class={busy ? "animate-spin" : undefined} />
 			Change Credentials
