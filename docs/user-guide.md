@@ -142,7 +142,7 @@ Examples of saved or remembered state:
 
 Session-only data:
 
-- MariaDB credentials typed into the app connection card are remembered only while the app is open, unless you explicitly write a generated connection string to a server config file.
+- MariaDB credentials stay in memory unless **Remember login for this workspace** is enabled. Opted-in logins are encrypted using the current Windows account's data protection, restored on opening the workspace, and validated before database tools use them. They are not written to browser storage. Uncheck the option to delete the saved copy; a failed save/delete is shown in the connection card. A connection string written to `server.cfg` is still a plaintext secret in that file.
 - Reviewed resource queues, active apply state, and outcomes survive navigation for the current app session, but are not restored after the app restarts. Pin/ignore preferences do persist.
 - Artifact catalog and release-note caches are not an offline archive of downloadable builds or resource files.
 
@@ -174,6 +174,10 @@ MariaDB installation and updates download the official Windows x64 MSI over HTTP
 
 Installation stages appear in Manage MariaDB and Application Logs. You can switch tabs during an operation and return to see progress. FXServer start, stop, restart, and RCON commands also run in the background. A restart completes the stop before launching the server again, and overlapping lifecycle actions are rejected.
 
+For a fresh installation, choose a supported Community LTS series and an exact release from official metadata. The selected version is shown before installation. Compatibility presets change visible installer options; review them, especially TCP networking, port, and account authentication. Existing data is never intentionally downgraded to an older release. Updating an installed server stays within its detected series; cross-series changes require a separately planned and backed-up migration. If official metadata cannot be verified, installation/version selection fails visibly instead of silently choosing another version.
+
+Service controls address the detected MariaDB service explicitly. Restart waits for it to stop before starting it again. Normal inspection does not request elevation; a service action requests app elevation only if Windows denies that operation without it.
+
 Recommended order:
 
 1. Back up existing databases.
@@ -193,11 +197,17 @@ The query console includes helpers for common operations. The SQL file runner ca
 
 Query-console and SQL-file execution accept up to 10 MiB of SQL, retain at most 16 MiB of output per stream, and time out after 30 seconds. These limits keep interactive results bounded; use a reviewed MariaDB client workflow for larger or longer-running imports. A timeout is not a rollback: inspect the database before retrying statements that may already have committed. Managed backup restores use a separate streaming path.
 
+Tabular results also have 10,000-row and 100,000-cell limits. **SQL diagnostics** explains common connection, permission, syntax, foreign-key, collation, duplicate-key, and transaction errors. **Inspect schema** reads the selected database's visible metadata, optionally restricted to one table, with a 500-column/foreign-key-pair cap. It does not inspect private row data or automatically fix/retry SQL. A failed script may have committed earlier statements. Check existing changes before rerunning it. Different collations across a database are not by themselves proof of a defect; see MariaDB's [collation guidance](https://mariadb.com/docs/server/reference/data-types/string-data-types/character-sets/setting-character-sets-and-collations) and [foreign-key requirements](https://mariadb.com/docs/server/ha-and-performance/optimization-and-tuning/optimization-and-indexes/foreign-keys).
+
 Remote database connections require TLS with server-certificate verification. Configure trusted certificates through MariaDB's normal client option files when required by your server. There is no automatic insecure retry. Explicit localhost or numeric loopback connections retain local compatibility. See [MariaDB client TLS options](https://mariadb.com/docs/server/clients-and-utilities/mariadb-client/mariadb-command-line-client).
 
 ## Database Browser
 
 Open **MariaDB > Database Browser**, validate the session connection, and select a database and table. **Rows**, **Columns**, and **Indexes** separate data from schema metadata. Browsing is read-only by default; sorting, paging, and filters do not enable writes.
+
+Additional inspection tabs show the database overview, server status, processes, variables, character sets, engines, accounts, and visible explicit grants. These are on-demand snapshots with bounded results, not continuous polling. Process SQL text and password hashes are not displayed; potentially sensitive server variables are redacted. Grants do not expand role inheritance or calculate effective permissions.
+
+The **Tables** tab provides storage estimates, database/table creation, and single-table empty, drop, optimize, analyze, check, and repair actions. Review the generated SQL and type the exact target confirmation. Previews expire, can be used only once, and reject changed schema evidence. System schemas are protected, views are not treated as base tables, and repair is limited to supporting engines. Administration requires sufficient metadata visibility to detect dependencies. These actions can commit independently and have no undo; keep backups and other schema administrators idle. Foreign-key checks are not disabled to force an operation through.
 
 Rows are fetched in bounded pages of at most 200. Filters are combined with AND, with comparison, literal contains, and SQL NULL operators; at most eight filters are accepted. Empty text is different from SQL NULL. Binary values are displayed as hex. Cell previews are limited to 4,096 characters, and pages with truncated values cannot be used to update or delete rows. Active database writers can change results between pages; this is not a consistent full-database snapshot.
 
@@ -218,6 +228,8 @@ Apply rechecks schema and original-row evidence, uses a transaction, and rolls b
 
 Open **Artifacts > Install Artifact** and choose the artifact destination. The recommended-install action remains available. **Official Windows Builds** additionally lists builds from the [official Windows artifact directory](https://runtime.fivem.net/artifacts/fivem/build_server_windows/master/) and annotates them with [JG Scripts issue metadata](https://artifacts.jgscripts.com/).
 
+Choose **Enhanced** for the official FiveM Enhanced Windows downloads. The app reads current structured download data from Cfx.re; a manually supplied link must match the official Windows download host and format. Legacy issue/recommendation metadata does not imply an Enhanced build has been tested. Use separate artifact directories for Legacy (`FXServer.exe`) and Enhanced (`cfx-server.exe`); mixed directories are rejected. Installation stages archives, rejects unsafe entries, and requires server processes to be stopped before publishing binaries.
+
 1. Search by build number or issue text, filter by health or current build, and page through the results in groups of 25.
 2. Check the configured current-build marker, recommendation, issue reasons, and fetch timestamps. Refresh requests both the official list and JG metadata; the normal in-session cache lasts 15 minutes.
 3. Stop FXServer and txAdmin, including externally launched instances, and back up the artifact destination.
@@ -230,6 +242,8 @@ Installing replaces artifact files in the selected location. Only official Windo
 ## FXServer Setup
 
 Use Artifacts to install or inspect FXServer artifacts, then Configure Server to load the txAdmin profile.
+
+An explicitly configured txData location is preserved, including a location inside the artifact folder. Discovery can identify txData when a parent or profile folder was selected; it does not silently relocate existing profiles. Verify the resolved path before launching or editing a server.
 
 The app reads profile configuration from:
 
@@ -295,7 +309,7 @@ The first saved workspace, **Default**, adopts your existing settings. Open **Wo
 
 A txAdmin profile already selects server configuration and its data directory. A workspace is an optional app-side preset around a profile: it also separates artifact/txData paths, saved database connection defaults, backup schedules, resource update preferences, and bridge settings. Keep one workspace and switch profiles when you do not need that extra separation. Switching profiles within one workspace does not create separate app-side schedules or preferences for each profile.
 
-RCON passwords are encrypted separately for each workspace with Windows data protection. Database passwords are session credentials; saved workspace metadata contains connection defaults but no database password. During MariaDB CLI operations, a short-lived current-user-only option file supplies credentials without putting them in command-line arguments. Normal completion removes it; an abnormal termination or cleanup failure can leave a protected temporary file. Sensitive TXHOST environment values are not included in saved workspace metadata. Removing a workspace removes its entry, backup schedules, and saved RCON password, not its server files, backup files, or databases.
+RCON passwords and opted-in remembered database logins are encrypted separately for each workspace with Windows data protection. Saved workspace metadata contains connection defaults but no database password. During MariaDB CLI operations, a short-lived current-user-only option file supplies credentials without putting them in command-line arguments. Normal completion removes it; an abnormal termination or cleanup failure can leave a protected temporary file. Sensitive TXHOST environment values are not included in saved workspace metadata. Removing a workspace removes its entry, backup schedules, saved RCON password, and remembered database login, not its server files, backup files, or databases.
 
 Open **Task Center** from the sidebar to inspect running operations and session history. Navigation remains available during background work. Closing a resource preview does not cancel an update that has already started. File and database writes are not forcibly cancelled; quitting hides the app immediately, stops new scheduled work, and waits for active writes to finish.
 
@@ -331,7 +345,7 @@ If migration fails, cleanup is limited to the newly created database whose owner
 2. Create a schedule, select a non-system database and an existing output folder, and set its interval and retained backup count.
 3. Enable the schedule for the current app session, or leave it paused and use **Run now**.
 
-Schedules run while the app is open or in the tray, not while the app or PC is shut down. Saved schedules reopen paused because passwords are not stored. Validate credentials and enable them again after restarting the app. Missed intervals do not trigger a burst of catch-up backups. Retention only removes verified snapshots owned by that schedule, never unrelated SQL files.
+Schedules run while the app is open or in the tray, not while the app or PC is shut down. Saved schedules reopen paused even when you remember a database login. Validate credentials and enable them again after restarting the app. Missed intervals do not trigger a burst of catch-up backups. Retention only removes verified snapshots owned by that schedule, never unrelated SQL files.
 
 To restore, select an app-managed snapshot and review the target host, database, checksum, and warnings. Enter the requested database name to confirm. The app creates a recovery backup of the target before streaming the selected snapshot into it. Restore can replace tables and data, is not a single transaction, and should be done while FXServer and other database writers are stopped. A failed restore may require restoring the recovery snapshot. Keep an independent, off-machine backup as well.
 

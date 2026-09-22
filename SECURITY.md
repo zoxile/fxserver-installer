@@ -8,13 +8,15 @@ Include the app version, Windows version, affected workflow, reproduction steps 
 
 ## Supported Scope
 
-This project builds a Windows desktop app. Security fixes target the latest release; older builds do not have a maintenance guarantee. Version 0.4.1 is a beta with incomplete live-environment validation, not a security certification.
+This project builds a Windows desktop app. Security fixes target the latest release; older builds do not have a maintenance guarantee. Version 0.5.0 is a beta with incomplete live-environment validation, not a security certification.
 
 - The app can run installers, operate MariaDB, manage FXServer processes, and replace user-selected files. Only run it for servers and databases you are authorized to administer.
 - Resource code and SQL files are executable inputs. Install only trusted resources and review SQL before running it. A preview or checksum does not establish that third-party content is trustworthy.
 - Keep independent backups outside the managed server directory before installing, updating, restoring, or migrating data.
 - Secrets written into server configuration remain plaintext there. DPAPI protects the app's saved secrets, not every copy of those secrets on disk or against a compromised Windows account.
-- MariaDB client operations use temporary option files restricted to the current Windows user. Normal completion removes them; abnormal termination can leave protected files in the Windows temporary directory. Fresh database initialization still uses the official initializer's password argument, and preserved-data password resets use temporary SQL. These operations are not protected against a compromised local account or administrator.
+- MariaDB client operations use temporary option files restricted to the current Windows user. Normal completion removes them; abnormal termination can leave protected files in the Windows temporary directory. Fresh database initialization still uses the official initializer's password argument. Reattaching preserved data does not reset its passwords or accounts. These operations are not protected against a compromised local account or administrator.
+- Remembered database logins are opt-in, bound to their workspace, and encrypted with the current Windows user's DPAPI key. Forgetting a saved login removes the app's disk copy; it does not erase credentials already in memory or written into server configuration. Scheduled backups still require a validated session and explicit enabling after startup.
+- Database administration previews expire and are single-use, but confirmed DDL can commit independently. Review the SQL and keep backups; a failure does not guarantee that an operation made no changes. SQL diagnostics only inspect metadata and never repair or retry failed scripts automatically.
 - Remote MariaDB connections require verified TLS. Only explicit localhost or numeric loopback endpoints retain local plaintext compatibility; there is no automatic insecure retry for remote hosts.
 - Live Bridge accepts authenticated local requests only. Do not expose its route through a reverse proxy or tunnel, and protect its server-side token file.
 - The desktop CSP blocks remote scripts and embedded pages. HTTPS data connections remain allowed for user-configured resolver packs; this is not a sandbox for malicious server resources or local processes.

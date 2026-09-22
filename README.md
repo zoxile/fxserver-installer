@@ -10,7 +10,7 @@ Quick note: The main purpose of this app was for me to learn how to build with T
 > FXServer Installer is a new project in active development. Issues, bugs, UI changes, and breaking changes may happen between releases, so back up important server data before using app features that install, update, uninstall, or rewrite files.
 
 > [!WARNING]
-> **Version 0.4.1 is a beta, not a fully tested production release.** Automated checks do not replace live Windows Server, MariaDB upgrade/restore, or FXServer load testing. Test on a disposable server and keep independent backups. See the [0.4.1 beta release notes](docs/releases/v0.4.1.md) for changes and validation limits.
+> **Version 0.5.0 is a beta, not a fully tested production release.** Automated checks do not replace live Windows Server, MariaDB upgrade/restore, or FXServer load testing. Test on a disposable server and keep independent backups. See the [0.5.0 beta release notes](docs/releases/v0.5.0.md) for changes and validation limits.
 
 > [!NOTE]
 > Windows SmartScreen may warn because this project is new and currently unsigned. If you downloaded it from the official GitHub Releases page, click "More info" and then "Run anyway".
@@ -81,7 +81,7 @@ Quick note: The main purpose of this app was for me to learn how to build with T
 ### Workspaces And Background Tasks
 
 - Separate saved artifact paths, txAdmin profiles, environment settings, and database defaults.
-- Per-workspace encrypted RCON passwords; database passwords remain session-only.
+- Per-workspace encrypted RCON passwords and optional Windows-protected database logins; database passwords otherwise remain session-only.
 - One active server at a time, with guarded workspace switching.
 - Task Center with running operations and bounded session history, available from the sidebar.
 - Private clone, export, and import previews for selected resources and sanitized configuration, with a new destination and reviewed ports.
@@ -102,6 +102,8 @@ Quick note: The main purpose of this app was for me to learn how to build with T
 - Detect MariaDB installation and service status.
 - Install, update, and uninstall MariaDB while preserving database data.
 - Show installed and recommended versions.
+- Choose a supported MariaDB LTS series and exact Windows installer version, with explicit compatibility options and guarded same-series updates.
+- Opt in to a Windows-protected database login per workspace, or keep credentials session-only.
 - Show installer progress and important messages in the UI.
 - Log MariaDB operations to Application Logs.
 - Manage users, hosts, privileges, and database access.
@@ -112,12 +114,15 @@ Quick note: The main purpose of this app was for me to learn how to build with T
 - Shared MariaDB connection card with the Manage MariaDB panel.
 - Query console with helper snippets for common SELECT, filter, update, delete, and schema tasks.
 - SQL file runner with global or database-scoped execution.
+- Review-only SQL error diagnostics and bounded schema/collation inspection. Failed scripts are never automatically retried.
 - Backup tools for full, database, and table-level exports.
 
 ### Database Browser
 
 - Read-only-by-default table browsing, column and index metadata, pagination, sorting, filters, and bounded CSV export.
 - Explicitly enabled single-row insert, update, and delete previews for supported InnoDB tables.
+- Read-only server status, variables, processes, character sets, engines, accounts, and visible grants.
+- Database/table creation and single-table maintenance with reviewed SQL, exact confirmation, short-lived previews, and protected system schemas.
 - Exact table confirmation, short-lived previews, schema and row-change guards, and rollback unless exactly one row is affected. Tables with unsupported types or unverifiable side effects remain read-only.
 
 ### Artifacts
@@ -127,10 +132,12 @@ Quick note: The main purpose of this app was for me to learn how to build with T
 - See current/recommended markers and red known-issue badges; explicitly acknowledge reported or unknown risks before installing a selected build.
 - Treat missing or stale issue information as unknown, not healthy. Artifact replacement is not a version-switch or rollback system.
 - Track configured artifact paths inside the app.
+- FiveM Enhanced downloads from the official Cfx.re download page, alongside the existing Legacy workflow. Keep editions in separate artifact folders.
 
 ### Configure Server
 
 - Read txAdmin profile data from `txData/{profile}/config.json`.
+- Discover txData from an artifact folder or selected profile while preserving explicitly configured paths.
 - Resolve the server `dataPath` from the profile configuration.
 - Load and edit common `.cfg` files such as `server.cfg`, `permissions.cfg`, `voice.cfg`, `ox.cfg`, and `misc.cfg`.
 - Colored `.cfg` editor with line numbers, save, undo, and keyboard shortcuts.
@@ -277,12 +284,13 @@ Do not commit `node_modules`, build output, generated installers, local logs, se
 ## Acknowledgements
 
 - Artifact metadata and artifact install data are powered by [JG Scripts Artifacts DB](https://artifacts.jgscripts.com/). Big thanks to JG Scripts for making artifact data easier to work with.
+- Selected Enhanced-server, database-tooling, installer, performance, and txData ideas were adapted from [Hunter Corlett's fork](https://github.com/Huntercorlett/fxserver-installer-reborn). See [contributor attribution](docs/attribution.md) for scope and source revision.
 
 ## Safety Notes
 
 - Back up databases before installing, updating, or uninstalling MariaDB through the app.
 - MariaDB uninstall is intended to remove the server application while preserving data, but backups are still the safest recovery path.
-- RCON passwords are saved locally with Windows data protection. MariaDB credentials entered in the app are session-only unless written into a config file by the user.
+- RCON passwords use Windows data protection. MariaDB logins remain session-only unless you opt in to an encrypted saved login for that workspace or explicitly write a connection string to a config file. Uncheck **Remember login** to forget the saved copy.
 - Review resource updates before applying them, especially resources with local configuration files.
 - Pins prevent app updates; they do not lock files against other tools. Queues never automatically review a new download or retry a failed update.
 - Stop externally launched FXServer/txAdmin instances yourself before artifact replacement, bridge installation/removal, configuration restore, or other maintenance. App lifecycle guards do not establish that every external process is stopped.
