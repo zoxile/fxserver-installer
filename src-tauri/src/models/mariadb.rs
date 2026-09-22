@@ -24,6 +24,7 @@ pub struct MariaDBCredentials {
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct MariaDBInstallOptions {
+    pub version: Option<String>,
     pub root_password: String,
     pub service_name: String,
     pub port: u16,
@@ -46,11 +47,27 @@ pub struct MariaDBPackageInfo {
     pub latest_version: Option<String>,
     pub installed_package_version: Option<String>,
     pub update_available: bool,
+    pub error: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct MariaDBSeries {
+    pub series: String,
+    pub support: String,
+    pub eol: String,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct MariaDBRelease {
+    pub version: String,
+    pub date: String,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct MariaDBUserConfig {
+    #[serde(default)]
+    pub native_password: bool,
     pub username: String,
     pub password: String,
     pub host: String,
@@ -61,6 +78,8 @@ pub struct MariaDBUserConfig {
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct MariaDBUserUpdateConfig {
+    #[serde(default)]
+    pub native_password: bool,
     pub username: String,
     pub host: String,
     pub password: Option<String>,

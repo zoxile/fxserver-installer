@@ -1,6 +1,40 @@
-use std::{path::Path, process::Command};
+use std::{
+    path::Path,
+    process::Command,
+    sync::Mutex,
+    time::{Duration, Instant},
+};
 
 use crate::{models::mariadb::MariaDBStatus, process::CommandNoWindowExt};
+
+const CACHE_TTL: Duration = Duration::from_secs(60);
+static INSTALL_PATH: Mutex<Option<(Instant, String)>> = Mutex::new(None);
+static VERSION: Mutex<Option<(Instant, String)>> = Mutex::new(None);
+
+fn cached(slot: &Mutex<Option<(Instant, String)>>) -> Option<String> {
+    slot.lock()
+        .ok()?
+        .as_ref()
+        .filter(|(time, _)| time.elapsed() < CACHE_TTL)
+        .map(|(_, value)| value.clone())
+}
+
+fn remember(slot: &Mutex<Option<(Instant, String)>>, value: Option<String>) -> Option<String> {
+    if let Ok(mut slot) = slot.lock() {
+        *slot = value.clone().map(|value| (Instant::now(), value));
+    }
+    value
+}
+
+pub fn clear_detection_cache() {
+    if let Ok(mut slot) = INSTALL_PATH.lock() {
+        *slot = None;
+    }
+    if let Ok(mut slot) = VERSION.lock() {
+        *slot = None;
+    }
+    super::query::clear_client_cache();
+}
 
 pub fn detect_mariadb() -> MariaDBStatus {
     let service = find_service();
@@ -31,14 +65,26 @@ pub fn detect_mariadb() -> MariaDBStatus {
 }
 
 pub fn is_service_running(service_name: &str) -> bool {
+    if super::service::validate_service_name(service_name).is_err() {
+        return false;
+    }
     let output = Command::new("sc")
         .no_window()
         .args(["query", service_name])
         .output();
 
     output
-        .map(|result| String::from_utf8_lossy(&result.stdout).contains("RUNNING"))
+        .map(|result| {
+            result.status.success() && running_from_sc(&String::from_utf8_lossy(&result.stdout))
+        })
         .unwrap_or(false)
+}
+
+fn running_from_sc(output: &str) -> bool {
+    output
+        .lines()
+        .filter_map(|line| line.split_once(':'))
+        .any(|(key, value)| key.trim() == "STATE" && value.split_whitespace().next() == Some("4"))
 }
 
 pub fn find_service_name() -> Option<String> {
@@ -46,7 +92,13 @@ pub fn find_service_name() -> Option<String> {
 }
 
 pub fn get_install_path() -> Option<String> {
-    get_install_path_from_registry().or_else(get_install_path_from_service)
+    if let Some(path) = cached(&INSTALL_PATH).filter(|p| Path::new(p).exists()) {
+        return Some(path);
+    }
+    remember(
+        &INSTALL_PATH,
+        get_install_path_from_service().or_else(get_install_path_from_registry),
+    )
 }
 
 fn find_service() -> Option<(String, String)> {
@@ -55,7 +107,7 @@ fn find_service() -> Option<(String, String)> {
         .args([
             "-NoProfile",
             "-Command",
-            "Get-Service | Where-Object { $_.Name -like 'MariaDB*' -or $_.DisplayName -like 'MariaDB*' } | Select-Object -First 1 Name,DisplayName | ConvertTo-Json -Compress",
+            r#"Get-CimInstance Win32_Service -ErrorAction Stop | Where-Object { $_.PathName -match '(?i)mariadb' -and $_.PathName -match '(?i)(?:^|[\\/])(?:mariadbd|mysqld)\.exe(?:"|\s|$)' } | Select-Object -First 1 Name,DisplayName | ConvertTo-Json -Compress"#,
         ])
         .output()
         .ok()?;
@@ -77,14 +129,23 @@ fn find_service() -> Option<(String, String)> {
 }
 
 fn get_version() -> Option<String> {
+    if let Some(version) = cached(&VERSION) {
+        return Some(version);
+    }
+    remember(&VERSION, get_version_uncached())
+}
+
+fn get_version_uncached() -> Option<String> {
     if let Some(install_path) = get_install_path() {
-        let client_path = Path::new(&install_path).join("bin").join("mariadb.exe");
+        let client_path = Path::new(&install_path).join("bin").join("mariadbd.exe");
         if let Some(version) = run_version_command(client_path.to_string_lossy().as_ref()) {
             return Some(version);
         }
     }
 
-    run_version_command("mariadb").or_else(|| run_version_command("mariadb.exe"))
+    get_install_path().and_then(|path| {
+        run_version_command(&Path::new(&path).join("bin/mysqld.exe").to_string_lossy())
+    })
 }
 
 fn run_version_command(command: &str) -> Option<String> {
@@ -125,6 +186,7 @@ fn get_install_path_from_registry() -> Option<String> {
 
 fn get_install_path_from_service() -> Option<String> {
     let service_name = find_service_name()?;
+    super::service::validate_service_name(&service_name).ok()?;
     let command = format!(
         "(Get-CimInstance Win32_Service -Filter \"Name='{}'\").PathName",
         service_name.replace('\'', "''")
@@ -177,9 +239,29 @@ fn extract_executable_path(path_name: &str) -> Option<String> {
 }
 
 fn extract_json_string(json: &str, key: &str) -> Option<String> {
-    let marker = format!("\"{key}\":\"");
-    let start = json.find(&marker)? + marker.len();
-    let rest = &json[start..];
-    let end = rest.find('"')?;
-    Some(rest[..end].replace("\\\"", "\""))
+    serde_json::from_str::<serde_json::Value>(json)
+        .ok()?
+        .get(key)?
+        .as_str()
+        .map(str::to_string)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn running_status_is_not_inferred_from_service_name() {
+        assert!(running_from_sc("SERVICE_NAME: MariaDB\n STATE : 4 RUNNING"));
+        assert!(!running_from_sc(
+            "SERVICE_NAME: MariaDB_RUNNING\n STATE : 1 STOPPED"
+        ));
+        assert!(!running_from_sc("STATE : 3 STOP_PENDING"));
+    }
+    #[test]
+    fn expired_discovery_is_not_reused() {
+        let slot = Mutex::new(Some((Instant::now() - CACHE_TTL, "old".into())));
+        assert!(cached(&slot).is_none());
+        assert_eq!(remember(&slot, Some("new".into())).as_deref(), Some("new"));
+        assert_eq!(cached(&slot).as_deref(), Some("new"));
+    }
 }

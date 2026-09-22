@@ -17,11 +17,13 @@
 	import StatusOverview from "./StatusOverview.svelte";
 	import UserManagementCard from "./UserManagementCard.svelte";
 	import { Notice } from "$lib/components/ui/notice/index.js";
+	import { Checkbox } from "$lib/components/ui/checkbox/index.js";
 	import { databaseSession, rememberDatabaseCredentials } from "$lib/core/databaseSession.svelte";
 	import { log } from "$lib/core/logger.svelte";
 	import { mariadbActivity } from "$lib/core/mariadbActivity.svelte";
 	import {
 		deleteMariaDBUser,
+		DEFAULT_MARIADB_SERIES,
 		getMariaDBPackageInfo,
 		getMariaDBStatus,
 		getMariaDBUserAccess,
@@ -45,7 +47,11 @@
 	let busy = $derived(activeTasks > 0 || mariadbActivity.busy);
 	let installStage = $derived(mariadbActivity.stage);
 	let backupWarningDismissed = $state(false);
-	let credentialsReady = $state(false);
+	let validatedCredentials = $state("");
+	let nativePassword = $state(false);
+	let editNativePassword = $state(false);
+	let mounted = false;
+	let credentialRequest = 0;
 	let connectionError = $state("");
 	let databases = $state<string[]>([]);
 	let users = $state<MariaDBUser[]>([]);
@@ -65,7 +71,9 @@
 		password: databaseSession.credentials?.password ?? "",
 		database: databaseSession.credentials?.database ?? databaseSession.defaults.database,
 	});
+	const credentialsReady = $derived(Boolean(validatedCredentials) && validatedCredentials === JSON.stringify(credentials));
 	let installOptions = $state<MariaDBInstallOptions>({
+		version: DEFAULT_MARIADB_SERIES,
 		rootPassword: "",
 		serviceName: "MariaDB",
 		port: 3306,
@@ -90,6 +98,9 @@
 	});
 
 	onMount(() => {
+		mounted = true;
+		// Restored/shared credentials have not been validated against this server yet.
+		if (databaseSession.credentials) void applyCredentials();
 		const statusTimer = window.setTimeout(() => {
 			void refreshStatus(false);
 		}, 120);
@@ -99,6 +110,8 @@
 		}, 1600);
 
 		return () => {
+			mounted = false;
+			credentialRequest += 1;
 			window.clearTimeout(statusTimer);
 			window.clearTimeout(packageTimer);
 		};
@@ -145,7 +158,7 @@
 	}
 
 	async function install() {
-		setStage(`Preparing MariaDB ${packageInfo?.latestVersion ?? "installer"} package. Approve the Windows administrator prompt if it appears.`);
+		setStage(`Preparing MariaDB ${installOptions.version ?? DEFAULT_MARIADB_SERIES} package. Approve the Windows administrator prompt if it appears.`);
 		const result = await runTask(() => installMariaDB(installOptions), "MariaDB installer completed.");
 		if (result !== undefined) {
 			setStage("Installer finished. Verifying MariaDB service and package details.");
@@ -168,7 +181,7 @@
 		const result = await runTask(() => uninstallMariaDB(), "MariaDB uninstalled.");
 		if (result !== undefined) {
 			setStage("Uninstall finished. Refreshing MariaDB status and package details.");
-			credentialsReady = false;
+			validatedCredentials = "";
 			users = [];
 			databases = [];
 			selectedUser = null;
@@ -212,10 +225,12 @@
 			return;
 		}
 
+		if (nativePassword && !window.confirm(`Explicitly use mysql_native_password for ${userConfig.username}@${userConfig.host}? If the account exists, this replaces its current authentication methods.`)) return;
 		await runTask(
 			() =>
 				saveMariaDBUser(credentials, {
 					...userConfig,
+					nativePassword,
 					privileges: userConfig.privileges
 						.split(",")
 						.map((privilege) => privilege.trim())
@@ -247,6 +262,7 @@
 	}
 
 	async function editUser(user: MariaDBUser) {
+		editNativePassword = false;
 		if (!credentialsReady) {
 			error = "Apply valid admin credentials before editing MariaDB users.";
 			log(`MariaDB edit action blocked for ${user.username}@${user.host}.`, { level: "warn", scope: "mariadb.ui" });
@@ -275,34 +291,38 @@
 	}
 
 	async function applyCredentials() {
-		credentialsReady = false;
+		const original = { ...credentials };
+		const revision = databaseSession.revision;
+		const request = ++credentialRequest;
+		validatedCredentials = "";
 		connectionError = "";
 		databases = [];
 		selectedAccess = null;
 		log("MariaDB admin credentials changed; refreshing status and users.", { scope: "mariadb.ui", detail: `${credentials.username}@${credentials.host}:${credentials.port}` });
 		await refreshStatus(true);
 
-		busy = true;
+		activeTasks += 1;
 		error = "";
 		message = "";
 
 		try {
-			const original = { ...credentials };
-			const revision = databaseSession.revision;
+			if (!mounted || request !== credentialRequest || revision !== databaseSession.revision) return;
 			await validateMariaDBCredentials(original);
 			const [loadedUsers, loadedDatabases] = await Promise.all([listMariaDBUsers(original), listMariaDBDatabases(original)]);
+			if (!mounted || request !== credentialRequest || revision !== databaseSession.revision) return;
 			if (!rememberDatabaseCredentials(original, revision)) return;
 			users = loadedUsers;
 			databases = loadedDatabases;
-			credentialsReady = true;
+			validatedCredentials = JSON.stringify(original);
 			message = "Admin credentials applied.";
 			await refreshUserAccess();
 		} catch (caught) {
+			if (!mounted || request !== credentialRequest || revision !== databaseSession.revision) return;
 			connectionError = caught instanceof Error ? caught.message : String(caught);
 			error = connectionError;
 			log("MariaDB credentials rejected.", { level: "error", scope: "mariadb.ui", detail: connectionError });
 		} finally {
-			busy = false;
+			activeTasks -= 1;
 		}
 	}
 
@@ -315,11 +335,14 @@
 
 		if (!editingUser) return;
 		const config = editingUser;
+		if (editNativePassword && !config.password) { error = "A password is required to change authentication."; return; }
+		if (editNativePassword && !window.confirm(`Replace authentication for ${config.username}@${config.host} with mysql_native_password?`)) return;
 
 		await runTask(
 			() =>
 				updateMariaDBUser(credentials, {
 					...config,
+					nativePassword: editNativePassword,
 					password: config.password || null,
 					privileges: config.privileges
 						.split(",")
@@ -374,6 +397,9 @@
 	{/if}
 
 	<div class="grid gap-4 xl:grid-cols-12">
+		{#if packageInfo?.error}
+			<div class="xl:col-span-12"><Notice tone="error" message={packageInfo.error} /></div>
+		{/if}
 		{#if status && !status.installed}
 			<div class="xl:col-span-12">
 				<InstallConfigCard bind:installOptions {busy} {packageInfo} {installStage} onInstall={install} />
@@ -387,6 +413,10 @@
 		</div>
 		<div class="xl:col-span-5">
 			<UserManagementCard bind:userConfig {busy} {credentialsReady} {databases} onSave={saveUser} />
+			<label class="mt-2 flex items-start gap-2 text-sm" title="Explicitly select mysql_native_password for a game connector that requires it. Existing authentication methods will be replaced only after confirmation.">
+				<Checkbox bind:checked={nativePassword} disabled={busy} class="mt-1" />
+				<span>Game-user compatibility: mysql_native_password</span>
+			</label>
 		</div>
 		<div class="xl:col-span-7 xl:row-span-2">
 			<ExistingUsersCard
@@ -402,6 +432,12 @@
 				onSave={saveExistingUser}
 				onDelete={removeExistingUser}
 			/>
+			{#if editingUser}
+				<label class="mt-2 flex items-start gap-2 text-sm" title="Replaces existing authentication methods only after explicit confirmation.">
+					<Checkbox bind:checked={editNativePassword} disabled={busy} class="mt-1" />
+					<span>Change this user's authentication to mysql_native_password</span>
+				</label>
+			{/if}
 		</div>
 	</div>
 </section>

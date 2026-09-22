@@ -16,6 +16,8 @@ use crate::{
     },
 };
 
+pub use super::package::{list_releases, list_series};
+
 const INSTALL_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 
 pub fn install_mariadb(
@@ -23,10 +25,18 @@ pub fn install_mariadb(
     report: &dyn Fn(&str),
 ) -> Result<String, String> {
     report("Checking installation settings and preserved data.");
+    super::detect::clear_detection_cache();
+    if registry_installed_package().is_some() || detect_mariadb().installed {
+        return Err("MariaDB is already installed. Use Update for a compatible maintenance release; installation will not replace or downgrade an existing server.".into());
+    }
     let log_path = installer_log_path();
     let install_plan = build_install_plan(&options)?;
     let override_args = build_msi_overrides(&options, &install_plan, &log_path)?;
-    let output = run_msi_install(&override_args, report)?;
+    let package = super::package::resolve_package(options.version.as_deref())?;
+    if let InstallPlan::Reattach { data_dir, .. } = &install_plan {
+        validate_preserved_version(data_dir, &package.version)?;
+    }
+    let output = run_msi_install(&override_args, &package, report)?;
 
     if output.success {
         let installer_message = if output.stdout.is_empty() {
@@ -75,12 +85,27 @@ pub fn install_mariadb(
 }
 
 pub fn get_package_info() -> MariaDBPackageInfo {
-    let latest_version = super::package::latest_package()
-        .ok()
-        .map(|package| package.version);
     let installed_package_version = registry_installed_package()
         .and_then(|package| package.version)
         .or_else(|| detect_mariadb().version);
+    let requested = match installed_package_version.as_deref() {
+        Some(version) => series_of(version).ok_or_else(|| {
+            "Installed MariaDB version is unknown; automatic updates are disabled.".to_string()
+        }),
+        None if detect_mariadb().installed => {
+            Err("Installed MariaDB version is unknown; automatic updates are disabled.".into())
+        }
+        None => Ok(super::package::DEFAULT_SERIES.into()),
+    };
+    let resolved = requested.and_then(|series| {
+        if installed_package_version.is_some() {
+            super::package::resolve_update_package(&series)
+        } else {
+            super::package::resolve_package(Some(&series))
+        }
+    });
+    let error = resolved.as_ref().err().cloned();
+    let latest_version = resolved.ok().map(|package| package.version);
     let update_available = match (&installed_package_version, &latest_version) {
         (Some(installed), Some(latest)) => compare_versions(installed, latest).is_lt(),
         _ => false,
@@ -90,6 +115,7 @@ pub fn get_package_info() -> MariaDBPackageInfo {
         latest_version,
         installed_package_version,
         update_available,
+        error,
     }
 }
 
@@ -144,10 +170,28 @@ pub fn uninstall_mariadb(report: &dyn Fn(&str)) -> Result<String, String> {
 }
 
 pub fn update_mariadb(report: &dyn Fn(&str)) -> Result<String, String> {
-    let before = get_package_info().installed_package_version;
+    super::detect::clear_detection_cache();
+    let before = registry_installed_package().and_then(|p| p.version).ok_or(
+        "A known MariaDB MSI version is required for an automatic update. No changes were made.",
+    )?;
+    let detected = detect_mariadb()
+        .version
+        .ok_or("The installed server version could not be verified. No update was attempted.")?;
+    if !compare_versions(&before, &detected).is_eq() {
+        return Err("The MSI and detected MariaDB server versions differ. Resolve the multiple or inconsistent installation before updating.".into());
+    }
+    let series =
+        series_of(&before).ok_or("Installed MariaDB version is invalid. No changes were made.")?;
+    let package = super::package::resolve_update_package(&series)?;
+    validate_compatible_version(&before, &package.version)?;
+    if !compare_versions(&before, &package.version).is_lt() {
+        return Ok(format!(
+            "MariaDB {before} is already current in series {series}."
+        ));
+    }
     let log_path = installer_log_path();
     let override_args = build_update_overrides(&log_path);
-    let output = run_msi_install(&override_args, report)?;
+    let output = run_msi_install(&override_args, &package, report)?;
 
     if !output.success {
         let detail = if output.stderr.is_empty() {
@@ -159,12 +203,11 @@ pub fn update_mariadb(report: &dyn Fn(&str)) -> Result<String, String> {
     }
 
     report("Checking the installed MariaDB version.");
-    let after = wait_for_package_version_change(before.as_deref(), Duration::from_secs(60))
+    let after = wait_for_package_version_change(Some(&before), Duration::from_secs(60))
         .or_else(|| get_package_info().installed_package_version);
     if after.as_deref().is_none_or(|version| {
-        before
-            .as_deref()
-            .is_some_and(|old| !compare_versions(old, version).is_lt())
+        !compare_versions(&before, version).is_lt()
+            || !compare_versions(version, &package.version).is_eq()
     }) {
         return Err(format!(
             "MariaDB's installed version did not change. Check the MSI log before retrying: {}",
@@ -190,16 +233,18 @@ pub(super) struct InstallOutput {
     pub stderr: String,
 }
 
-fn run_msi_install(override_args: &str, report: &dyn Fn(&str)) -> Result<InstallOutput, String> {
-    report("Resolving the latest stable MariaDB Windows installer.");
-    let package = super::package::latest_package()?;
+fn run_msi_install(
+    override_args: &str,
+    package: &super::package::Package,
+    report: &dyn Fn(&str),
+) -> Result<InstallOutput, String> {
     let path = installer_log_path().with_extension("msi");
     let result = (|| {
         report(&format!(
             "Downloading MariaDB {} and verifying its SHA-256 checksum.",
             package.version
         ));
-        let download = super::package::download_package(&package, &path)?;
+        let download = super::package::download_package(package, &path)?;
         if !download.success {
             return Err(format!("MariaDB download failed: {}", download.stderr));
         }
@@ -304,24 +349,26 @@ fn run_elevated_mariadb_uninstall(
     log_path: &Path,
     timeout: Duration,
 ) -> Result<InstallOutput, String> {
+    super::service::validate_service_name(service_name)?;
     let escaped_product_code = product_code.replace('\'', "''");
     let escaped_service_name = service_name.replace('\'', "''");
     let escaped_log_path = log_path.to_string_lossy().replace('\'', "''");
     let script = format!(
-        r#"$ErrorActionPreference = 'SilentlyContinue'
+        r#"$ErrorActionPreference = 'Stop'
 $productCode = '{escaped_product_code}'
 $serviceName = '{escaped_service_name}'
 $logPath = '{escaped_log_path}'
 $process = Start-Process -WindowStyle Hidden -FilePath 'msiexec.exe' -ArgumentList @('/x', $productCode, '/qn', '/norestart', 'CLEANUPDATA=""', '/l*v', $logPath) -Wait -PassThru
 $exitCode = $process.ExitCode
 if ($exitCode -notin @(0, 1641, 3010)) {{ exit $exitCode }}
-$service = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
+$service = Get-Service -ErrorAction Stop | Where-Object {{ $_.Name -ceq $serviceName }}
 if ($service) {{
     if ($service.Status -ne 'Stopped') {{
-        Stop-Service -Name $serviceName -Force -ErrorAction SilentlyContinue
+        Stop-Service -InputObject $service -ErrorAction Stop
         $service.WaitForStatus('Stopped', [TimeSpan]::FromSeconds(30))
     }}
-    Start-Process -WindowStyle Hidden -FilePath 'sc.exe' -ArgumentList @('delete', $serviceName) -Wait | Out-Null
+    $delete = Start-Process -WindowStyle Hidden -FilePath 'sc.exe' -ArgumentList @('delete', $serviceName) -Wait -PassThru
+    if ($delete.ExitCode -ne 0) {{ exit $delete.ExitCode }}
 }}
 exit 0
 "#
@@ -330,7 +377,7 @@ exit 0
     run_elevated_powershell_script("mariadb-uninstall", &script, timeout)
 }
 
-fn run_elevated_powershell_script(
+pub(super) fn run_elevated_powershell_script(
     script_name: &str,
     script: &str,
     timeout: Duration,
@@ -409,6 +456,7 @@ fn wait_for_install_detection(timeout: Duration) -> Option<String> {
     let started = Instant::now();
 
     while started.elapsed() < timeout {
+        super::detect::clear_detection_cache();
         let status = detect_mariadb();
         if status.installed && status.service_name.is_some() {
             if !status.running {
@@ -452,6 +500,7 @@ fn wait_for_uninstall_detection(timeout: Duration) -> bool {
     let started = Instant::now();
 
     while started.elapsed() < timeout {
+        super::detect::clear_detection_cache();
         if !detect_mariadb().installed {
             return true;
         }
@@ -463,17 +512,19 @@ fn wait_for_uninstall_detection(timeout: Duration) -> bool {
 }
 
 fn cleanup_mariadb_service(service_name: &str) -> Result<(), String> {
+    super::service::validate_service_name(service_name)?;
     let escaped_service_name = service_name.replace('\'', "''");
     let script = format!(
-        r#"$ErrorActionPreference = 'SilentlyContinue'
+        r#"$ErrorActionPreference = 'Stop'
 $serviceName = '{escaped_service_name}'
-$service = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
+$service = Get-Service -ErrorAction Stop | Where-Object {{ $_.Name -ceq $serviceName }}
 if ($service) {{
     if ($service.Status -ne 'Stopped') {{
-        Stop-Service -Name $serviceName -Force -ErrorAction SilentlyContinue
+        Stop-Service -InputObject $service -ErrorAction Stop
         $service.WaitForStatus('Stopped', [TimeSpan]::FromSeconds(30))
     }}
-    Start-Process -WindowStyle Hidden -FilePath 'sc.exe' -ArgumentList @('delete', $serviceName) -Wait | Out-Null
+    $delete = Start-Process -WindowStyle Hidden -FilePath 'sc.exe' -ArgumentList @('delete', $serviceName) -Wait -PassThru
+    if ($delete.ExitCode -ne 0) {{ exit $delete.ExitCode }}
 }}
 exit 0
 "#
@@ -614,10 +665,20 @@ enum InstallPlan {
 }
 
 fn build_install_plan(options: &MariaDBInstallOptions) -> Result<InstallPlan, String> {
-    let Some(data_dir) = install_data_dir_candidates(options)
-        .into_iter()
-        .find(|path| path.exists() && !is_directory_empty(path).unwrap_or(false))
-    else {
+    let mut preserved = Vec::new();
+    for path in install_data_dir_candidates(options) {
+        if path
+            .try_exists()
+            .map_err(|e| format!("Cannot inspect {}: {e}", path.display()))?
+            && !is_directory_empty(&path)?
+        {
+            preserved.push(path);
+        }
+    }
+    if preserved.len() > 1 {
+        return Err("Multiple preserved MariaDB data directories were found. Select the intended Data Directory explicitly; no data was changed.".into());
+    }
+    let Some(data_dir) = preserved.pop() else {
         return Ok(InstallPlan::Fresh);
     };
 
@@ -633,7 +694,7 @@ fn build_msi_overrides(
     install_plan: &InstallPlan,
     log_path: &Path,
 ) -> Result<String, String> {
-    if options.root_password.trim().is_empty() {
+    if matches!(install_plan, InstallPlan::Fresh) && options.root_password.trim().is_empty() {
         return Err("Root password is required for a configured MariaDB install.".to_string());
     }
 
@@ -646,6 +707,7 @@ fn build_msi_overrides(
     {
         return Err("Service name must contain only letters, digits, hyphens, or underscores (1-64 characters).".to_string());
     }
+    super::service::validate_service_name(&options.service_name)?;
 
     let mut properties = vec![
         "/qn".to_string(),
@@ -830,7 +892,7 @@ fn run_elevated_fresh_database_init(
 $installDbPath = '{escaped_install_db_path}'
 $dataDir = '{escaped_data_dir}'
 $serviceName = '{escaped_service_name}'
-$service = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
+$service = Get-Service -ErrorAction Stop | Where-Object {{ $_.Name -ceq $serviceName }}
 if ($service) {{
     throw "The selected service already exists. Fresh initialization will not replace it."
 }}
@@ -850,7 +912,7 @@ if ($start.ExitCode -ne 0) {{
 }}
 $deadline = (Get-Date).AddSeconds(45)
 do {{
-    $service = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
+    $service = Get-Service -ErrorAction Stop | Where-Object {{ $_.Name -ceq $serviceName }}
     if ($service -and $service.Status -eq 'Running') {{
         exit 0
     }}
@@ -873,7 +935,7 @@ fn install_validation_message(
         ),
         InstallPlan::Fresh => validate_fresh_root_password(options),
         InstallPlan::Reattach { data_dir, .. } => Ok(format!(
-            "\nExisting MariaDB data was reattached from {}. Local root accounts were reset to the installer password.",
+            "\nExisting MariaDB data was reattached from {}. Existing accounts and authentication were preserved; use the original credentials.",
             data_dir.display()
         )),
     }
@@ -1019,13 +1081,13 @@ fn default_mariadb_data_dirs() -> Vec<PathBuf> {
                 let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
                     continue;
                 };
-                if name.to_ascii_lowercase().starts_with("mariadb ") {
+                if name.eq_ignore_ascii_case("mariadb")
+                    || name.to_ascii_lowercase().starts_with("mariadb ")
+                {
                     paths.push(path.join("data"));
                 }
             }
         }
-
-        paths.push(root.join("MariaDB 12.2").join("data"));
     }
 
     paths.sort_by(|left, right| {
@@ -1064,7 +1126,10 @@ fn mariadb_data_dir_version(path: &Path) -> Vec<u32> {
 
 fn is_directory_empty(path: &Path) -> Result<bool, String> {
     if !path.is_dir() {
-        return Ok(true);
+        return Err(format!(
+            "Expected a directory at {}; no data was changed.",
+            path.display()
+        ));
     }
 
     let mut entries = std::fs::read_dir(path).map_err(|error| {
@@ -1109,20 +1174,8 @@ fn reattach_preserved_data(
             service_name = options.service_name
         ));
     }
-    let reset_output = run_elevated_reset_preserved_root_password(options, &my_ini)?;
-    if !reset_output.success {
-        return Err(format!(
-            "MariaDB preserved data was reattached, but the root password could not be reset: {}",
-            if reset_output.stderr.is_empty() {
-                reset_output.stdout
-            } else {
-                reset_output.stderr
-            }
-        ));
-    }
-
     Ok(format!(
-        "Preserved data was reattached from {} using binaries in {}, and local root password was reset.",
+        "Preserved data was reattached from {} using binaries in {}. Existing credentials were preserved.",
         data_dir.display(),
         install_dir.display()
     ))
@@ -1153,22 +1206,18 @@ fn run_elevated_reattach_service(
     service_name: &str,
     my_ini: &Path,
 ) -> Result<InstallOutput, String> {
+    super::service::validate_service_name(service_name)?;
     let escaped_mysqld_path = mysqld_path.to_string_lossy().replace('\'', "''");
     let escaped_service_name = service_name.replace('\'', "''");
     let escaped_my_ini = my_ini.to_string_lossy().replace('\'', "''");
     let script = format!(
-        r#"$ErrorActionPreference = 'SilentlyContinue'
+        r#"$ErrorActionPreference = 'Stop'
 $mysqldPath = '{escaped_mysqld_path}'
 $serviceName = '{escaped_service_name}'
 $myIni = '{escaped_my_ini}'
-$service = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
+$service = Get-Service -ErrorAction Stop | Where-Object {{ $_.Name -ceq $serviceName }}
 if ($service) {{
-    if ($service.Status -ne 'Stopped') {{
-        Stop-Service -Name $serviceName -Force -ErrorAction SilentlyContinue
-        $service.WaitForStatus('Stopped', [TimeSpan]::FromSeconds(30))
-    }}
-    Start-Process -WindowStyle Hidden -FilePath 'sc.exe' -ArgumentList @('delete', $serviceName) -Wait | Out-Null
-    Start-Sleep -Seconds 2
+    throw 'The selected service already exists. Reattachment will not replace it.'
 }}
 $install = Start-Process -WindowStyle Hidden -FilePath $mysqldPath -ArgumentList @('--install', $serviceName, "--defaults-file=`"$myIni`"") -Wait -PassThru
 if ($install.ExitCode -ne 0) {{
@@ -1180,7 +1229,7 @@ if ($start.ExitCode -ne 0) {{
 }}
 $deadline = (Get-Date).AddSeconds(45)
 do {{
-    $service = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
+    $service = Get-Service -ErrorAction Stop | Where-Object {{ $_.Name -ceq $serviceName }}
     if ($service -and $service.Status -eq 'Running') {{
         exit 0
     }}
@@ -1195,100 +1244,6 @@ exit 1
         &script,
         Duration::from_secs(180),
     )
-}
-
-fn run_elevated_reset_preserved_root_password(
-    options: &MariaDBInstallOptions,
-    my_ini: &Path,
-) -> Result<InstallOutput, String> {
-    let script = preserved_root_reset_script(options, my_ini);
-    run_elevated_powershell_script(
-        "mariadb-reset-preserved-root",
-        &script,
-        Duration::from_secs(180),
-    )
-}
-
-fn preserved_root_reset_script(options: &MariaDBInstallOptions, my_ini: &Path) -> String {
-    let escaped_service_name = options.service_name.replace('\'', "''");
-    let escaped_my_ini = my_ini.to_string_lossy().replace('\'', "''");
-    let root_password = sql_string_literal(&options.root_password).replace('\'', "''");
-    format!(
-        r#"$ErrorActionPreference = 'Stop'
-$serviceName = '{escaped_service_name}'
-$myIni = '{escaped_my_ini}'
-$rootPasswordSql = '{root_password}'
-$machineHost = [System.Net.Dns]::GetHostName().ToLowerInvariant().Replace("'", "''")
-$initFile = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), "fxserver-mariadb-reset-root-$([System.Guid]::NewGuid().ToString('N')).sql")
-$originalConfig = [System.IO.File]::ReadAllText($myIni)
-$initPathForIni = $initFile.Replace('\', '/')
-$sql = @"
-CREATE USER IF NOT EXISTS 'root'@'localhost';
-GRANT ALL PRIVILEGES ON *.* TO 'root'@'localhost' WITH GRANT OPTION;
-ALTER USER 'root'@'localhost' IDENTIFIED BY $rootPasswordSql;
-CREATE USER IF NOT EXISTS 'root'@'127.0.0.1';
-GRANT ALL PRIVILEGES ON *.* TO 'root'@'127.0.0.1' WITH GRANT OPTION;
-ALTER USER 'root'@'127.0.0.1' IDENTIFIED BY $rootPasswordSql;
-CREATE USER IF NOT EXISTS 'root'@'::1';
-GRANT ALL PRIVILEGES ON *.* TO 'root'@'::1' WITH GRANT OPTION;
-ALTER USER 'root'@'::1' IDENTIFIED BY $rootPasswordSql;
-CREATE USER IF NOT EXISTS 'root'@'$machineHost';
-GRANT ALL PRIVILEGES ON *.* TO 'root'@'$machineHost' WITH GRANT OPTION;
-ALTER USER 'root'@'$machineHost' IDENTIFIED BY $rootPasswordSql;
-FLUSH PRIVILEGES;
-"@
-$utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-[System.IO.File]::WriteAllText($initFile, $sql, $utf8NoBom)
-try {{
-    $service = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
-    if ($service -and $service.Status -ne 'Stopped') {{
-        Stop-Service -Name $serviceName -Force -ErrorAction SilentlyContinue
-        $service.WaitForStatus('Stopped', [TimeSpan]::FromSeconds(30))
-    }}
-    [System.IO.File]::WriteAllText($myIni, $originalConfig.TrimEnd() + "`r`n`r`n[mysqld]`r`ninit-file=$initPathForIni`r`n", $utf8NoBom)
-    $start = Start-Process -WindowStyle Hidden -FilePath 'sc.exe' -ArgumentList @('start', $serviceName) -Wait -PassThru
-    if ($start.ExitCode -ne 0) {{
-        exit $start.ExitCode
-    }}
-    $deadline = (Get-Date).AddSeconds(45)
-    do {{
-        $service = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
-        if ($service -and $service.Status -eq 'Running') {{
-            break
-        }}
-        Start-Sleep -Seconds 1
-    }} while ((Get-Date) -lt $deadline)
-    $service = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
-    if (-not $service -or $service.Status -ne 'Running') {{
-        Write-Error "MariaDB service did not start while resetting root password."
-        exit 73
-    }}
-    Stop-Service -Name $serviceName -Force -ErrorAction SilentlyContinue
-    $service.WaitForStatus('Stopped', [TimeSpan]::FromSeconds(30))
-    [System.IO.File]::WriteAllText($myIni, $originalConfig, $utf8NoBom)
-    $restart = Start-Process -WindowStyle Hidden -FilePath 'sc.exe' -ArgumentList @('start', $serviceName) -Wait -PassThru
-    if ($restart.ExitCode -ne 0) {{
-        exit $restart.ExitCode
-    }}
-    $deadline = (Get-Date).AddSeconds(45)
-    do {{
-        $service = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
-        if ($service -and $service.Status -eq 'Running') {{
-            exit 0
-        }}
-        Start-Sleep -Seconds 1
-    }} while ((Get-Date) -lt $deadline)
-    exit 74
-}} finally {{
-    [System.IO.File]::WriteAllText($myIni, $originalConfig, $utf8NoBom)
-    Remove-Item -LiteralPath $initFile -Force -ErrorAction SilentlyContinue
-}}
-"#
-    )
-}
-
-fn sql_string_literal(value: &str) -> String {
-    format!("'{}'", value.replace('\\', "\\\\").replace('\'', "''"))
 }
 
 fn wait_for_service_running(service_name: &str, timeout: Duration) -> bool {
@@ -1599,18 +1554,97 @@ fn numeric_version_parts(value: &str) -> Vec<u32> {
         .unwrap_or(value);
 
     version
-        .split(|character: char| !character.is_ascii_digit())
-        .filter(|part| !part.is_empty())
-        .filter_map(|part| part.parse::<u32>().ok())
-        .collect()
+        .split_whitespace()
+        .find_map(|token| {
+            let numeric = token.split('-').next()?.trim_end_matches(',');
+            let parts: Option<Vec<u32>> =
+                numeric.split('.').map(|part| part.parse().ok()).collect();
+            parts.filter(|p| (2..=4).contains(&p.len()))
+        })
+        .unwrap_or_default()
+}
+
+fn series_of(value: &str) -> Option<String> {
+    let parts = numeric_version_parts(value);
+    (parts.len() >= 3).then(|| format!("{}.{}", parts[0], parts[1]))
+}
+
+fn validate_compatible_version(previous: &str, target: &str) -> Result<(), String> {
+    let previous_series = series_of(previous)
+        .ok_or("Cannot establish the previous MariaDB version. No data was changed.")?;
+    if Some(previous_series) != series_of(target) || compare_versions(target, previous).is_lt() {
+        return Err(format!("Refusing to use MariaDB {target} with data from {previous}. Downgrades and cross-series replacements require a backed-up migration."));
+    }
+    Ok(())
+}
+
+fn validate_preserved_version(data_dir: &Path, target: &str) -> Result<(), String> {
+    let mut versions = Vec::new();
+    for file in ["mysql_upgrade_info", "mariadb_upgrade_info"] {
+        let path = data_dir.join(file);
+        match fs::read_to_string(&path) {
+            Ok(value) if value.len() <= 256 && series_of(value.trim()).is_some() => {
+                versions.push(value.trim().to_string())
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            _ => {
+                return Err(format!(
+                    "Cannot read version evidence at {}. No preserved data was changed.",
+                    path.display()
+                ))
+            }
+        }
+    }
+    // Upgrade markers can lag a maintenance release; also inspect the last server startup logs.
+    for entry in
+        fs::read_dir(data_dir).map_err(|e| format!("Cannot inspect preserved data: {e}"))?
+    {
+        let path = entry.map_err(|e| e.to_string())?.path();
+        if path.extension().is_some_and(|ext| ext == "err") {
+            use std::io::{Seek, SeekFrom};
+            let mut file = fs::File::open(&path)
+                .map_err(|e| format!("Cannot inspect {}: {e}", path.display()))?;
+            let len = file.metadata().map_err(|e| e.to_string())?.len();
+            file.seek(SeekFrom::Start(len.saturating_sub(256 * 1024)))
+                .map_err(|e| e.to_string())?;
+            let mut tail = Vec::new();
+            file.take(256 * 1024)
+                .read_to_end(&mut tail)
+                .map_err(|e| e.to_string())?;
+            for line in String::from_utf8_lossy(&tail).lines() {
+                if let Some((_, rest)) = line.split_once("Version: '") {
+                    if let Some(version) =
+                        rest.split('\'').next().filter(|v| series_of(v).is_some())
+                    {
+                        versions.push(version.to_string());
+                    }
+                }
+            }
+        }
+    }
+    if versions.is_empty() {
+        return Err("Preserved data version is unknown. Restore a verified backup or establish its server version before reattaching; no data was changed.".into());
+    }
+    for version in versions {
+        validate_compatible_version(&version, target)?;
+    }
+    let directory_version = mariadb_data_dir_version(data_dir);
+    let target_parts = numeric_version_parts(target);
+    if directory_version.len() >= 2 && directory_version[..2] != target_parts[..2] {
+        return Err(
+            "Preserved directory and selected server series differ. Use a backed-up migration."
+                .into(),
+        );
+    }
+    Ok(())
 }
 
 fn extract_json_string(json: &str, key: &str) -> Option<String> {
-    let marker = format!("\"{key}\":\"");
-    let start = json.find(&marker)? + marker.len();
-    let rest = &json[start..];
-    let end = rest.find('"')?;
-    Some(rest[..end].replace("\\\"", "\"").replace("\\\\", "\\"))
+    serde_json::from_str::<serde_json::Value>(json)
+        .ok()?
+        .get(key)?
+        .as_str()
+        .map(str::to_string)
 }
 
 #[cfg(test)]
@@ -1697,41 +1731,54 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(5));
     }
 
-    #[cfg(windows)]
     #[test]
-    fn preserved_password_is_literal_and_reset_does_not_delete_user_data() {
-        let mut options = options();
-        options.root_password =
-            "fixture'$(throw 'expanded')`n$env:USERNAME\n\"@\nthrow 'escaped'".into();
-        let script = preserved_root_reset_script(&options, Path::new("unused.ini"));
-        assert!(!script.contains("DROP DATABASE"));
-        assert!(!script.contains("DELETE FROM"));
-        // Evaluate only the two string assignments, never the service or file operations.
-        let assignment = script
-            .split_once("$rootPasswordSql = ")
-            .unwrap()
-            .1
-            .split_once("$machineHost = ")
-            .unwrap()
-            .0;
-        let sql = script
-            .split_once("$sql = @\"")
-            .unwrap()
-            .1
-            .split_once("\n\"@")
-            .unwrap()
-            .0;
-        let inert = format!("$ErrorActionPreference = 'Stop'; $rootPasswordSql = {assignment}\n$machineHost = 'fixture';\n$sql = @\"{sql}\n\"@\n[Console]::Out.Write($sql)");
-        let output = run_process(
-            "powershell",
-            &["-NoProfile", "-Command", &inert],
-            Duration::from_secs(15),
+    fn updates_and_reattachment_refuse_downgrades_or_unknown_versions() {
+        for (old, new) in [
+            ("11.8.3", "11.4.13"),
+            ("11.4.13", "11.4.12"),
+            ("10.11.14", "11.4.13"),
+            ("unknown", "11.4.13"),
+            ("11.4", "11.4.13"),
+        ] {
+            assert!(validate_compatible_version(old, new).is_err());
+        }
+        assert!(validate_compatible_version("11.4.12.0", "11.4.13").is_ok());
+        assert!(validate_compatible_version(
+            "mariadb Ver 15.1 Distrib 11.4.13-MariaDB, for Win64",
+            "11.4.13"
+        )
+        .is_ok());
+        assert_eq!(series_of("11.8.3.0").as_deref(), Some("11.8"));
+        assert_eq!(series_of("unknown"), None);
+    }
+
+    #[test]
+    fn preserved_data_requires_version_evidence_and_honors_newer_logs() {
+        let root = env::temp_dir().join(format!(
+            "fxi-version-evidence-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&root).unwrap();
+        assert!(validate_preserved_version(&root, "11.4.13").is_err());
+        fs::write(root.join("mysql_upgrade_info"), "11.4.11-MariaDB").unwrap();
+        assert!(validate_preserved_version(&root, "11.4.13").is_ok());
+        fs::write(
+            root.join("server.err"),
+            "Version: '11.4.14-MariaDB' socket: '' port: 3306",
         )
         .unwrap();
-        assert!(output.success, "{}", output.stderr);
-        assert!(output
-            .stdout
-            .contains(&sql_string_literal(&options.root_password)));
+        assert!(validate_preserved_version(&root, "11.4.13").is_err());
+        assert!(validate_preserved_version(&root, "12.3.3").is_err());
+        assert_eq!(
+            fs::read_to_string(root.join("mysql_upgrade_info")).unwrap(),
+            "11.4.11-MariaDB"
+        );
+        fs::remove_file(root.join("mysql_upgrade_info")).unwrap();
+        fs::remove_file(root.join("server.err")).unwrap();
+        fs::remove_dir(root).unwrap();
     }
 
     #[cfg(windows)]
@@ -1802,6 +1849,7 @@ mod tests {
 
     fn options() -> MariaDBInstallOptions {
         MariaDBInstallOptions {
+            version: None,
             root_password: "secret".to_string(),
             service_name: "MariaDB".to_string(),
             port: 3306,

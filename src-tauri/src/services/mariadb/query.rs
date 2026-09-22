@@ -3,7 +3,8 @@ use std::{
     io::{Read, Write},
     net::IpAddr,
     path::PathBuf,
-    process::{Command, Stdio},
+    process::{Command, ExitStatus, Stdio},
+    sync::mpsc,
     thread,
     time::{Duration, Instant},
 };
@@ -14,6 +15,9 @@ pub(crate) use credential_file::CredentialFile;
 
 const MAX_QUERY_BYTES: usize = 10 * 1024 * 1024;
 const MAX_QUERY_OUTPUT: usize = 16 * 1024 * 1024;
+const MAX_QUERY_ROWS: usize = 10_000;
+const MAX_QUERY_CELLS: usize = 100_000;
+pub(crate) const QUERY_TIMEOUT: Duration = Duration::from_secs(30);
 
 use crate::models::mariadb::{MariaDBCredentials, MariaDBQueryResult};
 use crate::process::CommandNoWindowExt;
@@ -30,22 +34,35 @@ pub fn execute_query(
         return Err("Query exceeds the 10 MiB input limit.".into());
     }
 
-    let client = find_mariadb_client().ok_or_else(|| {
-        "Could not find mariadb.exe. Install MariaDB or add its bin folder to PATH.".to_string()
-    })?;
-
-    let mut command = Command::new(client);
-    command.no_window();
-    let _credentials_file = apply_credentials_args(&mut command, &credentials)?;
+    let (mut command, _credentials_file) = configured_client(&credentials)?;
     configure_query_command(&mut command, credentials.database.as_deref())?;
-    let mut result = run_query_client(&mut command, query, Duration::from_secs(30))?;
+    let mut result = run_query_client(&mut command, query, QUERY_TIMEOUT)?;
     if !credentials.password.is_empty() {
         result.stderr = result.stderr.replace(&credentials.password, "[redacted]");
     }
     Ok(result)
 }
 
-fn configure_query_command(command: &mut Command, database: Option<&str>) -> Result<(), String> {
+pub(crate) fn configured_client(
+    credentials: &MariaDBCredentials,
+) -> Result<(Command, CredentialFile), String> {
+    #[cfg(all(test, windows))]
+    if let Some(client) = crate::commands::database_browser::isolated_test_client(credentials) {
+        return client;
+    }
+    let client = find_mariadb_client().ok_or_else(|| {
+        "Could not find mariadb.exe. Install MariaDB or add its bin folder to PATH.".to_string()
+    })?;
+    let mut command = Command::new(client);
+    command.no_window();
+    let guard = apply_credentials_args(&mut command, credentials)?;
+    Ok((command, guard))
+}
+
+pub(crate) fn configure_query_command(
+    command: &mut Command,
+    database: Option<&str>,
+) -> Result<(), String> {
     command.args([
         "--batch",
         "--raw",
@@ -76,11 +93,45 @@ fn bounded_output(mut stream: impl Read) -> Result<Vec<u8>, String> {
     Ok(output)
 }
 
+fn read_client_output(stream: impl Read, failed: mpsc::Sender<String>) -> Result<Vec<u8>, String> {
+    let result = bounded_output(stream);
+    if let Err(error) = &result {
+        let _ = failed.send(error.clone());
+    }
+    result
+}
+
 fn run_query_client(
     command: &mut Command,
     query: String,
     timeout: Duration,
 ) -> Result<MariaDBQueryResult, String> {
+    let output = run_client(command, query, timeout)?;
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let (columns, rows) = parse_tabular_output(&stdout)?;
+    Ok(MariaDBQueryResult {
+        success: output.status.success(),
+        stdout,
+        stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        columns,
+        rows,
+    })
+}
+
+pub(crate) struct ClientOutput {
+    pub status: ExitStatus,
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+}
+
+/// Executes exactly once, including on transport failure or uncertain commit status.
+/// The deadline covers stdin and both output streams, not just process exit.
+pub(crate) fn run_client(
+    command: &mut Command,
+    query: String,
+    timeout: Duration,
+) -> Result<ClientOutput, String> {
+    let started = Instant::now();
     let mut child = command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -91,26 +142,33 @@ fn run_query_client(
     let stdout = child.stdout.take().expect("piped stdout");
     let stderr = child.stderr.take().expect("piped stderr");
     let mut stdin = child.stdin.take().expect("piped stdin");
-    let output = thread::spawn(move || bounded_output(stdout));
-    let errors = thread::spawn(move || bounded_output(stderr));
+    let (failed, failures) = mpsc::channel();
+    let stdout_failed = failed.clone();
+    let output = thread::spawn(move || read_client_output(stdout, stdout_failed));
+    let errors = thread::spawn(move || read_client_output(stderr, failed));
     let input = thread::spawn(move || stdin.write_all(query.as_bytes()));
-    let started = Instant::now();
     let status = loop {
+        let failure = failures.try_recv().ok().or_else(|| {
+            (started.elapsed() >= timeout).then(|| "Database query timed out.".to_string())
+        });
+        if let Some(error) = failure {
+            let _ = crate::commands::fxserver::terminate_process_tree(child.id());
+            let _ = child.kill();
+            let _ = child.wait();
+            break Err(error);
+        }
         match child.try_wait() {
             Ok(Some(status))
                 if output.is_finished() && errors.is_finished() && input.is_finished() =>
             {
                 break Ok(status)
             }
-            Ok(_) if started.elapsed() < timeout => thread::sleep(Duration::from_millis(25)),
-            outcome => {
+            Ok(_) => thread::sleep(Duration::from_millis(25)),
+            Err(error) => {
                 let _ = crate::commands::fxserver::terminate_process_tree(child.id());
                 let _ = child.kill();
                 let _ = child.wait();
-                break Err(match outcome {
-                    Err(error) => format!("Cannot wait for MariaDB client: {error}"),
-                    _ => "Database query timed out.".into(),
-                });
+                break Err(format!("Cannot wait for MariaDB client: {error}"));
             }
         }
     };
@@ -122,15 +180,10 @@ fn run_query_client(
     if status.success() {
         written.map_err(|_| "Could not send the complete database query.")?;
     }
-    let stdout = String::from_utf8_lossy(&stdout).trim().to_string();
-    let (columns, rows) = parse_tabular_output(&stdout);
-
-    Ok(MariaDBQueryResult {
-        success: status.success(),
+    Ok(ClientOutput {
+        status,
         stdout,
-        stderr: String::from_utf8_lossy(&stderr).trim().to_string(),
-        columns,
-        rows,
+        stderr,
     })
 }
 
@@ -199,6 +252,25 @@ pub(crate) fn apply_credentials_args(
     command: &mut Command,
     credentials: &MariaDBCredentials,
 ) -> Result<CredentialFile, String> {
+    configure_credentials_args(command, credentials, "--defaults-extra-file=")
+}
+
+#[cfg(all(test, windows))]
+pub(crate) fn isolated_credentials_args(
+    command: &mut Command,
+    credentials: &MariaDBCredentials,
+) -> Result<CredentialFile, String> {
+    if credentials.host != "127.0.0.1" {
+        return Err("Isolated tests require literal IPv4 loopback.".into());
+    }
+    configure_credentials_args(command, credentials, "--defaults-file=")
+}
+
+fn configure_credentials_args(
+    command: &mut Command,
+    credentials: &MariaDBCredentials,
+    option_file_argument: &str,
+) -> Result<CredentialFile, String> {
     if command.get_args().next().is_some() {
         return Err("The credential option file must be the first MariaDB argument.".into());
     }
@@ -216,7 +288,7 @@ pub(crate) fn apply_credentials_args(
         option_value(&credentials.password)?
     );
     let guard = CredentialFile::create(&contents)?;
-    let mut option = OsString::from("--defaults-extra-file=");
+    let mut option = OsString::from(option_file_argument);
     option.push(guard.path());
     command
         .arg(option)
@@ -269,19 +341,44 @@ pub(crate) fn validate_database_argument(value: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Installer/service callers must clear discovery before and after replacement/removal.
+pub(crate) fn clear_client_cache() {
+    super::read_cache::reset();
+}
+
 pub(crate) fn find_mariadb_client() -> Option<String> {
+    super::read_cache::find(find_mariadb_client_uncached)
+        .map(|path| path.to_string_lossy().into_owned())
+}
+
+fn find_mariadb_client_uncached() -> Option<PathBuf> {
     if let Some(install_path) = get_install_path() {
         let client_path = PathBuf::from(install_path).join("bin").join("mariadb.exe");
-        if client_path.exists() {
-            return Some(client_path.to_string_lossy().to_string());
+        if client_path.is_file() {
+            return client_path.canonicalize().ok();
         }
     }
 
-    for command in ["mariadb", "mariadb.exe"] {
-        if let Ok(output) = Command::new(command).no_window().arg("--version").output() {
-            let version = String::from_utf8_lossy(&output.stdout).to_lowercase();
-            if output.status.success() && version.contains("mariadb") {
-                return Some(command.to_string());
+    // Resolve PATH once. Never cache a bare command that Windows can later resolve
+    // against a different working directory or PATH, and never search the CWD implicitly.
+    let search_path = std::env::var_os("PATH")?;
+    for directory in std::env::split_paths(&search_path).filter(|path| path.is_absolute()) {
+        let candidate = directory.join("mariadb.exe");
+        if !candidate.is_file() {
+            continue;
+        }
+        let Ok(candidate) = candidate.canonicalize() else {
+            continue;
+        };
+        let mut command = Command::new(&candidate);
+        command.no_window().arg("--version");
+        if let Ok(output) = run_client(&mut command, String::new(), Duration::from_secs(2)) {
+            if output.status.success()
+                && String::from_utf8_lossy(&output.stdout)
+                    .to_lowercase()
+                    .contains("mariadb")
+            {
+                return Some(candidate);
             }
         }
     }
@@ -289,22 +386,37 @@ pub(crate) fn find_mariadb_client() -> Option<String> {
     None
 }
 
-fn parse_tabular_output(stdout: &str) -> (Vec<String>, Vec<Vec<String>>) {
+fn parse_tabular_output(stdout: &str) -> Result<(Vec<String>, Vec<Vec<String>>), String> {
     let mut lines = stdout.lines();
     let Some(header) = lines.next() else {
-        return (Vec::new(), Vec::new());
+        return Ok((Vec::new(), Vec::new()));
     };
 
     if !header.contains('\t') && lines.clone().next().is_none() {
-        return (Vec::new(), Vec::new());
+        return Ok((Vec::new(), Vec::new()));
     }
 
-    let columns = header.split('\t').map(str::to_string).collect();
-    let rows = lines
-        .map(|line| line.split('\t').map(str::to_string).collect())
-        .collect();
-
-    (columns, rows)
+    let mut cells = 0;
+    let mut parse_line = |line: &str| -> Result<Vec<String>, String> {
+        line.split('\t')
+            .map(|value| {
+                cells += 1;
+                if cells > MAX_QUERY_CELLS {
+                    return Err("Query exceeded 100,000 result cells. Narrow the query.".into());
+                }
+                Ok(value.to_string())
+            })
+            .collect()
+    };
+    let columns = parse_line(header)?;
+    let mut rows = Vec::new();
+    for line in lines {
+        if rows.len() >= MAX_QUERY_ROWS {
+            return Err("Query returned more than 10,000 rows. Narrow the query.".into());
+        }
+        rows.push(parse_line(line)?);
+    }
+    Ok((columns, rows))
 }
 
 #[cfg(test)]
@@ -371,6 +483,21 @@ mod tests {
             .get_args()
             .any(|arg| arg == "--database=my database"));
         assert!(!command.get_args().any(|arg| arg == "-e"));
+    }
+
+    #[test]
+    fn all_query_paths_disable_local_infile_and_reconnect_without_clearing_modes() {
+        let mut command = Command::new("inert");
+        configure_query_command(&mut command, None).unwrap();
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy())
+            .collect::<Vec<_>>();
+        assert!(args.iter().any(|arg| arg == "--local-infile=0"));
+        assert!(args.iter().any(|arg| arg == "--skip-reconnect"));
+        assert!(!args.iter().any(|arg| arg.contains("sql_mode")));
+        assert!(!args.iter().any(|arg| arg.contains("--ssl=0")));
+        assert_eq!(QUERY_TIMEOUT, Duration::from_secs(30));
     }
 
     #[cfg(windows)]
@@ -444,9 +571,83 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(5));
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn output_overflow_terminates_a_client_that_keeps_running() {
+        for stream in ["Out", "Error"] {
+            let mut command = Command::new("powershell");
+            command.no_window().args([
+                "-NoProfile",
+                "-Command",
+                &format!(
+                    "[Console]::{stream}.Write(('x' * {})); Start-Sleep -Seconds 30",
+                    MAX_QUERY_OUTPUT + 1
+                ),
+            ]);
+            let started = Instant::now();
+            let result = run_client(&mut command, String::new(), Duration::from_secs(10));
+            assert!(result.err().unwrap().contains("exceeded 16 MiB"));
+            assert!(started.elapsed() < Duration::from_secs(8));
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn blocked_input_is_covered_by_the_same_deadline() {
+        let mut command = Command::new("powershell");
+        command
+            .no_window()
+            .args(["-NoProfile", "-Command", "Start-Sleep -Seconds 30"]);
+        let started = Instant::now();
+        let result = run_client(
+            &mut command,
+            "x".repeat(MAX_QUERY_BYTES),
+            Duration::from_millis(200),
+        );
+        assert!(result.err().unwrap().contains("timed out"));
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn submitted_sql_is_never_replayed_after_client_failure() {
+        let counter = std::env::temp_dir().join(format!(
+            "fxi-query-once-{}.txt",
+            crate::commands::backup_manager::storage::unique_id()
+        ));
+        let mut command = Command::new("powershell");
+        command.no_window().env("FXI_TEST_COUNTER", &counter).args([
+            "-NoProfile", "-Command",
+            "[Console]::In.ReadToEnd() | Out-Null; [IO.File]::AppendAllText($env:FXI_TEST_COUNTER, 'submitted'); [Console]::Error.Write('fixture transport failed'); exit 1",
+        ]);
+        let result = run_client(
+            &mut command,
+            "fixture SQL never sent to a database".into(),
+            Duration::from_secs(10),
+        )
+        .unwrap();
+        let submissions = std::fs::read_to_string(&counter).unwrap();
+        std::fs::remove_file(counter).unwrap();
+        assert!(!result.status.success());
+        assert_eq!(submissions, "submitted");
+        assert_eq!(result.stderr, b"fixture transport failed");
+    }
+
     #[test]
     fn query_output_has_a_hard_limit() {
         assert!(bounded_output(std::io::repeat(b'x').take((MAX_QUERY_OUTPUT + 1) as u64)).is_err());
+    }
+
+    #[test]
+    fn tabular_parsing_bounds_small_row_and_cell_allocations() {
+        let (columns, rows) = parse_tabular_output("name\tvalue\nfixture\t1").unwrap();
+        assert_eq!(columns, ["name", "value"]);
+        assert_eq!(rows, [vec!["fixture", "1"]]);
+        assert!(parse_tabular_output(&format!("name\n{}", "x\n".repeat(MAX_QUERY_ROWS))).is_ok());
+        assert!(
+            parse_tabular_output(&format!("name\n{}", "x\n".repeat(MAX_QUERY_ROWS + 1))).is_err()
+        );
+        assert!(parse_tabular_output(&"\t".repeat(MAX_QUERY_CELLS)).is_err());
     }
 
     #[cfg(windows)]

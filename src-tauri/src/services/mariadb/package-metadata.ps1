@@ -1,23 +1,12 @@
-$ErrorActionPreference = 'Stop'
-$ProgressPreference = 'SilentlyContinue'
-[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-$api = 'https://downloads.mariadb.org/rest-api/mariadb'
-
 try {
-    $index = Invoke-RestMethod -Uri "$api/" -TimeoutSec 30
-    $series = $index.major_releases |
-        Where-Object { $_.release_status -eq 'Stable' -and $_.release_id -match '^\d+\.\d+$' } |
-        Sort-Object { [version]$_.release_id } -Descending |
-        Select-Object -First 1
-    if (-not $series) { throw 'No stable MariaDB release was found.' }
-
-    $metadata = Invoke-RestMethod -Uri "$api/$($series.release_id)/latest/" -TimeoutSec 30
-    $release = $metadata.releases.PSObject.Properties.Value | Select-Object -First 1
-    $file = $release.files |
-        Where-Object { $_.os -eq 'Windows' -and $_.cpu -eq 'x86_64' -and $_.file_name -match '-winx64\.msi$' } |
-        Select-Object -First 1
-    if (-not $file) { throw 'No Windows x64 MSI was published for this MariaDB release.' }
-
+    $releases = @(Get-MariaDBReleases $series)
+    if ($requested -match '^\d+\.\d+\.\d+$') {
+        $release = $releases | Where-Object { $_.release_id -ceq $requested } | Select-Object -First 1
+    } else {
+        $release = $releases | Select-Object -First 1
+    }
+    if (-not $release) { throw 'The selected stable Windows release is unavailable. No substitute was selected.' }
+    $file = Get-MariaDBMsi $release
     [pscustomobject]@{
         version = $release.release_id
         file_name = $file.file_name

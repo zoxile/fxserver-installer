@@ -4,5 +4,6 @@ pub mod install;
 mod package;
 pub mod permissions;
 pub mod query;
+mod read_cache;
 pub mod service;
 pub mod users;

@@ -22,6 +22,7 @@ export interface MariaDBCredentials {
 }
 
 export interface MariaDBInstallOptions {
+    version?: string | null;
 	rootPassword: string;
 	serviceName: string;
 	port: number;
@@ -42,9 +43,25 @@ export interface MariaDBPackageInfo {
 	latestVersion: string | null;
 	installedPackageVersion: string | null;
 	updateAvailable: boolean;
+    error?: string | null;
+}
+
+export const DEFAULT_MARIADB_SERIES = "11.4";
+export interface MariaDBSeries { series: string; support: string; eol: string }
+export interface MariaDBRelease { version: string; date: string }
+
+export function listMariaDBSeries() {
+    if (!hasTauriRuntime()) return unavailableOutsideTauri<MariaDBSeries[]>();
+    return invoke<MariaDBSeries[]>("list_mariadb_series");
+}
+
+export function listMariaDBReleases(series: string) {
+    if (!hasTauriRuntime()) return unavailableOutsideTauri<MariaDBRelease[]>();
+    return invoke<MariaDBRelease[]>("list_mariadb_releases", { series });
 }
 
 export interface MariaDBUserConfig {
+    nativePassword?: boolean;
 	username: string;
 	password: string;
 	host: string;
@@ -53,6 +70,7 @@ export interface MariaDBUserConfig {
 }
 
 export interface MariaDBUserUpdateConfig {
+    nativePassword?: boolean;
 	username: string;
 	host: string;
 	password?: string | null;
@@ -177,17 +195,12 @@ function browserPreviewPackageInfo(): MariaDBPackageInfo {
 }
 
 export function getMariaDBStatus(force = false) {
-	if (!force && cachedStatus) {
-		log("MariaDB status restored from the current app session cache.", { level: "debug", scope: "mariadb.status" });
-		return Promise.resolve(cachedStatus);
-	}
-
 	if (!hasTauriRuntime()) {
 		log("MariaDB status requested in browser preview.", { level: "debug", scope: "mariadb.status" });
 		return Promise.resolve(cacheStatus(browserPreviewStatus()));
 	}
 
-	return invokeMariaDB<MariaDBStatus>("get_mariadb_status", {}, force ? "MariaDB status refresh" : "MariaDB initial status load", (status) =>
+	return invokeMariaDB<MariaDBStatus>("get_mariadb_status", { force }, force ? "MariaDB status refresh" : "MariaDB initial status load", (status) =>
 		status.installed ? `MariaDB detected${status.version ? `: ${status.version}` : "."}` : "MariaDB is not installed.",
 	).then(cacheStatus);
 }

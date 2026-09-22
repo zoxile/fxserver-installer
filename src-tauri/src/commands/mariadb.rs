@@ -9,7 +9,7 @@ use crate::{
     },
     services::mariadb::{
         backup::create_backup,
-        detect::detect_mariadb,
+        detect::{clear_detection_cache, detect_mariadb},
         install::{
             get_package_info, install_mariadb as install_mariadb_service,
             uninstall_mariadb as uninstall_mariadb_service,
@@ -43,16 +43,37 @@ async fn run_installer(
 ) -> Result<String, String> {
     super::run_blocking(move || {
         let _guard = maintenance_access()?;
-        task(&|stage| {
+        clear_detection_cache();
+        let result = task(&|stage| {
             let _ = app.emit("mariadb-progress", stage);
-        })
+        });
+        clear_detection_cache();
+        result
     })
     .await
 }
 
 #[tauri::command]
-pub async fn get_mariadb_status() -> Result<MariaDBStatus, String> {
-    super::run_blocking(|| Ok(detect_mariadb())).await
+pub async fn get_mariadb_status(force: Option<bool>) -> Result<MariaDBStatus, String> {
+    super::run_blocking(move || {
+        if force.unwrap_or(false) {
+            clear_detection_cache();
+        }
+        Ok(detect_mariadb())
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn list_mariadb_series() -> Result<Vec<crate::models::mariadb::MariaDBSeries>, String> {
+    super::run_blocking(crate::services::mariadb::install::list_series).await
+}
+
+#[tauri::command]
+pub async fn list_mariadb_releases(
+    series: String,
+) -> Result<Vec<crate::models::mariadb::MariaDBRelease>, String> {
+    super::run_blocking(move || crate::services::mariadb::install::list_releases(&series)).await
 }
 
 #[tauri::command]

@@ -26,7 +26,10 @@ async (page) => {
           case "append_app_log": state.logs.push(args.entry); return;
           case "get_fxserver_rcon_password": return "mock-password";
           case "save_fxserver_rcon_password": return;
+          case "list_txdata_profiles": return { dataPath: args.dataPath, profiles: ["default"], hasRootLogs: false, exists: true };
           case "initialize_health_workspace": return;
+          case "load_database_login": return null;
+          case "clear_database_login": return;
           case "configure_live_bridge": return { workspaceId: args.target.workspaceId, enabled: false, connected: false, snapshot: null };
           case "run_fxserver_preflight":
             state.preflights.push(args.request);
@@ -38,7 +41,9 @@ async (page) => {
           case "get_fxserver_status": return { running: state.running, pid: 123, startedAt: "2026-09-05T10:00:00Z", resources: { cpuPercent: 15, memoryBytes: 104857600, totalMemoryBytes: 1073741824, memoryPercent: 10, threadCount: 30, handleCount: 150 } };
           case "get_fxserver_terminal": return { entries: args.afterId == null ? Array.from({ length: 1000 }, (_, id) => ({ id, stream: "stdout", timestamp: "12:00:00", line: `[script:test] Console output ${id}`, plainLine: `[script:test] Console output ${id}`, segments: [{ text: "[script:test]", color: "#22c55e", emphasis: true }, { text: ` Console output ${id}` }] })) : [] };
           case "get_mariadb_status": return { installed: false, running: false, version: null, serviceName: null, installPath: null };
-          case "get_mariadb_package_info": return { latestVersion: "12.3.3", installedPackageVersion: null, updateAvailable: false };
+          case "get_mariadb_package_info": return { latestVersion: "11.4.13", installedPackageVersion: null, updateAvailable: false, error: null };
+          case "list_mariadb_series": return [{ series: "11.4", support: "Long Term Support", eol: "2029-05-29" }];
+          case "list_mariadb_releases": return [{ version: "11.4.13", date: "2026-08-22" }];
           case "start_fxserver":
           case "stop_fxserver":
           case "restart_fxserver":
