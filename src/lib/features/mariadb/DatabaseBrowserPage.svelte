@@ -26,6 +26,7 @@
 	import type { AdminResult } from "$lib/modules/databaseAdmin";
 	import { getWorkspaceId } from "$lib/core/workspaces.svelte";
 	import { databaseSession, ensureDatabaseSession, handleDatabaseConnectionError, isDatabaseSessionValidated } from "$lib/core/databaseSession.svelte";
+	import { BROWSER_CATALOG_TTL, getDatabaseBrowserCache, type BrowserView, type DatabaseBrowserCache } from "$lib/core/databaseBrowserCache";
 	import { listMariaDBDatabases, listMariaDBTables, type MariaDBCredentials } from "$lib/modules/mariadb";
 	import { exportBrowserCsv, getBrowserMetadata, getBrowserRows, type BrowserFilter, type BrowserMetadata, type BrowserPage, type BrowserRequest, type FilterOperator } from "$lib/modules/databaseBrowser";
 
@@ -43,7 +44,7 @@
 	let descending = $state(false);
 	let offset = $state(0);
 	let pageSize = $state("25");
-	let view = $state<"rows" | "columns" | "indexes" | "tables" | InspectionView>("rows");
+	let view = $state<BrowserView>("rows");
 	let busy = $state(false);
 	let error = $state("");
 	let message = $state("");
@@ -53,6 +54,9 @@
 	let editor = $state<{ kind: "insert" | "update" | "delete"; original: (string | null)[] | null } | null>(null);
 	const workspaceId = getWorkspaceId();
 	let active = true;
+	let cache: DatabaseBrowserCache | undefined;
+	let selectionLoaded = false;
+	let contentRevision = $state(0);
 	const credentialsReady = $derived(isDatabaseSessionValidated(credentials));
 	const operators: { value: FilterOperator; label: string }[] = [
 		{ value: "eq", label: "Equals" }, { value: "ne", label: "Not equal" }, { value: "contains", label: "Contains" },
@@ -66,12 +70,21 @@
 	const columnOptions = $derived(metadata.columns.map(({ name }) => ({ value: name, label: name })));
 	const rowView = $derived(["rows", "columns", "indexes"].includes(view));
 
-	onMount(() => { active = true; if (databaseSession.credentials) void connect(false); return () => { active = false; }; });
+	onMount(() => {
+		active = true;
+		if (databaseSession.credentials) void connect(false);
+		return () => { rememberLocation(); active = false; };
+	});
+
+	function rememberLocation() {
+		if (!selectionLoaded || !credentialsReady || !cache) return;
+		cache.saveLocation({ ...request(), view, draftFilters: filters.map((filter) => ({ ...filter })) });
+	}
 
 	async function action(work: () => Promise<void>) {
 		if (busy || !active) return;
 		busy = true; error = ""; message = ""; messageTone = "success";
-		try { await work(); } catch (caught) { if (active) { handleDatabaseConnectionError(credentials, caught); error = String(caught); } }
+		try { await work(); if (active) rememberLocation(); } catch (caught) { if (active) { handleDatabaseConnectionError(credentials, caught); error = String(caught); } }
 		finally { if (active) busy = false; }
 	}
 	function resetTable() {
@@ -82,54 +95,113 @@
 	async function connect(force = true) {
 		await action(async () => {
 			const original = { ...credentials }; const signature = JSON.stringify(original);
+			selectionLoaded = false;
 			connectionError = ""; databases = []; tables = []; database = ""; table = ""; resetTable();
 			try {
 				if (!await ensureDatabaseSession(original, force)) return;
-				const available = await listMariaDBDatabases({ ...original, database: null });
+				if (!active || signature !== JSON.stringify(credentials)) return;
+				cache = getDatabaseBrowserCache(databaseSession.validated!);
+				const available = await cache.read(["databases"], () => listMariaDBDatabases({ ...original, database: null }), BROWSER_CATALOG_TTL);
 				if (!active || signature !== JSON.stringify(credentials)) return;
 				databases = available;
-				database = available.includes(original.database ?? "") ? original.database! : available.find((name) => !["mysql", "sys", "information_schema", "performance_schema"].includes(name)) ?? available[0] ?? "";
+				const preferred = cache.lastDatabase || original.database || "";
+				database = available.includes(preferred) ? preferred : available.find((name) => !["mysql", "sys", "information_schema", "performance_schema"].includes(name)) ?? available[0] ?? "";
+				view = cache.location(database)?.view ?? "rows";
 				await loadTables();
-			} catch (caught) { connectionError = String(caught); throw caught; }
+			} catch (caught) { if (active) connectionError = String(caught); throw caught; }
 		});
 	}
 	async function loadTables() {
 		const selected = database; const signature = JSON.stringify(credentials);
+		const saved = cache?.location(selected);
+		selectionLoaded = false;
 		table = ""; tables = []; resetTable();
-		if (!selected || !credentialsReady) { if (credentialsReady) view = "tables"; return; }
-		const available = await listMariaDBTables({ ...credentials, database: null }, selected);
+		if (!selected || !credentialsReady || !cache) { if (credentialsReady) view = "tables"; return; }
+		const original = { ...credentials, database: null };
+		const available = await cache.read(["tables", selected], () => listMariaDBTables(original, selected), BROWSER_CATALOG_TTL);
 		if (!active || selected !== database || signature !== JSON.stringify(credentials)) return;
-		tables = available; table = available[0] ?? "";
+		tables = available; table = saved && available.includes(saved.table) ? saved.table : available[0] ?? "";
 		if (!table && rowView) view = "tables";
-		await loadMetadata();
+		await loadMetadata(true);
+		selectionLoaded = true;
 	}
 	async function administrationChanged(result: AdminResult) {
 		await action(async () => {
-			databases = await listMariaDBDatabases({ ...credentials, database: null });
+			cache?.clear();
+			await refreshDatabaseList();
+			if (!active) return;
 			await loadTables();
+			contentRevision++;
 			message = [result.message, ...result.messages.map((row) => row.join(": "))].join("\n");
 			messageTone = result.hasIssues ? "warn" : "success";
 		});
 	}
-	async function loadMetadata() {
+	async function loadMetadata(restore = false) {
+		const saved = restore ? cache?.location(database) : undefined;
 		resetTable();
-		if (!database || !table || !credentialsReady) return;
+		if (saved?.table === table) {
+			filters = saved.draftFilters; appliedFilters = saved.filters;
+			sortColumn = saved.sortColumn; descending = saved.descending;
+			offset = saved.offset; pageSize = String(saved.pageSize);
+		}
+		await loadView();
+	}
+	async function loadView() {
+		if (!database || !table || !credentialsReady || !cache || !rowView) return;
 		const key = `${database}/${table}`; const signature = JSON.stringify(credentials);
-		const result = await getBrowserMetadata({ ...credentials }, database, table);
+		const original = { ...credentials }; const selectedDatabase = database; const selectedTable = table;
+		const result = await cache.read(["metadata", database, table], () => getBrowserMetadata(original, selectedDatabase, selectedTable));
 		if (!active || key !== `${database}/${table}` || signature !== JSON.stringify(credentials)) return;
-		metadata = result; sortColumn = result.indexes.find((index) => index.name === "PRIMARY")?.column ?? result.columns[0]?.name ?? null;
+		metadata = result;
+		if (!result.editable) { editMode = false; editor = null; }
+		const columns = new Set(result.columns.map((column) => column.name));
+		if (!sortColumn || !columns.has(sortColumn)) sortColumn = result.indexes.find((index) => index.name === "PRIMARY")?.column ?? result.columns[0]?.name ?? null;
+		filters = filters.filter((filter) => columns.has(filter.column));
+		appliedFilters = appliedFilters.filter((filter) => columns.has(filter.column));
 		pageSize = String(Math.min(Number(pageSize), Math.floor(4000 / Math.max(1, result.columns.length))));
-		await loadRows();
+		if (view === "rows") await loadRows();
 	}
 	function request(): BrowserRequest { return { database, table, filters: appliedFilters.map((filter) => ({ ...filter })), sortColumn, descending, offset, pageSize: Number(pageSize) }; }
 	async function loadRows() {
-		if (!credentialsReady || !table) return;
+		if (!credentialsReady || !table || !cache) return;
 		const query = request(); const signature = JSON.stringify(credentials);
-		const result = await getBrowserRows({ ...credentials }, query);
+		const original = { ...credentials };
+		page = { rows: [], hasMore: false, truncatedCells: false };
+		const result = await cache.read(["rows", query, metadata.columns], () => getBrowserRows(original, query));
 		if (active && signature === JSON.stringify(credentials) && JSON.stringify(query) === JSON.stringify(request())) {
 			page = result;
 			if (result.pageSize) pageSize = String(result.pageSize);
 		}
+	}
+	async function refresh() {
+		rememberLocation();
+		await action(async () => {
+			cache?.clear();
+			await refreshDatabaseList();
+			if (!active) return;
+			await loadTables();
+			contentRevision++;
+		});
+	}
+	async function refreshDatabaseList() {
+		if (!cache || !credentialsReady) return;
+		const original = { ...credentials, database: null };
+		const signature = JSON.stringify(credentials);
+		const available = await cache.read(["databases"], () => listMariaDBDatabases(original), BROWSER_CATALOG_TTL);
+		if (!active || signature !== JSON.stringify(credentials)) return;
+		databases = available;
+		if (!databases.includes(database)) database = databases[0] ?? "";
+	}
+	function changeDatabase(value: string) {
+		rememberLocation();
+		database = value;
+		void action(loadTables);
+	}
+	function changeView(value: string) {
+		if (busy || view === value) return;
+		view = value as BrowserView;
+		editor = null;
+		void action(loadView);
 	}
 	async function applyFilters() { await action(async () => { appliedFilters = filters.map((filter) => ({ ...filter })); offset = 0; await loadRows(); }); }
 	async function sort(name: string) { await action(async () => { descending = sortColumn === name ? !descending : false; sortColumn = name; offset = 0; await loadRows(); }); }
@@ -148,17 +220,17 @@
 <section class="min-w-0 space-y-5">
 	<header class="flex flex-wrap items-center justify-between gap-3">
 		<div class="flex flex-wrap items-center gap-3"><DatabaseIcon class="size-6 text-muted-foreground" /><h1 class="text-2xl font-semibold">Database Browser</h1><span class={editMode && rowView ? "text-xs text-amber-400" : "text-xs text-muted-foreground"}>{view === "tables" ? "Review required" : editMode && rowView ? "Editing enabled" : "Read-only"}</span></div>
-		<Button size="icon" variant="outline" disabled={busy || !credentialsReady || !table} onclick={() => action(loadMetadata)} title="Refresh table" aria-label="Refresh table"><RefreshCwIcon class={busy ? "animate-spin" : ""} /></Button>
+		<Button size="icon" variant="outline" disabled={busy || !credentialsReady} onclick={refresh} title="Refresh databases, tables and current view" aria-label="Refresh table"><RefreshCwIcon class={busy ? "animate-spin" : ""} /></Button>
 	</header>
 	{#if error}<Notice tone="error" message={error} onDismiss={() => error = ""} />{/if}
 	{#if message}<Notice tone={messageTone} {message} onDismiss={() => message = ""} />{/if}
 	<details open={!credentialsReady}><summary class="mb-3 cursor-pointer text-sm font-medium">Connection {credentialsReady ? ` / ${credentials.host}:${credentials.port}` : ""}</summary><ConnectionCard bind:credentials {busy} {credentialsReady} {connectionError} stretch={false} onApply={() => connect()} /></details>
 	<div class="grid gap-4 border-y border-border py-4 sm:grid-cols-2">
-		<div class="grid min-w-0 gap-2"><label for="browser-database" class="text-xs font-medium">Database</label><Select.Root type="single" value={database} items={databaseOptions} disabled={busy || !credentialsReady} onValueChange={(value) => { database = value; void action(loadTables); }}><Select.Trigger id="browser-database" class="w-full min-w-0 font-mono text-xs"><span class="truncate">{database || "Choose database"}</span></Select.Trigger><Select.Content>{#each databaseOptions as option}<Select.Item value={option.value} label={option.label}>{option.label}</Select.Item>{/each}</Select.Content></Select.Root></div>
+		<div class="grid min-w-0 gap-2"><label for="browser-database" class="text-xs font-medium">Database</label><Select.Root type="single" value={database} items={databaseOptions} disabled={busy || !credentialsReady} onValueChange={changeDatabase}><Select.Trigger id="browser-database" class="w-full min-w-0 font-mono text-xs"><span class="truncate">{database || "Choose database"}</span></Select.Trigger><Select.Content>{#each databaseOptions as option}<Select.Item value={option.value} label={option.label}>{option.label}</Select.Item>{/each}</Select.Content></Select.Root></div>
 		<div class="grid min-w-0 gap-2"><label for="browser-table" class="text-xs font-medium">Table</label><Select.Root type="single" value={table} items={tableOptions} disabled={busy || !credentialsReady || !database} onValueChange={(value) => { table = value; void action(loadMetadata); }}><Select.Trigger id="browser-table" class="w-full min-w-0 font-mono text-xs"><span class="truncate">{table || "Choose table"}</span></Select.Trigger><Select.Content>{#each tableOptions as option}<Select.Item value={option.value} label={option.label}>{option.label}</Select.Item>{/each}</Select.Content></Select.Root></div>
 	</div>
 	{#if credentialsReady}
-		<Tabs.Root bind:value={view} class="space-y-5" loop>
+		<Tabs.Root value={view} onValueChange={changeView} class="space-y-5" loop>
 		<div class="flex flex-wrap items-center justify-between gap-3 border-b border-border">
 			<Tabs.List aria-label="Table views" class="min-w-0 flex-wrap gap-x-4 gap-y-0">
 				{#each ["rows", "columns", "indexes"] as tab}
@@ -210,7 +282,7 @@
 			</Tabs.Content>
 		{:else if view === "tables"}
 			<Tabs.Content value="tables">
-				{#key `${database}/${table}/${credentialSignature}`}
+				{#key `${database}/${table}/${credentialSignature}/${contentRevision}`}
 					<TableListView
 						{credentials} {database} {workspaceId} blocked={busy}
 						onBusy={(value) => busy = value} onChanged={administrationChanged}
@@ -220,7 +292,7 @@
 			</Tabs.Content>
 		{:else}
 			<Tabs.Content value={view}>
-				{#key `${view}/${database}/${credentialSignature}`}
+				{#key `${view}/${database}/${credentialSignature}/${contentRevision}`}
 					<DatabaseInspection {credentials} {database} view={view as InspectionView} />
 				{/key}
 			</Tabs.Content>

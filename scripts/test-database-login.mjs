@@ -7,10 +7,12 @@ import { compileModule } from "svelte/compiler";
 const dataUrl = (code) => `data:text/javascript;base64,${Buffer.from(code).toString("base64")}`;
 const transport = dataUrl("export const invoke = (...args) => globalThis.loginFixture.invoke(...args);");
 const mariadb = dataUrl("export const validateMariaDBCredentials = (credentials) => globalThis.loginFixture.invoke('validate_mariadb_credentials', { credentials });");
+const browserCache = dataUrl(ts.transpile(readFileSync(new URL("../src/lib/core/databaseBrowserCache.ts", import.meta.url), "utf8"), { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 }));
 const source = readFileSync(new URL("../src/lib/core/databaseSession.svelte.ts", import.meta.url), "utf8");
 let code = ts.transpile(source, { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 })
   .replace('"@tauri-apps/api/core"', JSON.stringify(transport))
-  .replace('"$lib/modules/mariadb"', JSON.stringify(mariadb));
+  .replace('"$lib/modules/mariadb"', JSON.stringify(mariadb))
+  .replace('"./databaseBrowserCache"', JSON.stringify(browserCache));
 code = compileModule(code, { filename: "databaseSession.svelte.ts", generate: "client" }).js.code.replace(/(from\s+)["'](svelte\/[^"']+)["']/g, (_, prefix, name) => `${prefix}${JSON.stringify(import.meta.resolve(name))}`);
 globalThis.window = new EventTarget();
 window.__TAURI_INTERNALS__ = {};

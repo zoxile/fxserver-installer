@@ -34,10 +34,22 @@ for (const [name, code] of Object.entries({
   "@tauri-apps/api/core": "export const invoke = () => { throw new Error('Native I/O is forbidden in these fixtures'); };",
   "./logger.svelte": "export const log = () => {};",
   "./incidents.svelte": "export const appendTaskIncident = () => {};",
+  "./databaseBrowserCache": ts.transpile(read("src/lib/core/databaseBrowserCache.ts"), { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 }),
 })) taskCode = taskCode.replaceAll(JSON.stringify(name), JSON.stringify(dataUrl(code)));
 taskCode = compileModule(taskCode, { filename: "tasks.svelte.js", generate: "client" }).js.code;
 taskCode = taskCode.replace(/(from\s+|import\s+)["'](svelte\/[^"']+)["']/g, (_, prefix, name) => `${prefix}${JSON.stringify(import.meta.resolve(name))}`);
 const tasks = await import(dataUrl(taskCode));
+const browserCache = await import(dataUrl(ts.transpile(read("src/lib/core/databaseBrowserCache.ts"), { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 })));
+
+test("database tasks invalidate browser reads before execution and after partial failure", async () => {
+  const cache = browserCache.getDatabaseBrowserCache({});
+  await cache.read(["rows"], async () => "before");
+  await assert.rejects(tasks.trackTask("execute_mariadb_query", "Fixture SQL batch", async () => {
+    assert.equal(await cache.read(["rows"], async () => "during"), "during");
+    throw new Error("Later statement failed");
+  }), /Later statement failed/);
+  assert.equal(await cache.read(["rows"], async () => "after"), "after");
+});
 const resourcePath = "src/lib/features/fxserver/ResourceManagerPage.svelte";
 const managerPath = "src/lib/features/fxserver/ManageServerPage.svelte";
 function workspaceBindings() {

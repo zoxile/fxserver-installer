@@ -9,7 +9,7 @@ async (page) => {
     let sequence = 0;
     const callbacks = new Map();
     const state = window.testDatabaseBrowser = {
-      calls: [], unknown: [], pending: null, failChange: false, refuseTest: false, restoreTests: [],
+      calls: [], unknown: [], pending: null, failChange: false, refuseTest: false, restoreTests: [], latency: 150,
       rows: Array.from({ length: 27 }, (_, i) => [String(i + 1), i === 0 ? null : i === 1 ? "" : `Player ${i + 1}`, i === 0 ? "NULL" : `note\t${i}\nline 2`]),
     };
     const metadata = {
@@ -30,6 +30,9 @@ async (page) => {
       transformCallback: (callback) => { callbacks.set(++sequence, callback); return sequence; },
       invoke: async (command, args = {}) => {
         state.calls.push({ command, args: structuredClone(args) });
+        if (["list_mariadb_databases", "list_mariadb_tables", "get_database_browser_metadata", "get_database_browser_rows"].includes(command)) {
+          await new Promise((resolve) => setTimeout(resolve, state.latency));
+        }
         switch (command) {
           case "fetch_latest_app_release": return { version: "0.3.2", tagName: "v0.3.2", htmlUrl: "https://github.com/zoxile/fxserver-installer/releases/tag/v0.3.2", installerUrl: "https://github.com/zoxile/fxserver-installer/releases/download/v0.3.2/FXServer.Installer_0.3.2_windows_x64-setup.exe" };
           case "plugin:window|title": return "FXServer Installer";
@@ -49,6 +52,7 @@ async (page) => {
           case "list_mariadb_tables": return ["players"];
           case "get_database_browser_metadata": return state.wide ? { columns: Array.from({ length: 128 }, (_, i) => ({ ...metadata.columns[2], name: `column_${i}` })), indexes: [], editable: false, editReason: "Wide table fixture is read-only." } : structuredClone(metadata);
           case "get_database_browser_rows": {
+            if (state.holdRows) await new Promise((resolve) => { state.releaseRows = () => { state.holdRows = false; state.releaseRows = null; resolve(); }; });
             if (state.wide) {
               const pageSize = Math.min(args.request.pageSize, Math.floor(4000 / 128));
               return { rows: Array.from({ length: pageSize }, (_, i) => Array.from({ length: 128 }, (_, j) => `${i}:${j}`)), hasMore: true, truncatedCells: false, pageSize };
@@ -87,16 +91,43 @@ async (page) => {
   if (await parent.getAttribute("aria-expanded") !== "true") await parent.click();
   await nav.getByTitle("Database Browser", { exact: true }).click();
   await page.getByRole("heading", { name: "Database Browser", exact: true }).waitFor();
+  const coldStart = Date.now();
   await page.getByRole("button", { name: "Change Credentials", exact: true }).click();
   await page.getByTitle("SQL NULL", { exact: true }).first().waitFor();
+  const coldMs = Date.now() - coldStart;
+  const reads = () => page.evaluate(() => window.testDatabaseBrowser.calls.filter(({ command }) => ["list_mariadb_databases", "list_mariadb_tables", "get_database_browser_metadata", "get_database_browser_rows"].includes(command)).length);
+  const revisit = async () => {
+    await nav.getByTitle("Home", { exact: true }).click();
+    if (await parent.getAttribute("aria-expanded") !== "true") await parent.click();
+    await nav.getByTitle("Database Browser", { exact: true }).click();
+  };
   if (await page.getByRole("button", { name: "Edit this row", exact: true }).count()) throw new Error("Browser did not default to read-only");
   await page.getByRole("button", { name: "Next page", exact: true }).click();
   await page.getByText("26-27 rows", { exact: true }).waitFor();
+  const beforeRevisit = await reads();
+  const warmStart = Date.now();
+  await revisit();
+  await page.getByText("26-27 rows", { exact: true }).waitFor();
+  const warmMs = Date.now() - warmStart;
+  if (await reads() !== beforeRevisit) throw new Error("Returning to the browser repeated recent database reads");
+  await page.locator("#browser-database").click();
+  await page.getByRole("option", { name: "mysql", exact: true }).click();
+  await page.getByText("1-25 rows", { exact: true }).waitFor();
+  const beforeDatabaseReturn = await reads();
+  await page.locator("#browser-database").click();
+  await page.getByRole("option", { name: "qbx", exact: true }).click();
+  await page.getByText("26-27 rows", { exact: true }).waitFor();
+  if (await reads() !== beforeDatabaseReturn) throw new Error("Returning to a loaded database did not reuse its page");
+  console.log(`Database browser fixture (150ms per IPC): cold ${coldMs}ms; warm ${warmMs}ms including navigation; warm reads 0.`);
   await page.getByRole("button", { name: "Previous page", exact: true }).click();
   await page.getByRole("button", { name: "Filter", exact: true }).click();
   await page.getByRole("textbox", { name: "Filter 1 value", exact: true }).fill("NULL");
   await page.getByRole("button", { name: "Apply", exact: true }).click();
   await page.getByText("1-1 rows", { exact: true }).waitFor();
+  const beforeFilterReturn = await reads();
+  await revisit();
+  await page.getByText("1-1 rows", { exact: true }).waitFor();
+  if (await page.getByRole("textbox", { name: "Filter 1 value", exact: true }).inputValue() !== "NULL" || await reads() !== beforeFilterReturn) throw new Error("Filtered page was not restored from memory");
   await page.getByRole("button", { name: "Remove filter 1", exact: true }).click();
   await page.getByRole("button", { name: "Apply", exact: true }).click();
   await page.getByRole("tab", { name: "rows", exact: true }).focus();
@@ -104,9 +135,26 @@ async (page) => {
   await page.getByRole("cell", { name: "varchar(128)", exact: true }).waitFor();
   if (await page.getByRole("tab", { name: "columns", exact: true }).getAttribute("aria-selected") !== "true") throw new Error("Arrow key did not activate the columns tab");
   if (await page.getByRole("tabpanel").count() !== 1) throw new Error("Inactive tab panels remained mounted");
+  await revisit();
+  await page.getByRole("cell", { name: "varchar(128)", exact: true }).waitFor();
+  if (await page.getByRole("tab", { name: "columns", exact: true }).getAttribute("aria-selected") !== "true") throw new Error("Columns view was not restored");
+  const beforeStructureRefresh = await page.evaluate(() => window.testDatabaseBrowser.calls.filter(({ command }) => command === "get_database_browser_rows").length);
+  await page.getByRole("button", { name: "Refresh table", exact: true }).click();
+  await page.getByRole("button", { name: "Refresh table", exact: true }).click({ trial: true });
+  if (await page.evaluate(() => window.testDatabaseBrowser.calls.filter(({ command }) => command === "get_database_browser_rows").length) !== beforeStructureRefresh) throw new Error("Viewing columns fetched unnecessary row data");
   await page.getByRole("tab", { name: "indexes", exact: true }).click();
   await page.getByRole("cell", { name: "PRIMARY", exact: true }).waitFor();
   await page.getByRole("tab", { name: "rows", exact: true }).click();
+  await page.getByRole("button", { name: "Refresh table", exact: true }).click({ trial: true });
+  const beforePending = await page.evaluate(() => window.testDatabaseBrowser.calls.filter(({ command }) => command === "get_database_browser_rows").length);
+  await page.evaluate(() => { window.testDatabaseBrowser.holdRows = true; });
+  await page.getByRole("button", { name: "Refresh table", exact: true }).click();
+  await page.waitForFunction(() => Boolean(window.testDatabaseBrowser.releaseRows));
+  await revisit();
+  await page.getByRole("heading", { name: "Database Browser", exact: true }).waitFor();
+  await page.evaluate(() => window.testDatabaseBrowser.releaseRows());
+  await page.getByText("1-25 rows", { exact: true }).waitFor();
+  if (await page.evaluate(() => window.testDatabaseBrowser.calls.filter(({ command }) => command === "get_database_browser_rows").length) !== beforePending + 1) throw new Error("Navigating during a read launched a duplicate query");
   await page.getByRole("checkbox", { name: "Enable row editing", exact: true }).check();
   await page.getByRole("button", { name: "Edit this row", exact: true }).nth(2).click();
   await page.locator("#row-field-1").fill("Edited name");
@@ -118,8 +166,10 @@ async (page) => {
   if (!await apply.isDisabled()) throw new Error("Mutation accepted incomplete confirmation");
   await page.getByRole("textbox", { name: "Confirm qbx.players", exact: true }).fill("qbx.players");
   await page.screenshot({ path: "output/playwright/database-browser-desktop.png", fullPage: true });
+  const beforeWrite = await page.evaluate(() => window.testDatabaseBrowser.calls.filter(({ command }) => command === "get_database_browser_rows").length);
   await apply.click();
   await page.getByText("One row changed.", { exact: true }).waitFor();
+  if (await page.evaluate(() => window.testDatabaseBrowser.calls.filter(({ command }) => command === "get_database_browser_rows").length) !== beforeWrite + 1) throw new Error("Row write left cached rows visible");
   await page.getByRole("button", { name: "Insert Row", exact: true }).click();
   await page.locator("#row-field-2").fill("Inserted fixture");
   await page.getByRole("button", { name: "Preview SQL", exact: true }).click();
@@ -141,8 +191,10 @@ async (page) => {
   await page.screenshot({ path: "output/playwright/database-browser-narrow.png", fullPage: true });
   await page.getByRole("button", { name: "Rows per page", exact: true }).click();
   await page.getByRole("option", { name: "200", exact: true }).click();
+  await page.getByRole("button", { name: "Refresh table", exact: true }).click({ trial: true });
   await page.evaluate(() => { window.testDatabaseBrowser.wide = true; });
   await page.getByRole("button", { name: "Refresh table", exact: true }).click();
+  await page.getByRole("button", { name: "Refresh table", exact: true }).click({ trial: true });
   await page.getByRole("button", { name: "Rows per page", exact: true }).filter({ hasText: "31" }).waitFor();
   await page.getByText("1-31 rows", { exact: true }).waitFor();
   const renderedCells = await page.locator('[role="tabpanel"] tbody td').count();

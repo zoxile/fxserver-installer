@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { log } from "./logger.svelte";
 import { appendTaskIncident } from "./incidents.svelte";
+import { invalidateDatabaseBrowserCommand } from "./databaseBrowserCache";
 
 export type TaskStatus = "running" | "completed" | "failed" | "cancelled";
 export interface BackgroundTask {
@@ -78,6 +79,7 @@ export async function trackTask<T>(command: string, label: string, action: () =>
 		...taskSession.items.filter((task, index) => task.status === "running" || index < 99),
 	];
 	try {
+		invalidateDatabaseBrowserCommand(command);
 		const result = await action();
 		finish(id, "completed");
 		log(`${label} completed.`, { level: "success", scope: "tasks" });
@@ -86,6 +88,9 @@ export async function trackTask<T>(command: string, label: string, action: () =>
 		finish(id, error instanceof DOMException && error.name === "AbortError" ? "cancelled" : "failed");
 		log(`${label} failed.`, { level: "error", scope: "tasks" });
 		throw error;
+	} finally {
+		// Failed SQL batches can still have committed earlier statements.
+		invalidateDatabaseBrowserCommand(command);
 	}
 }
 

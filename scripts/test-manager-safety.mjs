@@ -8,6 +8,7 @@ const read = (path) => readFileSync(new URL(`../src/lib/${path}`, import.meta.ur
 const url = (source) => `data:text/javascript;base64,${Buffer.from(source).toString("base64")}`;
 function build(path, dependencies = {}) {
   let code = ts.transpile(read(path), { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 });
+  if (code.includes('"./databaseBrowserCache"')) code = code.replaceAll('"./databaseBrowserCache"', JSON.stringify(build("core/databaseBrowserCache.ts")));
   for (const [name, dependency] of Object.entries(dependencies)) code = code.replaceAll(JSON.stringify(name), JSON.stringify(dependency));
   if (path.endsWith(".svelte.ts")) code = compileModule(code, { filename: path, generate: "client" }).js.code;
   code = code.replace(/(from\s+|import\s+)["'](svelte\/[^"']+)["']/g, (_, prefix, name) => `${prefix}${JSON.stringify(import.meta.resolve(name))}`);

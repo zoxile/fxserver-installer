@@ -14,6 +14,8 @@
 		type AdminAction, type AdminRequest, type AdminPreview, type TableInfoPage, type AdminResult,
 	} from "$lib/modules/databaseAdmin";
 	import type { MariaDBCredentials } from "$lib/modules/mariadb";
+	import { databaseSession, isDatabaseSessionValidated } from "$lib/core/databaseSession.svelte";
+	import { getDatabaseBrowserCache } from "$lib/core/databaseBrowserCache";
 
 	type Props = {
 		credentials: MariaDBCredentials;
@@ -56,14 +58,18 @@
 		onBusy(value);
 	}
 
-	async function load() {
+	async function load(force = false) {
 		if (busy) return;
 		busy = true;
 		error = "";
 		preview = null;
 		try {
+			if (!isDatabaseSessionValidated(credentials)) return;
+			const cache = getDatabaseBrowserCache(databaseSession.validated!);
+			if (force) cache.clear();
+			const original = { ...credentials }; const selectedDatabase = database;
 			const next = database
-				? await listAdminTables({ ...credentials }, database)
+				? await cache.read(["statistics", database], () => listAdminTables(original, selectedDatabase))
 				: { tables: [], hasMore: false };
 			if (active) {
 				data = next;
@@ -140,7 +146,7 @@
 				</Button>
 				<Button
 					size="icon-sm" variant="outline" title="Refresh table statistics"
-					aria-label="Refresh table statistics" disabled={busy} onclick={load}
+					aria-label="Refresh table statistics" disabled={busy} onclick={() => load(true)}
 				>
 					<RefreshCwIcon />
 				</Button>

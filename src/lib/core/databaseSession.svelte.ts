@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { validateMariaDBCredentials, type MariaDBCredentials } from "$lib/modules/mariadb";
+import { resetDatabaseBrowserCache } from "./databaseBrowserCache";
 
 let storageQueue: Promise<unknown> = Promise.resolve();
 let storageRevision = 0;
@@ -65,6 +66,7 @@ export function isDatabaseSessionValidated(credentials: MariaDBCredentials) {
 export function invalidateDatabaseSession(credentials?: MariaDBCredentials) {
 	if (credentials && !sameAuthentication(databaseSession.validated?.credentials ?? validation?.credentials, credentials)) return;
 	validationGeneration++;
+	resetDatabaseBrowserCache();
 	validation = undefined;
 	databaseSession.validated = null;
 	databaseSession.validating = false;
@@ -82,6 +84,7 @@ export function ensureDatabaseSession(credentials: MariaDBCredentials, force = f
 	if (!force && isDatabaseSessionValidated(credentials)) return Promise.resolve(true);
 	if (validation?.revision === revision && sameAuthentication(validation.credentials, credentials)) return validation.pending;
 	const snapshot = { ...credentials };
+	resetDatabaseBrowserCache();
 	const generation = ++validationGeneration;
 	databaseSession.validated = null;
 	databaseSession.validating = true;
