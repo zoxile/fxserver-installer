@@ -1601,7 +1601,7 @@ fn read_resource_manifest(directory: &Path) -> Result<Option<FxserverResourceInf
         return Ok(None);
     };
 
-    let content = fs::read_to_string(&manifest_path).map_err(|error| {
+    let content = super::config_history::read_bounded_config(&manifest_path).map_err(|error| {
         format!(
             "Failed to read resource manifest {}: {error}",
             manifest_path.to_string_lossy()
@@ -2857,6 +2857,30 @@ mod tests {
 
     use super::*;
     use std::sync::mpsc;
+
+    #[test]
+    fn resource_manifest_reads_are_bounded_and_keep_normal_metadata() {
+        let root = fixture_secret_directory();
+        let manifest = root.join("fxmanifest.lua");
+        fs::write(
+            &manifest,
+            "version '1.2.3'\nrepository 'https://example.com/project'\n",
+        )
+        .unwrap();
+        let resource = read_resource_manifest(&root).unwrap().unwrap();
+        assert_eq!(resource.version.as_deref(), Some("1.2.3"));
+        assert_eq!(
+            resource.repository.as_deref(),
+            Some("https://example.com/project")
+        );
+        let file = fs::File::create(&manifest).unwrap();
+        file.set_len(1024 * 1024).unwrap();
+        drop(file);
+        let error = read_resource_manifest(&root).unwrap_err();
+        assert!(error.contains("size limit"), "{error}");
+        fs::remove_file(manifest).unwrap();
+        fs::remove_dir(root).unwrap();
+    }
 
     #[test]
     fn txdata_discovery_preserves_explicit_paths_and_normalizes_only_new_selections() {

@@ -130,6 +130,16 @@ async (page) => {
   await waitPending("send_fxserver_command");
   await complete("send_fxserver_command");
   await page.getByRole("button", { name: "Send", exact: true }).waitFor();
+
+  await input.fill("status offscreen");
+  await input.press("Enter");
+  await waitPending("send_fxserver_command");
+  await home();
+  await complete("send_fxserver_command", "Mock offscreen RCON failure");
+  await page.waitForFunction(() => window.testDesktop.logs.some((line) => line.includes("Mock offscreen RCON failure")));
+  await manage();
+  await page.getByText("Mock offscreen RCON failure", { exact: true }).waitFor();
+  if (await input.inputValue() !== "status offscreen") throw new Error("Offscreen failed RCON command was not restored");
   await page.screenshot({ path: "output/playwright/manage-server.png", fullPage: true });
 
   await page.getByRole("button", { name: "Stop", exact: true }).click();

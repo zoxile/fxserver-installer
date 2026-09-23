@@ -19,11 +19,11 @@
 	import { Notice } from "$lib/components/ui/notice/index.js";
 	import PasswordInput from "$lib/components/ui/password-input.svelte";
 	import { openExternalUrl } from "$lib/core/openExternal";
-	import { getWorkspaceId } from "$lib/core/workspaces.svelte";
+	import { getWorkspaceId, workspaceSession } from "$lib/core/workspaces.svelte";
 	import ResourceUpdateDialog from "./ResourceUpdateDialog.svelte";
 	import ResourceUpdatePlan from "./ResourceUpdatePlan.svelte";
 	import { bridgeSession } from "$lib/core/liveBridge.svelte";
-	import { taskSession } from "$lib/core/tasks.svelte";
+	import { taskSession, trackTask } from "$lib/core/tasks.svelte";
 	import { getResourcePlan, getResourcePreference, loadResourcePreferences, queueResourceUpdate, resourcePlanSession, saveResourcePreference } from "$lib/modules/resourcePlan.svelte";
 	import { resourcePreferenceKey } from "$lib/modules/resourcePlan";
 	import { githubReleaseRepository } from "$lib/modules/resourceRelease";
@@ -80,6 +80,12 @@
 	let contextMenuPosition = $state({ x: 0, y: 0 });
 	let updateDialog = $state<{ resource: ResourceView; reinstall: boolean; history: boolean } | null>(null);
 	const workspaceId = getWorkspaceId();
+	const workspaceRevision = workspaceSession.revision;
+	let active = true;
+	function workspaceIsCurrent() {
+		return workspaceId === getWorkspaceId() && workspaceRevision === workspaceSession.revision && !taskSession.switching;
+	}
+	function pageIsCurrent() { return active && workspaceIsCurrent(); }
 	const liveResources = $derived(new Map(bridgeSession.connected && bridgeSession.workspaceId === workspaceId
 		? bridgeSession.snapshot?.resources.map((resource) => [resource.name, resource.state]) ?? [] : []));
 	const plan = getResourcePlan(workspaceId);
@@ -144,19 +150,26 @@
 
 	onMount(() => {
 		void initialize();
+		return () => { active = false; };
 	});
 
 	async function initialize() {
-		loadFxserverSettings();
-		const saved = readSavedEnvironment();
-		rcon = {
-			host: saved.TXHOST_RCON_HOST || "127.0.0.1",
-			port: Number.parseInt(saved.TXHOST_RCON_PORT || "30120", 10) || 30120,
-			password: await getSavedFxserverRconPassword(workspaceId),
-		};
+		try {
+			loadFxserverSettings();
+			const saved = readSavedEnvironment();
+			const password = await getSavedFxserverRconPassword(workspaceId);
+			if (!pageIsCurrent()) return;
+			rcon = {
+				host: saved.TXHOST_RCON_HOST || "127.0.0.1",
+				port: Number.parseInt(saved.TXHOST_RCON_PORT || "30120", 10) || 30120,
+				password,
+			};
 
-		if (fxserverSettings.txDataPath && fxserverSettings.profile) {
-			await scanResources();
+			if (fxserverSettings.txDataPath && fxserverSettings.profile) {
+				await scanResources();
+			}
+		} catch (caught) {
+			if (pageIsCurrent()) error = caught instanceof Error ? caught.message : String(caught);
 		}
 	}
 
@@ -323,17 +336,23 @@
 	}
 
 	async function runResourceCommand(action: "start" | "stop" | "restart" | "ensure" | "refresh", resource: ResourceView) {
+		if (!pageIsCurrent() || busyCommand) return;
 		const command = action === "refresh" ? `refresh\nensure ${resource.name}` : `${action} ${resource.name}`;
+		const config = { ...rcon };
 		busyCommand = `${action}:${resource.path}`;
 		error = "";
 		message = "";
 		try {
-			if (rcon.password.trim()) await saveFxserverRconPassword(rcon.password, workspaceId);
-			await sendFxserverRconCommand(command, rcon);
+			await trackTask("resource_command", "Send resource command", async () => {
+				if (config.password.trim()) await saveFxserverRconPassword(config.password, workspaceId);
+				if (!workspaceIsCurrent()) throw new DOMException("Workspace changed before sending the resource command.", "AbortError");
+				await sendFxserverRconCommand(command, config);
+			});
+			if (!pageIsCurrent()) return;
 			recentCommands = [command, ...recentCommands].slice(0, 8);
 			message = `Sent RCON command: ${command.replace("\n", " then ")}`;
 		} catch (caught) {
-			error = caught instanceof Error ? caught.message : String(caught);
+			if (pageIsCurrent()) error = caught instanceof Error ? caught.message : String(caught);
 		} finally {
 			busyCommand = "";
 		}

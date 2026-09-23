@@ -11,6 +11,7 @@
 	let error = $state("");
 	let message = $state("");
 	let terminalRevision = $state(0);
+	let actionRevision = 0;
 	let cachedWorkspaceRevision = -1;
 	let preflight = $state<PreflightReport | null>(null);
 	let checkingPreflight = $state(false);
@@ -78,6 +79,7 @@
 	import { getInstallPath, loadInstallPath, setInstallPath } from "$lib/core/paths.svelte";
 	import { getWorkspaceId, workspaceSession } from "$lib/core/workspaces.svelte";
 	import { log } from "$lib/core/logger.svelte";
+	import { taskSession, trackTask } from "$lib/core/tasks.svelte";
 	import { databaseSession } from "$lib/core/databaseSession.svelte";
 	import { runPreflight } from "$lib/modules/diagnostics";
 	import { getInstalledWindowsArtifactInfo, type InstalledArtifactInfo } from "$lib/modules/artifact";
@@ -157,6 +159,7 @@
 	};
 
 	const workspaceId = getWorkspaceId();
+	const workspaceRevision = workspaceSession.revision;
 	if (cachedWorkspaceRevision !== workspaceSession.revision) {
 		cachedWorkspaceRevision = workspaceSession.revision;
 		cachedTerminalEntries = [];
@@ -167,6 +170,7 @@
 		error = "";
 		message = "";
 		preflight = null;
+		starting = stopping = restarting = rconSending = checkingPreflight = false;
 	}
 	let artifactPath = $state("");
 	let artifact = $state<InstalledArtifactInfo | null>(null);
@@ -178,6 +182,14 @@
 	let serverProfile = $state("");
 	let storageReady = false;
 	let pageActive = true;
+	function workspaceIsCurrent() {
+		return workspaceId === getWorkspaceId() && workspaceRevision === workspaceSession.revision && !taskSession.switching;
+	}
+	function pageIsCurrent() { return pageActive && workspaceIsCurrent(); }
+	function actionIsCurrent(revision: number) { return workspaceIsCurrent() && revision === actionRevision; }
+	function requireCurrentWorkspace() {
+		if (!workspaceIsCurrent()) throw new DOMException("Workspace changed before the server action completed.", "AbortError");
+	}
 	let statusRefresh: Promise<void> | null = null;
 	let busy = $state(false);
 	let preflightOverrideOpen = $state(false);
@@ -257,7 +269,10 @@
 
 	$effect(() => {
 		terminalRevision;
-		untrack(() => void refreshTerminal({ reset: true, scrollToBottom: false }));
+		untrack(() => {
+			void refreshTerminal({ reset: true, scrollToBottom: false });
+			void refreshStatus(false);
+		});
 	});
 
 	$effect(() => {
@@ -304,7 +319,7 @@
 		await loadSecureRconPassword();
 		if (!pageActive) return;
 		storageReady = true;
-		void refreshAll();
+		void refreshAll(false);
 		void refreshTxDataProfiles(artifactPath);
 		if (!terminalEntries.length) void refreshTerminal({ reset: true, scrollToBottom: false });
 	}
@@ -329,11 +344,11 @@
 	async function loadSecureRconPassword() {
 		try {
 			const password = await getSavedFxserverRconPassword(workspaceId);
-			if (!pageActive) return;
+			if (!pageIsCurrent()) return;
 			rconPassword = password;
 			lastSavedRconPassword = password;
 		} catch (caught) {
-			error = caught instanceof Error ? caught.message : String(caught);
+			if (pageIsCurrent()) error = caught instanceof Error ? caught.message : String(caught);
 		} finally {
 			rconPasswordLoaded = true;
 		}
@@ -364,9 +379,9 @@
 		}, delayMs);
 	}
 
-	async function persistRconPassword() {
-		if (!rconPasswordLoaded || rconPassword === lastSavedRconPassword) return;
-		const password = rconPassword;
+	async function persistRconPassword(password = rconPassword) {
+		if (!rconPasswordLoaded || password === lastSavedRconPassword) return;
+		const revision = actionRevision;
 		if (rconPasswordSaveTimer) {
 			window.clearTimeout(rconPasswordSaveTimer);
 			rconPasswordSaveTimer = undefined;
@@ -380,7 +395,7 @@
 			}
 			lastSavedRconPassword = password;
 		} catch (caught) {
-			error = caught instanceof Error ? caught.message : String(caught);
+			if (actionIsCurrent(revision)) error = caught instanceof Error ? caught.message : String(caught);
 		}
 	}
 
@@ -429,35 +444,44 @@
 		setServerProfile(profile);
 	}
 
-	async function refreshAll() {
+	async function refreshAll(clearError = true) {
+		if (!pageIsCurrent()) return;
 		busy = true;
-		error = "";
+		if (clearError) error = "";
 		try {
 			await Promise.all([refreshArtifact(), refreshStatus(false)]);
 		} catch (caught) {
-			error = caught instanceof Error ? caught.message : String(caught);
+			if (pageIsCurrent()) error = caught instanceof Error ? caught.message : String(caught);
 		} finally {
 			busy = false;
 		}
 	}
 
 	async function refreshArtifact() {
-		artifact = artifactPath.trim() ? await getInstalledWindowsArtifactInfo(artifactPath.trim()) : null;
+		const path = artifactPath.trim();
+		const result = path ? await getInstalledWindowsArtifactInfo(path) : null;
+		if (pageIsCurrent() && path === artifactPath.trim()) artifact = result;
 	}
 
 	async function refreshStatus(showMessage = true) {
+		if (!pageIsCurrent()) return;
 		if (statusRefresh) return statusRefresh;
+		const revision = terminalRevision;
 		statusRefresh = (async () => {
 			try {
-				status = await getFxserverStatus({ logResult: showMessage });
-				if (!pageActive) return;
+				const result = await getFxserverStatus({ logResult: showMessage });
+				if (!pageIsCurrent() || revision !== terminalRevision) return;
+				status = result;
 				nowSeconds = Math.floor(Date.now() / 1000);
 				recordResourceSample(status);
 				if (showMessage) message = status.running ? "FXServer status refreshed." : "FXServer is not running from this app.";
 			} catch (caught) {
-				error = caught instanceof Error ? caught.message : String(caught);
+				if (pageIsCurrent() && revision === terminalRevision) error = caught instanceof Error ? caught.message : String(caught);
 			}
-		})().finally(() => { statusRefresh = null; });
+		})().finally(async () => {
+			statusRefresh = null;
+			if (pageIsCurrent() && revision !== terminalRevision) await refreshStatus(false);
+		});
 		return statusRefresh;
 	}
 
@@ -500,7 +524,7 @@
 	}
 
 	async function refreshTerminal(options: { reset?: boolean; scrollToBottom?: boolean } = {}) {
-		if (!pageActive) return;
+		if (!pageIsCurrent()) return;
 		if (terminalRefreshPending) {
 			terminalResetPending ||= options.reset ?? false;
 			return;
@@ -510,7 +534,7 @@
 			const reset = options.reset ?? false;
 			const afterId = reset ? null : latestTerminalEntryId();
 			const result = await getFxserverTerminal(reset ? terminalBufferLimit : 200, afterId);
-			if (!pageActive) return;
+			if (!pageIsCurrent()) return;
 			mergeTerminalEntries(result.entries, reset);
 			if (options.scrollToBottom ?? true) {
 				autoScrollTerminal = true;
@@ -521,7 +545,7 @@
 				}
 			}
 		} catch (caught) {
-			error = caught instanceof Error ? caught.message : String(caught);
+			if (pageIsCurrent()) error = caught instanceof Error ? caught.message : String(caught);
 		} finally {
 			terminalRefreshPending = false;
 			if (terminalResetPending) {
@@ -618,83 +642,99 @@
 	}
 
 	async function startServer(skipPreflight = false) {
-		if (!canStart) return;
+		if (!pageIsCurrent() || !canStart) return;
+		const revision = ++actionRevision;
 		error = "";
 		message = "";
 		starting = true;
 
 		try {
-			saveEnvironment();
-			const request = launchRequest();
-			await checkReadiness(request, "start", skipPreflight);
-			await startFxserver(request);
-			terminalRevision += 1;
-			await refreshStatus(false);
-			message = "FXServer started with the selected TXHOST environment.";
+			await trackTask("start_fxserver_action", "Start FXServer", async () => {
+				saveEnvironment();
+				const request = launchRequest();
+				await checkReadiness(request, "start", skipPreflight);
+				requireCurrentWorkspace();
+				await startFxserver(request);
+				requireCurrentWorkspace();
+				terminalRevision += 1;
+				await refreshStatus(false);
+				if (actionIsCurrent(revision)) message = "FXServer started with the selected TXHOST environment.";
+			});
 		} catch (caught) {
-			error = caught instanceof Error ? caught.message : String(caught);
+			if (actionIsCurrent(revision)) error = caught instanceof Error ? caught.message : String(caught);
 		} finally {
-			starting = false;
+			if (workspaceIsCurrent()) starting = false;
 		}
 	}
 
 	async function restartServer(skipPreflight = false) {
-		if (!canRestart) return;
+		if (!pageIsCurrent() || !canRestart) return;
+		const revision = ++actionRevision;
 		error = "";
 		message = "";
 		restarting = true;
 
 		try {
-			saveEnvironment();
-			const request = launchRequest();
-			await checkReadiness(request, "restart", skipPreflight);
-			await restartFxserver(request);
-			terminalRevision += 1;
-			await refreshStatus(false);
-			message = "FXServer restarted with the selected TXHOST environment.";
+			await trackTask("restart_fxserver_action", "Restart FXServer", async () => {
+				saveEnvironment();
+				const request = launchRequest();
+				await checkReadiness(request, "restart", skipPreflight);
+				requireCurrentWorkspace();
+				try { await restartFxserver(request); }
+				finally {
+					if (workspaceIsCurrent()) terminalRevision += 1;
+					await refreshStatus(false);
+				}
+				if (actionIsCurrent(revision)) message = "FXServer restarted with the selected TXHOST environment.";
+			});
 		} catch (caught) {
-			error = caught instanceof Error ? caught.message : String(caught);
-			terminalRevision += 1;
-			await refreshStatus(false);
+			if (actionIsCurrent(revision)) error = caught instanceof Error ? caught.message : String(caught);
 		} finally {
-			restarting = false;
+			if (workspaceIsCurrent()) restarting = false;
 		}
 	}
 
 	async function stopServer() {
-		if (starting || stopping || restarting) return;
+		if (!pageIsCurrent() || starting || stopping || restarting) return;
+		const revision = ++actionRevision;
 		error = "";
 		message = "";
 		stopping = true;
 
 		try {
-			await stopFxserver();
-			terminalRevision += 1;
-			await refreshStatus(false);
-			message = "FXServer stopped.";
+			await trackTask("stop_fxserver_action", "Stop FXServer", async () => {
+				await stopFxserver();
+				requireCurrentWorkspace();
+				terminalRevision += 1;
+				await refreshStatus(false);
+				if (actionIsCurrent(revision)) message = "FXServer stopped.";
+			});
 		} catch (caught) {
-			error = caught instanceof Error ? caught.message : String(caught);
+			if (actionIsCurrent(revision)) error = caught instanceof Error ? caught.message : String(caught);
 		} finally {
-			stopping = false;
+			if (workspaceIsCurrent()) stopping = false;
 		}
 	}
 
 	async function checkReadiness(request: ReturnType<typeof launchRequest>, action: "start" | "restart", skipPreflight = false) {
+		const revision = actionRevision;
 		if (skipPreflight) {
 			log(`${action === "restart" ? "Restarting" : "Starting"} FXServer with a user-confirmed preflight override.`, { scope: "FXServer", level: "warn" });
 			return;
 		}
 		checkingPreflight = true;
 		try {
-			preflight = await runPreflight({
+			const result = await runPreflight({
 				artifactPath: request.artifactPath,
 				txDataPath: request.environment.find((item) => item.key === "TXHOST_DATA_PATH")?.value ?? "",
 				profile: request.serverProfile ?? "",
 				credentials: databaseSession.credentials ? { ...databaseSession.credentials } : null,
 				checkPorts: action === "start",
 			});
-			if (preflight.blocking) throw new Error(`Preflight found blocking issues. Review the checks before ${action === "restart" ? "restarting" : "starting"} FXServer. Force ${action} can skip preflight for this action only.`);
-		} finally { checkingPreflight = false; }
+			requireCurrentWorkspace();
+			if (actionIsCurrent(revision)) preflight = result;
+			if (result.blocking) throw new Error(`Preflight found blocking issues. Review the checks before ${action === "restart" ? "restarting" : "starting"} FXServer. Force ${action} can skip preflight for this action only.`);
+		} finally { if (workspaceIsCurrent()) checkingPreflight = false; }
 	}
 
 	function bytes(value?: number | null) {
@@ -813,21 +853,31 @@
 
 	async function submitTerminalCommand() {
 		const command = terminalCommand.trim();
-		if (!command || rconSending || starting || stopping || restarting) return;
+		if (!pageIsCurrent() || !command || rconSending || starting || stopping || restarting) return;
+		const revision = ++actionRevision;
 		const config = { ...rconConfig };
 
 		rconSending = true;
 		terminalCommand = "";
-		await tick();
 		try {
-			void persistRconPassword();
-			await sendFxserverCommand(command, config);
-			if (pageActive) await refreshTerminal({ scrollToBottom: true });
+			await trackTask("fxserver_console_action", "Send console command", async () => {
+				await tick();
+				requireCurrentWorkspace();
+				// Keep the task alive for both operations without delaying RCON for password storage.
+				const [, commandResult] = await Promise.allSettled([
+					persistRconPassword(config.password),
+					sendFxserverCommand(command, config),
+				]);
+				if (commandResult.status === "rejected") throw commandResult.reason;
+				if (pageIsCurrent()) await refreshTerminal({ scrollToBottom: true });
+			});
 		} catch (caught) {
-			if (!terminalCommand.trim()) terminalCommand = command;
-			error = caught instanceof Error ? caught.message : String(caught);
+			if (actionIsCurrent(revision)) {
+				if (!terminalCommand.trim()) terminalCommand = command;
+				error = caught instanceof Error ? caught.message : String(caught);
+			}
 		} finally {
-			rconSending = false;
+			if (workspaceIsCurrent()) rconSending = false;
 		}
 	}
 </script>
