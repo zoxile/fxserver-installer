@@ -7,6 +7,7 @@
 	import PasswordInput from "$lib/components/ui/password-input.svelte";
 	import * as Select from "$lib/components/ui/select/index.js";
 	import * as ToggleGroup from "$lib/components/ui/toggle-group/index.js";
+	import AuthenticationCompatibility from "./AuthenticationCompatibility.svelte";
 
 	type UserForm = {
 		username: string;
@@ -21,10 +22,11 @@
 		credentialsReady: boolean;
 		databases: string[];
 		userConfig: UserForm;
+		nativePassword?: boolean;
 		onSave: () => void;
 	};
 
-	let { busy, credentialsReady, databases, userConfig = $bindable(), onSave }: Props = $props();
+	let { busy, credentialsReady, databases, userConfig = $bindable(), nativePassword = $bindable(false), onSave }: Props = $props();
 	const commonPrivileges = ["SELECT", "INSERT", "UPDATE", "DELETE", "CREATE", "ALTER", "INDEX", "DROP"];
 	const allPrivileges = "ALL PRIVILEGES";
 	const databaseOptions = $derived(databases.map((database) => ({ value: database, label: database })));
@@ -63,7 +65,7 @@
 	}
 </script>
 
-<Card.Root class="h-full min-h-136 rounded-md border-border bg-card shadow-sm">
+<Card.Root class="h-full min-h-136 min-w-0 rounded-md border-border bg-card shadow-sm">
 	<Card.Header class="border-b border-border pb-4">
 		<div class="flex items-center gap-3">
 			<div class="flex size-9 shrink-0 items-center justify-center rounded-sm bg-muted text-muted-foreground ring-1 ring-border">
@@ -76,80 +78,83 @@
 		</div>
 	</Card.Header>
 
-	<Card.Content class="space-y-5">
-		<div class="grid gap-4 sm:grid-cols-2">
-			<label class="grid gap-2">
-				<span class="text-xs font-medium text-muted-foreground">Username</span>
-				<Input bind:value={userConfig.username} disabled={!credentialsReady} placeholder="fxserver" title="Database username to create or update." />
-			</label>
-			<label class="grid gap-2">
-				<span class="text-xs font-medium text-muted-foreground">Password</span>
-				<PasswordInput bind:value={userConfig.password} disabled={!credentialsReady} placeholder="User password" title="Password for this database user." />
-			</label>
-			<label class="grid gap-2">
-				<span class="text-xs font-medium text-muted-foreground">Host</span>
-				<Input bind:value={userConfig.host} disabled={!credentialsReady} placeholder="localhost or %" title="Host pattern for this database account." />
-			</label>
-			<label class="grid gap-2">
-				<span class="text-xs font-medium text-muted-foreground">Database</span>
-				<Select.Root bind:value={userConfig.database} type="single" items={databaseOptions} disabled={!credentialsReady || !databaseOptions.length}>
-					<Select.Trigger title="Choose database to grant permissions on" class="w-full rounded-sm font-mono text-xs">
-						{userConfig.database || "Choose database"}
-					</Select.Trigger>
-					<Select.Content class="rounded-sm">
-						{#if databaseOptions.length}
-							{#each databaseOptions as option}
-								<Select.Item value={option.value} label={option.label}>
-									{option.label}
-								</Select.Item>
-							{/each}
-						{:else}
-							<Select.Item value="" label="No databases loaded" disabled>No databases loaded</Select.Item>
-						{/if}
-					</Select.Content>
-				</Select.Root>
-			</label>
-			<label class="grid gap-2 sm:col-span-2">
-				<span class="text-xs font-medium text-muted-foreground">Permissions</span>
-				<Input bind:value={userConfig.privileges} disabled={!credentialsReady} placeholder="SELECT, INSERT, UPDATE or ALL PRIVILEGES" title="Comma-separated privileges to grant." />
-			</label>
-		</div>
+	<Card.Content class="min-w-0 @container">
+		<form class="space-y-5" aria-label="Add database user" onsubmit={(event) => { event.preventDefault(); if (!busy && credentialsReady) onSave(); }}>
+			<div class="grid gap-4 @sm:grid-cols-2">
+				<label class="grid min-w-0 gap-2">
+					<span class="text-xs font-medium text-muted-foreground">Username</span>
+					<Input bind:value={userConfig.username} disabled={!credentialsReady} placeholder="fxserver" title="Database username to create or update." />
+				</label>
+				<label class="grid min-w-0 gap-2">
+					<span class="text-xs font-medium text-muted-foreground">Password</span>
+					<PasswordInput bind:value={userConfig.password} disabled={!credentialsReady} placeholder="User password" title="Password for this database user." />
+				</label>
+				<label class="grid min-w-0 gap-2">
+					<span class="text-xs font-medium text-muted-foreground">Host</span>
+					<Input bind:value={userConfig.host} disabled={!credentialsReady} placeholder="localhost or %" title="Host pattern for this database account." />
+				</label>
+				<label class="grid min-w-0 gap-2">
+					<span class="text-xs font-medium text-muted-foreground">Database</span>
+					<Select.Root bind:value={userConfig.database} type="single" items={databaseOptions} disabled={!credentialsReady || !databaseOptions.length}>
+						<Select.Trigger title="Choose database to grant permissions on" class="w-full min-w-0 rounded-sm font-mono text-xs">
+							<span class="truncate">{userConfig.database || "Choose database"}</span>
+						</Select.Trigger>
+						<Select.Content class="rounded-sm">
+							{#if databaseOptions.length}
+								{#each databaseOptions as option}
+									<Select.Item value={option.value} label={option.label}>
+										{option.label}
+									</Select.Item>
+								{/each}
+							{:else}
+								<Select.Item value="" label="No databases loaded" disabled>No databases loaded</Select.Item>
+							{/if}
+						</Select.Content>
+					</Select.Root>
+				</label>
+				<label class="grid min-w-0 gap-2 @sm:col-span-2">
+					<span class="text-xs font-medium text-muted-foreground">Permissions</span>
+					<Input bind:value={userConfig.privileges} disabled={!credentialsReady} placeholder="SELECT, INSERT, UPDATE or ALL PRIVILEGES" title="Comma-separated privileges to grant." />
+				</label>
+			</div>
 
-		<div class="space-y-3 rounded-sm border border-border bg-background/60 p-3">
-			<div class="flex items-center justify-between gap-3">
-				<div>
-					<p class="text-xs font-medium text-muted-foreground">Quick permissions</p>
-					<p class="mt-1 text-xs text-muted-foreground">Toggle common grants, or choose all privileges.</p>
+			<div class="space-y-3">
+				<div class="flex flex-wrap items-center justify-between gap-3">
+					<div>
+						<p class="text-xs font-medium text-muted-foreground">Quick permissions</p>
+					</div>
+					<Button variant="outline" size="xs" onclick={useAllPrivileges} disabled={!credentialsReady} title="Grant all privileges on the selected database">
+						All Privileges
+					</Button>
 				</div>
-				<Button variant="outline" size="xs" onclick={useAllPrivileges} disabled={!credentialsReady} title="Grant all privileges on the selected database">
-					All Privileges
+				<ToggleGroup.Root
+					type="multiple"
+					value={toggleGroupPrivileges()}
+					onValueChange={(value) => updatePrivileges(Array.isArray(value) ? value : [value])}
+					disabled={!credentialsReady}
+					class="grid grid-cols-2 gap-2 @sm:grid-cols-4"
+					aria-label="Database user permissions"
+				>
+					{#each commonPrivileges as privilege}
+						<ToggleGroup.Item
+							value={privilege}
+							title={`Toggle ${privilege} permission`}
+							class="w-full"
+						>
+							{privilege}
+						</ToggleGroup.Item>
+					{/each}
+				</ToggleGroup.Root>
+			</div>
+
+			<AuthenticationCompatibility bind:nativePassword disabled={busy || !credentialsReady} />
+
+			<div class="flex flex-wrap gap-2">
+				<Button type="submit" disabled={busy || !credentialsReady} title={credentialsReady ? "Create or update this MariaDB user" : "Apply valid admin credentials before adding users"}>
+					<UserPlusIcon />
+					Add User
 				</Button>
 			</div>
-			<ToggleGroup.Root
-				type="multiple"
-				value={toggleGroupPrivileges()}
-				onValueChange={(value) => updatePrivileges(Array.isArray(value) ? value : [value])}
-				disabled={!credentialsReady}
-				class="grid grid-cols-2 gap-2 sm:grid-cols-4"
-				aria-label="Database user permissions"
-			>
-				{#each commonPrivileges as privilege}
-					<ToggleGroup.Item
-						value={privilege}
-						title={`Toggle ${privilege} permission`}
-						class="w-full"
-					>
-						{privilege}
-					</ToggleGroup.Item>
-				{/each}
-			</ToggleGroup.Root>
-		</div>
-
-		<div class="flex flex-wrap gap-2">
-			<Button onclick={onSave} disabled={busy || !credentialsReady} title={credentialsReady ? "Create or update this MariaDB user" : "Apply valid admin credentials before adding users"}>
-				<UserPlusIcon />
-				Add User
-			</Button>
-		</div>
+		</form>
 	</Card.Content>
 </Card.Root>

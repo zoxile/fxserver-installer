@@ -17,8 +17,7 @@
 	import StatusOverview from "./StatusOverview.svelte";
 	import UserManagementCard from "./UserManagementCard.svelte";
 	import { Notice } from "$lib/components/ui/notice/index.js";
-	import { Checkbox } from "$lib/components/ui/checkbox/index.js";
-	import { databaseSession, rememberDatabaseCredentials } from "$lib/core/databaseSession.svelte";
+	import { databaseSession, ensureDatabaseSession, handleDatabaseConnectionError, invalidateDatabaseSession, isDatabaseSessionValidated } from "$lib/core/databaseSession.svelte";
 	import { log } from "$lib/core/logger.svelte";
 	import { mariadbActivity } from "$lib/core/mariadbActivity.svelte";
 	import {
@@ -37,7 +36,6 @@
 		uninstallMariaDB,
 		updateMariaDB,
 		updateMariaDBUser,
-		validateMariaDBCredentials,
 		type MariaDBCredentials,
 		type MariaDBInstallOptions,
 		type MariaDBUser,
@@ -47,7 +45,6 @@
 	let busy = $derived(activeTasks > 0 || mariadbActivity.busy);
 	let installStage = $derived(mariadbActivity.stage);
 	let backupWarningDismissed = $state(false);
-	let validatedCredentials = $state("");
 	let nativePassword = $state(false);
 	let editNativePassword = $state(false);
 	let mounted = false;
@@ -71,7 +68,7 @@
 		password: databaseSession.credentials?.password ?? "",
 		database: databaseSession.credentials?.database ?? databaseSession.defaults.database,
 	});
-	const credentialsReady = $derived(Boolean(validatedCredentials) && validatedCredentials === JSON.stringify(credentials));
+	const credentialsReady = $derived(isDatabaseSessionValidated(credentials));
 	let installOptions = $state<MariaDBInstallOptions>({
 		version: DEFAULT_MARIADB_SERIES,
 		rootPassword: "",
@@ -99,8 +96,7 @@
 
 	onMount(() => {
 		mounted = true;
-		// Restored/shared credentials have not been validated against this server yet.
-		if (databaseSession.credentials) void applyCredentials();
+		if (databaseSession.credentials) void applyCredentials(false);
 		const statusTimer = window.setTimeout(() => {
 			void refreshStatus(false);
 		}, 120);
@@ -129,6 +125,7 @@
 			message = success;
 			return value;
 		} catch (caught) {
+			handleDatabaseConnectionError(credentials, caught);
 			error = caught instanceof Error ? caught.message : String(caught);
 			log("MariaDB panel task failed.", { level: "error", scope: "mariadb.ui", detail: error });
 		} finally {
@@ -158,6 +155,7 @@
 	}
 
 	async function install() {
+		invalidateDatabaseSession();
 		setStage(`Preparing MariaDB ${installOptions.version ?? DEFAULT_MARIADB_SERIES} package. Approve the Windows administrator prompt if it appears.`);
 		const result = await runTask(() => installMariaDB(installOptions), "MariaDB installer completed.");
 		if (result !== undefined) {
@@ -178,10 +176,10 @@
 		}
 
 		setStage("Preparing MariaDB uninstall. Windows will ask for administrator permission; press Yes to remove the service while preserving databases and data files.");
+		invalidateDatabaseSession();
 		const result = await runTask(() => uninstallMariaDB(), "MariaDB uninstalled.");
 		if (result !== undefined) {
 			setStage("Uninstall finished. Refreshing MariaDB status and package details.");
-			validatedCredentials = "";
 			users = [];
 			databases = [];
 			selectedUser = null;
@@ -195,6 +193,7 @@
 
 	async function update() {
 		if (!status?.installed) return;
+		invalidateDatabaseSession();
 		setStage(`Preparing MariaDB update to ${packageInfo?.latestVersion ?? "the recommended version"}. Approve the Windows administrator prompt if it appears.`);
 		const result = await runTask(() => updateMariaDB(), "MariaDB update completed.");
 		if (result !== undefined) {
@@ -207,14 +206,17 @@
 	}
 
 	async function startService() {
+		invalidateDatabaseSession();
 		await runTask(() => startMariaDBService(status?.serviceName), "MariaDB service started.", (value) => (status = value));
 	}
 
 	async function stopService() {
+		invalidateDatabaseSession();
 		await runTask(() => stopMariaDBService(status?.serviceName), "MariaDB service stopped.", (value) => (status = value));
 	}
 
 	async function restartService() {
+		invalidateDatabaseSession();
 		await runTask(() => restartMariaDBService(status?.serviceName), "MariaDB service restarted.", (value) => (status = value));
 	}
 
@@ -290,34 +292,32 @@
 		);
 	}
 
-	async function applyCredentials() {
+	async function applyCredentials(force = true) {
+		if (!mounted) return;
 		const original = { ...credentials };
 		const revision = databaseSession.revision;
 		const request = ++credentialRequest;
-		validatedCredentials = "";
 		connectionError = "";
 		databases = [];
 		selectedAccess = null;
-		log("MariaDB admin credentials changed; refreshing status and users.", { scope: "mariadb.ui", detail: `${credentials.username}@${credentials.host}:${credentials.port}` });
-		await refreshStatus(true);
-
 		activeTasks += 1;
 		error = "";
 		message = "";
 
 		try {
 			if (!mounted || request !== credentialRequest || revision !== databaseSession.revision) return;
-			await validateMariaDBCredentials(original);
-			const [loadedUsers, loadedDatabases] = await Promise.all([listMariaDBUsers(original), listMariaDBDatabases(original)]);
+			if (!await ensureDatabaseSession(original, force)) return;
+			const serverCredentials = { ...original, database: null };
+			const [loadedUsers, loadedDatabases] = await Promise.all([listMariaDBUsers(serverCredentials), listMariaDBDatabases(serverCredentials)]);
 			if (!mounted || request !== credentialRequest || revision !== databaseSession.revision) return;
-			if (!rememberDatabaseCredentials(original, revision)) return;
+			if (JSON.stringify(original) !== JSON.stringify(credentials)) return;
 			users = loadedUsers;
 			databases = loadedDatabases;
-			validatedCredentials = JSON.stringify(original);
-			message = "Admin credentials applied.";
+			if (force) message = "Admin credentials applied.";
 			await refreshUserAccess();
 		} catch (caught) {
 			if (!mounted || request !== credentialRequest || revision !== databaseSession.revision) return;
+			handleDatabaseConnectionError(original, caught);
 			connectionError = caught instanceof Error ? caught.message : String(caught);
 			error = connectionError;
 			log("MariaDB credentials rejected.", { level: "error", scope: "mariadb.ui", detail: connectionError });
@@ -409,16 +409,12 @@
 			<StatusOverview {status} {packageInfo} {busy} onRefresh={refreshStatus} onStart={startService} onStop={stopService} onRestart={restartService} onUpdate={update} onUninstall={uninstall} />
 		</div>
 		<div class="xl:col-span-6">
-			<ConnectionCard bind:credentials {busy} {credentialsReady} {connectionError} onApply={applyCredentials} />
+			<ConnectionCard bind:credentials {busy} {credentialsReady} {connectionError} onApply={() => applyCredentials()} />
 		</div>
-		<div class="xl:col-span-5">
-			<UserManagementCard bind:userConfig {busy} {credentialsReady} {databases} onSave={saveUser} />
-			<label class="mt-2 flex items-start gap-2 text-sm" title="Explicitly select mysql_native_password for a game connector that requires it. Existing authentication methods will be replaced only after confirmation.">
-				<Checkbox bind:checked={nativePassword} disabled={busy} class="mt-1" />
-				<span>Game-user compatibility: mysql_native_password</span>
-			</label>
+		<div class="min-w-0 xl:col-span-5">
+			<UserManagementCard bind:userConfig bind:nativePassword {busy} {credentialsReady} {databases} onSave={saveUser} />
 		</div>
-		<div class="xl:col-span-7 xl:row-span-2">
+		<div class="min-w-0 xl:col-span-7">
 			<ExistingUsersCard
 				{busy}
 				{credentialsReady}
@@ -426,18 +422,13 @@
 				{selectedUser}
 				{selectedAccess}
 				bind:editingUser
+				bind:nativePassword={editNativePassword}
 				{databases}
 				onRefresh={refreshUsers}
 				onEdit={editUser}
 				onSave={saveExistingUser}
 				onDelete={removeExistingUser}
 			/>
-			{#if editingUser}
-				<label class="mt-2 flex items-start gap-2 text-sm" title="Replaces existing authentication methods only after explicit confirmation.">
-					<Checkbox bind:checked={editNativePassword} disabled={busy} class="mt-1" />
-					<span>Change this user's authentication to mysql_native_password</span>
-				</label>
-			{/if}
 		</div>
 	</div>
 </section>
