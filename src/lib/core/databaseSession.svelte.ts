@@ -1,11 +1,16 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { MariaDBCredentials } from "$lib/modules/mariadb";
+import { validateMariaDBCredentials, type MariaDBCredentials } from "$lib/modules/mariadb";
 
 let storageQueue: Promise<unknown> = Promise.resolve();
 let storageRevision = 0;
+let pendingRemember = false;
+let validationGeneration = 0;
+let validation: { credentials: MariaDBCredentials; revision: number; pending: Promise<boolean> } | undefined;
 
 export const databaseSession = $state<{
 	credentials: MariaDBCredentials | null;
+	validated: { credentials: MariaDBCredentials; revision: number } | null;
+	validating: boolean;
 	connectionString: string;
 	revision: number;
 	workspaceId: string;
@@ -16,6 +21,8 @@ export const databaseSession = $state<{
 	defaults: { host: string; port: number; username: string; database: string };
 }>({
 	credentials: null,
+	validated: null,
+	validating: false,
 	connectionString: "",
 	revision: 0,
 	workspaceId: "default",
@@ -38,12 +45,61 @@ export function formatMariaDBConnectionString(credentials: MariaDBCredentials) {
 
 export function rememberDatabaseCredentials(credentials: MariaDBCredentials, revision = databaseSession.revision) {
 	if (revision !== databaseSession.revision) return false;
+	const changed = !databaseSession.credentials || !sameLogin(databaseSession.credentials, credentials);
 	databaseSession.credentials = { ...credentials };
 	databaseSession.connectionString = formatMariaDBConnectionString(credentials);
 	databaseSession.defaults = { host: credentials.host, port: credentials.port, username: credentials.username, database: credentials.database ?? "" };
 	window.dispatchEvent(new Event("workspace-settings-changed"));
-	if (databaseSession.rememberLogin) void persistDatabaseLogin(credentials);
+	if ((changed || pendingRemember) && databaseSession.rememberLogin && isDatabaseSessionValidated(credentials)) {
+		pendingRemember = false;
+		void persistDatabaseLogin(credentials);
+	}
 	return true;
+}
+
+export function isDatabaseSessionValidated(credentials: MariaDBCredentials) {
+	const validated = databaseSession.validated;
+	return Boolean(validated && validated.revision === databaseSession.revision && sameAuthentication(validated.credentials, credentials));
+}
+
+export function invalidateDatabaseSession(credentials?: MariaDBCredentials) {
+	if (credentials && !sameAuthentication(databaseSession.validated?.credentials ?? validation?.credentials, credentials)) return;
+	validationGeneration++;
+	validation = undefined;
+	databaseSession.validated = null;
+	databaseSession.validating = false;
+}
+
+export function handleDatabaseConnectionError(credentials: MariaDBCredentials, error: unknown) {
+	const message = String(error).slice(0, 32768);
+	if (/\b(?:error|code)\s*[:=(]?\s*(?:1045|1698|2002|2003|2005|2006|2013)\b/i.test(message)) {
+		invalidateDatabaseSession(credentials);
+	}
+}
+
+export function ensureDatabaseSession(credentials: MariaDBCredentials, force = false): Promise<boolean> {
+	const revision = databaseSession.revision;
+	if (!force && isDatabaseSessionValidated(credentials)) return Promise.resolve(true);
+	if (validation?.revision === revision && sameAuthentication(validation.credentials, credentials)) return validation.pending;
+	const snapshot = { ...credentials };
+	const generation = ++validationGeneration;
+	databaseSession.validated = null;
+	databaseSession.validating = true;
+	const current = () => revision === databaseSession.revision && generation === validationGeneration;
+	// Authenticate the server login once; each operation still checks its database permissions.
+	const pending = validateMariaDBCredentials({ ...snapshot, database: null }).then(() => {
+		if (!current()) return false;
+		databaseSession.validated = { credentials: snapshot, revision };
+		rememberDatabaseCredentials(snapshot, revision);
+		return true;
+	}).finally(() => {
+		if (current()) {
+			databaseSession.validating = false;
+			validation = undefined;
+		}
+	});
+	validation = { credentials: snapshot, revision, pending };
+	return pending;
 }
 
 function serializeStorage<T>(action: () => Promise<T>): Promise<T> {
@@ -70,6 +126,7 @@ async function persistDatabaseLogin(credentials?: MariaDBCredentials) {
 		}
 	} catch {
 		if (revision === databaseSession.revision && request === storageRevision) {
+			if (snapshot && databaseSession.rememberLogin) pendingRemember = true;
 			databaseSession.loginError = snapshot
 				? "Could not save this login. Validate the connection and try again."
 				: "Could not forget the saved login. Try again before closing the app.";
@@ -81,18 +138,25 @@ async function persistDatabaseLogin(credentials?: MariaDBCredentials) {
 
 export function setRememberDatabaseLogin(enabled: boolean, current?: MariaDBCredentials) {
 	databaseSession.rememberLogin = enabled;
+	pendingRemember = enabled && (!current || !isDatabaseSessionValidated(current));
 	databaseSession.loginError = "";
 	const validated = databaseSession.credentials;
 	if (!enabled) void persistDatabaseLogin();
-	else if (validated && current && sameLogin(validated, current)) void persistDatabaseLogin(validated);
+	else if (validated && current && sameLogin(validated, current) && isDatabaseSessionValidated(current)) void persistDatabaseLogin(validated);
+}
+
+function sameAuthentication(left: MariaDBCredentials | null | undefined, right: MariaDBCredentials) {
+	return Boolean(left && left.host === right.host && Number(left.port) === Number(right.port)
+		&& left.username === right.username && left.password === right.password);
 }
 
 function sameLogin(left: MariaDBCredentials, right: MariaDBCredentials) {
-	return left.host === right.host && Number(left.port) === Number(right.port) && left.username === right.username
-		&& left.password === right.password && (left.database ?? "") === (right.database ?? "");
+	return sameAuthentication(left, right) && (left.database ?? "") === (right.database ?? "");
 }
 
 export async function restoreDatabaseLogin(workspaceId: string) {
+	invalidateDatabaseSession();
+	pendingRemember = false;
 	const revision = databaseSession.revision;
 	databaseSession.workspaceId = workspaceId;
 	databaseSession.rememberLogin = false;

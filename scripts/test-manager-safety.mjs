@@ -64,7 +64,7 @@ const environmentUrl = build("features/fxserver/fxserverEnv.ts");
 const workspaceModelUrl = build("core/workspaceSettings.ts", { "$lib/features/fxserver/fxserverEnv": environmentUrl });
 const { emptyWorkspace, publicEnvironment } = await import(workspaceModelUrl);
 assert.deepEqual(publicEnvironment({ TXHOST_DATA_PATH: "C:/fixture", txhost_default_dbpass: "hidden", txhost_default_account: "hidden", MYSQL_CONNECTION_STRING: "hidden", API_KEY: "hidden" }), { TXHOST_DATA_PATH: "C:/fixture" });
-const databaseUrl = build("core/databaseSession.svelte.ts", { "@tauri-apps/api/core": transport });
+const databaseUrl = build("core/databaseSession.svelte.ts", { "@tauri-apps/api/core": transport, "$lib/modules/mariadb": url("export const validateMariaDBCredentials = async () => {};") });
 const database = await import(databaseUrl);
 const settingsUrl = build("features/fxserver/fxserverSettings.svelte.ts", {
   "$lib/core/logger.svelte": loggerUrl, "$lib/core/workspaceSettings": workspaceModelUrl,
