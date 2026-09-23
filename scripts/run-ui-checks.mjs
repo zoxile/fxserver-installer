@@ -19,7 +19,14 @@ try {
   for (const name of files) {
     console.log(`Running ${name}`);
     const context = await browser.newContext();
-    await context.route("**/*", (route) => new URL(route.request().url()).origin === new URL(url).origin ? route.continue() : route.abort());
+    await context.route("**/*", (route) => {
+      const request = new URL(route.request().url());
+      if (request.origin !== new URL(url).origin) return route.abort();
+      if (request.pathname === "/api/jg-artifacts/jsonv2") {
+        return route.fulfill({ json: { recommendedArtifact: "10000", windowsDownloadLink: "https://example.invalid/artifact.zip", brokenArtifacts: [] } });
+      }
+      return route.continue();
+    });
     const page = await context.newPage();
     page.setDefaultTimeout(15_000);
     await page.addInitScript(() => { window.confirm = () => true; });

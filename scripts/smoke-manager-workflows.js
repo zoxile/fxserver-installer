@@ -112,7 +112,9 @@ async (page) => {
   await page.waitForFunction(() => !!window.managerTest.pending.start);
   await page.getByTitle(/^Task Center/).click();
   await page.getByRole("heading", { name: "Task Center", exact: true }).waitFor();
-  await page.getByText("Start FXServer", { exact: true }).waitFor();
+  await page.getByRole("button", { name: "Filter tasks", exact: true }).click();
+  await page.getByRole("option", { name: "Running", exact: true }).click();
+  await page.getByText("Start FXServer", { exact: true }).first().waitFor();
   await navigate("Workspaces");
   await page.getByRole("button", { name: "Switch", exact: true }).first().click();
   await page.getByText("Wait for background tasks to finish before switching workspaces.", { exact: true }).waitFor();
