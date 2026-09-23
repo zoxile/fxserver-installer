@@ -288,8 +288,8 @@ function formatKey(key: LuaKey) {
 }
 
 function formatNumber(value: number) {
-	if (!Number.isFinite(value)) return "0";
-	return Number.isInteger(value) ? String(value) : String(Number(value.toFixed(6)));
+	if (!Number.isFinite(value)) throw new Error("Configuration numbers must be finite.");
+	return String(value);
 }
 
 function escapeLuaString(value: string) {
@@ -297,7 +297,7 @@ function escapeLuaString(value: string) {
 }
 
 function isIdentifier(value: string) {
-	return /^[A-Za-z_][A-Za-z0-9_]*$/.test(value);
+	return /^[A-Za-z_][A-Za-z0-9_]*$/.test(value) && !/^(and|break|do|else|elseif|end|false|for|function|goto|if|in|local|nil|not|or|repeat|return|then|true|until|while)$/.test(value);
 }
 
 function isContainer(value: LuaValue): value is Extract<LuaValue, { type: "table" | "array" }> {
@@ -566,28 +566,23 @@ class LuaConfigParser {
 		let root: LuaValue = { type: "table", entries: [] };
 
 		while (!this.is("eof")) {
+			if (this.matchSymbol(";")) continue;
 			if (this.matchIdentifier("Config")) {
 				const path = this.parseConfigPath();
-				if (this.matchSymbol("=")) {
-					const valueLine = this.lineAt(this.peek().position);
-					const value = this.parseValue(path);
-					this.valueLines.set(pathKey(path), valueLine);
-					if (path.length === 0) {
-						root = isContainer(value) ? value : { type: "table", entries: [{ key: { type: "identifier", value: "value" }, value }] };
-					} else {
-						if (!isContainer(root)) root = { type: "table", entries: [] };
-						setConfigPath(root, path, value);
-					}
+				this.consumeSymbol("=");
+				const valueLine = this.lineAt(this.peek().position);
+				const value = this.parseValue(path);
+				this.valueLines.set(pathKey(path), valueLine);
+				if (path.length === 0) {
+					root = value;
+				} else {
+					if (!isContainer(root)) throw new Error("Cannot assign fields of a non-table Config value.");
+					setConfigPath(root, path, value);
 				}
 				continue;
 			}
 
-			if (this.matchIdentifier("return")) {
-				root = this.parseValue([]);
-				continue;
-			}
-
-			this.advance();
+			throw new Error(`Unsupported Lua syntax at line ${this.lineAt(this.peek().position)}. Only literal Config assignments can be regenerated safely.`);
 		}
 
 		return root;
@@ -599,6 +594,7 @@ class LuaConfigParser {
 		while (true) {
 			if (this.matchSymbol(".")) {
 				const token = this.consume("identifier", "Expected a property name after Config.");
+				if (!isIdentifier(token.value)) throw new Error("Lua keywords cannot be used as property names without brackets.");
 				path.push(token.value);
 				continue;
 			}
@@ -636,15 +632,16 @@ class LuaConfigParser {
 			return this.parseVector(token.value as "vector2" | "vector3" | "vector4");
 		}
 
-		return this.parseRawValue();
+		throw new Error(`Unsupported Lua value at line ${this.lineAt(token.position)}. Expressions, calls, and control flow cannot be regenerated safely.`);
 	}
 
 	private parseTable(path: Array<string | number>): LuaValue {
 		const entries: LuaTableEntry[] = [];
+		const keys = new Set<string | number>();
 		let implicitIndex = 1;
 
-		while (!this.is("eof") && !this.matchSymbol("}")) {
-			if (this.matchSymbol(",") || this.matchSymbol(";")) continue;
+		while (!this.matchSymbol("}")) {
+			if (this.is("eof")) throw new Error("Unterminated configuration table.");
 
 			let key: LuaKey | undefined;
 			let value: LuaValue;
@@ -653,6 +650,7 @@ class LuaConfigParser {
 
 			if (this.peek().type === "identifier" && this.peek(1).value === "=") {
 				key = { type: "identifier", value: this.advance().value };
+				if (!isIdentifier(key.value)) throw new Error("Lua keywords cannot be used as table keys without brackets.");
 				this.consumeSymbol("=");
 				nextPath = [...path, key.value];
 				value = this.parseValue(nextPath);
@@ -669,10 +667,13 @@ class LuaConfigParser {
 				implicitIndex += 1;
 			}
 
+			if (keys.has(key.value)) throw new Error("Duplicate table keys cannot be regenerated safely.");
+			keys.add(key.value);
 			this.valueLines.set(pathKey(nextPath), valueLine);
 			entries.push({ key, value });
-			this.matchSymbol(",");
-			this.matchSymbol(";");
+			if (!(this.peek().type === "symbol" && this.peek().value === "}") && !this.matchSymbol(",") && !this.matchSymbol(";")) {
+				throw new Error("Expected a table field separator. Lua expressions cannot be regenerated safely.");
+			}
 		}
 
 		return { type: isArrayEntries(entries) ? "array" : "table", entries };
@@ -688,11 +689,6 @@ class LuaConfigParser {
 			this.advance();
 			return { type: "number", value: Number(token.value) };
 		}
-		if (token.type === "identifier") {
-			this.advance();
-			return { type: "string", value: token.value };
-		}
-
 		throw new Error(`Expected a table key near ${this.describeToken(token)}.`);
 	}
 
@@ -701,10 +697,12 @@ class LuaConfigParser {
 		this.consumeSymbol("(");
 
 		const values: number[] = [];
-		while (!this.is("eof") && !this.matchSymbol(")")) {
+		while (!this.matchSymbol(")")) {
 			const numberToken = this.consume("number", `${type} only accepts numeric components.`);
 			values.push(Number(numberToken.value));
-			this.matchSymbol(",");
+			if (this.peek().type === "symbol" && this.peek().value === ")") continue;
+			this.consumeSymbol(",");
+			if (this.peek().type === "symbol" && this.peek().value === ")") throw new Error("Trailing commas in vector calls are not supported.");
 		}
 
 		const expected = vectorSizes[type];
@@ -713,24 +711,6 @@ class LuaConfigParser {
 		}
 
 		return { type, values };
-	}
-
-	private parseRawValue(): LuaValue {
-		const start = this.peek().position;
-		let depth = 0;
-
-		while (!this.is("eof")) {
-			const token = this.peek();
-			if (depth === 0 && (token.value === "," || token.value === "}" || token.value === ";")) break;
-			if (token.value === "(" || token.value === "{" || token.value === "[") depth += 1;
-			if (token.value === ")" || token.value === "}" || token.value === "]") depth -= 1;
-			this.advance();
-		}
-
-		const end = this.peek().position;
-		const value = this.source.slice(start, end).trim();
-		this.warnings.push(`Unsupported raw Lua expression preserved: ${value || "empty expression"}`);
-		return { type: "raw", value: value || "nil" };
 	}
 
 	private matchIdentifier(value: string) {
@@ -793,6 +773,7 @@ function setConfigPath(root: LuaValue, path: Array<string | number>, value: LuaV
 		let entry = findEntry(current, segment);
 
 		if (!entry) {
+			if (!final) throw new Error("Nested Config assignments require an existing literal table.");
 			entry = {
 				key: typeof segment === "number" ? { type: "number", value: segment } : { type: isIdentifier(segment) ? "identifier" : "string", value: segment },
 				value: final ? value : { type: "table", entries: [] },
@@ -803,7 +784,7 @@ function setConfigPath(root: LuaValue, path: Array<string | number>, value: LuaV
 		if (final) {
 			entry.value = value;
 		} else {
-			if (!isContainer(entry.value)) entry.value = { type: "table", entries: [] };
+			if (!isContainer(entry.value)) throw new Error("Cannot assign fields of a non-table Config value.");
 			current = entry.value;
 		}
 	}
@@ -871,13 +852,15 @@ function tokenize(source: string) {
 }
 
 function skipComment(source: string, cursor: number) {
+	if (/^\[=+\[/.test(source.slice(cursor))) throw new Error("Long-bracket comments with equals signs are not supported.");
 	if (source[cursor] === "[" && source[cursor + 1] === "[") {
 		const end = source.indexOf("]]", cursor + 2);
-		return end === -1 ? source.length : end + 2;
+		if (end === -1) throw new Error("Unterminated block comment.");
+		return end + 2;
 	}
 
-	const end = source.indexOf("\n", cursor);
-	return end === -1 ? source.length : end + 1;
+	const end = source.slice(cursor).search(/[\r\n]/);
+	return end === -1 ? source.length : cursor + end + 1;
 }
 
 function readString(source: string, start: number, quote: string): Token {
@@ -886,6 +869,7 @@ function readString(source: string, start: number, quote: string): Token {
 
 	while (cursor < source.length) {
 		const char = source[cursor];
+		if (char === "\r" || char === "\n") throw new Error("Multiline quoted strings are not supported.");
 		if (char === quote) {
 			return { type: "string", value, position: start, end: cursor + 1 };
 		}
@@ -905,19 +889,25 @@ function readString(source: string, start: number, quote: string): Token {
 }
 
 function decodeEscape(value: string) {
-	return {
+	const decoded = {
 		n: "\n",
 		r: "\r",
 		t: "\t",
 		"\\": "\\",
 		'"': '"',
 		"'": "'",
-	}[value] ?? value;
+	}[value];
+	if (decoded === undefined) throw new Error("Unsupported Lua string escape. Source was not regenerated.");
+	return decoded;
 }
 
 function readNumber(source: string, start: number): Token {
 	const match = /^-?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?/i.exec(source.slice(start));
 	if (!match) throw new Error(`Invalid number near ${source.slice(start, start + 12)}.`);
 	const value = match[0];
+	const number = Number(value);
+	if (!Number.isFinite(number) || Number.isInteger(number) && !Number.isSafeInteger(number)) {
+		throw new Error("Numeric literal cannot be represented safely by the configurator.");
+	}
 	return { type: "number", value, position: start, end: start + value.length };
 }
