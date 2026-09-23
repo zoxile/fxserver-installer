@@ -24,6 +24,7 @@ pub fn install_mariadb(
     options: MariaDBInstallOptions,
     report: &dyn Fn(&str),
 ) -> Result<String, String> {
+    validate_install_settings(&options)?;
     report("Checking installation settings and preserved data.");
     super::detect::clear_detection_cache();
     if registry_installed_package().is_some() || detect_mariadb().installed {
@@ -689,25 +690,35 @@ fn build_install_plan(options: &MariaDBInstallOptions) -> Result<InstallPlan, St
     })
 }
 
+fn validate_install_settings(options: &MariaDBInstallOptions) -> Result<(), String> {
+    super::service::validate_service_name(&options.service_name)?;
+    if options.port == 0 {
+        return Err("Choose a nonzero MariaDB port.".into());
+    }
+    super::query::option_value(&options.root_password)?;
+    for (label, value) in [
+        ("Install Directory", &options.install_dir),
+        ("Data Directory", &options.data_dir),
+    ] {
+        if let Some(value) = value.as_deref().filter(|value| !value.trim().is_empty()) {
+            let path = Path::new(value);
+            crate::commands::backup_manager::storage::validate_local_path(path)
+                .and_then(|_| crate::commands::config_history::ensure_unlinked_path(path))
+                .map_err(|error| format!("Invalid {label}: {error}"))?;
+        }
+    }
+    Ok(())
+}
+
 fn build_msi_overrides(
     options: &MariaDBInstallOptions,
     install_plan: &InstallPlan,
     log_path: &Path,
 ) -> Result<String, String> {
+    validate_install_settings(options)?;
     if matches!(install_plan, InstallPlan::Fresh) && options.root_password.trim().is_empty() {
         return Err("Root password is required for a configured MariaDB install.".to_string());
     }
-
-    if options.service_name.is_empty()
-        || options.service_name.len() > 64
-        || !options
-            .service_name
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
-    {
-        return Err("Service name must contain only letters, digits, hyphens, or underscores (1-64 characters).".to_string());
-    }
-    super::service::validate_service_name(&options.service_name)?;
 
     let mut properties = vec![
         "/qn".to_string(),
@@ -1371,65 +1382,33 @@ fn rewrite_my_ini(
 }
 
 fn upsert_ini_value(lines: &mut Vec<String>, section: &str, key: &str, value: &str) {
-    let section_header = format!("[{section}]");
-    let mut section_start = None;
-    let mut next_section = lines.len();
-
-    for (index, line) in lines.iter().enumerate() {
-        let trimmed = line.trim();
-        if trimmed.eq_ignore_ascii_case(&section_header) {
-            section_start = Some(index);
-            continue;
+    // MariaDB accepts repeated groups/keys and underscore aliases; the last value wins.
+    remove_ini_value(lines, section, key);
+    if let Some((_, end)) = ini_section_range(lines, section) {
+        lines.insert(end, format!("{key}={value}"));
+    } else {
+        if !lines.last().is_some_and(|line| line.trim().is_empty()) {
+            lines.push(String::new());
         }
-        if section_start.is_some() && trimmed.starts_with('[') && trimmed.ends_with(']') {
-            next_section = index;
-            break;
-        }
+        lines.push(format!("[{section}]"));
+        lines.push(format!("{key}={value}"));
     }
-
-    let section_start = match section_start {
-        Some(index) => index,
-        None => {
-            if !lines.last().is_some_and(|line| line.trim().is_empty()) {
-                lines.push(String::new());
-            }
-            lines.push(section_header);
-            lines.push(format!("{key}={value}"));
-            return;
-        }
-    };
-
-    for line in lines.iter_mut().take(next_section).skip(section_start + 1) {
-        let trimmed = line.trim_start();
-        if trimmed
-            .split_once('=')
-            .is_some_and(|(candidate, _)| candidate.trim().eq_ignore_ascii_case(key))
-        {
-            *line = format!("{key}={value}");
-            return;
-        }
-    }
-
-    lines.insert(next_section, format!("{key}={value}"));
 }
 
 fn remove_ini_value(lines: &mut Vec<String>, section: &str, key: &str) {
-    let Some((section_start, next_section)) = ini_section_range(lines, section) else {
-        return;
-    };
-
-    let mut index = next_section;
-    while index > section_start + 1 {
-        index -= 1;
-        let trimmed = lines[index].trim_start();
-        if trimmed
-            .split_once('=')
-            .is_some_and(|(candidate, _)| candidate.trim().eq_ignore_ascii_case(key))
-            || trimmed.eq_ignore_ascii_case(key)
-        {
-            lines.remove(index);
+    let section_header = format!("[{section}]");
+    let mut in_section = false;
+    lines.retain(|line| {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            in_section = trimmed.eq_ignore_ascii_case(&section_header);
+            return true;
         }
-    }
+        let candidate = trimmed
+            .split_once('=')
+            .map_or(trimmed, |(name, _)| name.trim());
+        !in_section || !candidate.replace('_', "-").eq_ignore_ascii_case(key)
+    });
 }
 
 fn ini_section_range(lines: &[String], section: &str) -> Option<(usize, usize)> {
@@ -1439,13 +1418,12 @@ fn ini_section_range(lines: &[String], section: &str) -> Option<(usize, usize)> 
 
     for (index, line) in lines.iter().enumerate() {
         let trimmed = line.trim();
-        if trimmed.eq_ignore_ascii_case(&section_header) {
-            section_start = Some(index);
-            continue;
-        }
         if section_start.is_some() && trimmed.starts_with('[') && trimmed.ends_with(']') {
             next_section = index;
             break;
+        }
+        if trimmed.eq_ignore_ascii_case(&section_header) {
+            section_start = Some(index);
         }
     }
 
@@ -1694,6 +1672,40 @@ mod tests {
                 build_msi_overrides(&options, &InstallPlan::Fresh, Path::new("unused.log"))
                     .is_err()
             );
+        }
+    }
+
+    #[test]
+    fn install_settings_reject_unusable_credentials_and_port_before_msi() {
+        let mut options = options();
+        options.port = 0;
+        assert!(validate_install_settings(&options).is_err());
+        options.port = 3306;
+        for password in ["contains\0nul".to_string(), "x".repeat(1025)] {
+            options.root_password = password;
+            assert!(validate_install_settings(&options).is_err());
+        }
+        options.root_password = "valid password".into();
+        assert!(validate_install_settings(&options).is_ok());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn install_settings_reject_nonlocal_and_unsafe_paths_before_msi() {
+        for path in [
+            "relative/data",
+            r"\\server\share\data",
+            r"C:\data:stream",
+            "C:/data\nplugin-load=untrusted",
+            r"C:\data\..\other",
+            r"C:\data.",
+        ] {
+            let mut options = options();
+            options.data_dir = Some(path.into());
+            assert!(validate_install_settings(&options).is_err(), "{path}");
+            options.data_dir = None;
+            options.install_dir = Some(path.into());
+            assert!(validate_install_settings(&options).is_err(), "{path}");
         }
     }
 
@@ -1958,6 +1970,39 @@ mod tests {
         assert!(!rewritten.contains("skip-networking"));
         assert!(rewritten.contains("bind-address=127.0.0.1"));
         assert!(rewritten.contains("port=3306"));
+    }
+
+    #[test]
+    fn preserved_config_removes_all_duplicate_keys_groups_and_option_aliases() {
+        let content = "[mysqld]\ndatadir=C:/first\ndatadir=C:/second\nbind_address=0.0.0.0\nskip_networking\nport=3307\n[client]\nport=3308\n[MySQLd]\ndatadir=C:/last\nbind-address=::\nskip-networking=ON\nport=3309\n# retain this comment\nmax_connections=100\n";
+        let mut options = options();
+        options.skip_networking = false;
+        let rewritten = rewrite_my_ini(
+            content,
+            &options,
+            Path::new("C:/MariaDB"),
+            Path::new("C:/data"),
+        );
+        assert_eq!(rewritten.matches("datadir=").count(), 1);
+        assert!(rewritten.contains("datadir=C:/data"));
+        assert_eq!(rewritten.matches("bind-address=").count(), 1);
+        assert!(rewritten.contains("bind-address=127.0.0.1"));
+        assert!(!rewritten.contains("bind_address"));
+        assert!(!rewritten.contains("skip-networking"));
+        assert!(!rewritten.contains("skip_networking"));
+        assert!(rewritten.contains("port=3306"));
+        assert!(rewritten.contains("[client]\r\nport=3308"));
+        assert!(!rewritten.contains("port=3309"));
+        assert!(rewritten.contains("# retain this comment\r\nmax_connections=100"));
+        assert_eq!(
+            rewrite_my_ini(
+                &rewritten,
+                &options,
+                Path::new("C:/MariaDB"),
+                Path::new("C:/data")
+            ),
+            rewritten
+        );
     }
 
     #[test]

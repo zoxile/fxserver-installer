@@ -22,6 +22,10 @@ const MAX_CELL: usize = 4096;
 const MAX_EXPORT: usize = 5000;
 const MAX_PAGE_CELLS: usize = 4000;
 
+#[cfg(all(test, windows))]
+#[path = "database_boundary_integration.rs"]
+mod boundary_integration;
+
 fn bounded_page_size(requested: usize, columns: usize) -> usize {
     requested.min(200).min(MAX_PAGE_CELLS / columns.max(1))
 }
@@ -936,7 +940,8 @@ mod tests {
     use super::*;
 
     #[cfg(windows)]
-    static ISOLATED_CLIENT: Mutex<Option<(std::path::PathBuf, u16)>> = Mutex::new(None);
+    static ISOLATED_CLIENT: Mutex<Option<(std::path::PathBuf, u16, std::path::PathBuf)>> =
+        Mutex::new(None);
 
     #[cfg(windows)]
     pub(super) fn isolated_client(
@@ -948,7 +953,11 @@ mod tests {
                 return Err("Disposable test refused credentials for an unowned endpoint.".into());
             }
             let mut command = Command::new(fixture.0);
-            command.no_window();
+            command
+                .no_window()
+                .current_dir(&fixture.2)
+                .env("MARIADB_HOME", &fixture.2)
+                .env("MYSQL_HOME", &fixture.2);
             let guard = crate::services::mariadb::query::isolated_credentials_args(
                 &mut command,
                 credentials,
@@ -1091,7 +1100,8 @@ mod tests {
                 }
                 std::thread::sleep(Duration::from_millis(50));
             }
-            *ISOLATED_CLIENT.lock().unwrap() = Some((bin.join("mariadb.exe"), port));
+            *ISOLATED_CLIENT.lock().unwrap() =
+                Some((bin.join("mariadb.exe"), port, owned.directory.clone()));
             // The freshly generated password and this datadir check bind all subsequent
             // reads/writes to our own server even if another process raced the free port.
             let actual: Vec<String> =
@@ -1372,9 +1382,14 @@ mod tests {
         let mut owned = OwnedDatabase::start()?;
         let pid = owned.child.id();
         let mut checks = Vec::new();
+        let mut server_version = None;
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
             || -> Result<(), String> {
                 let credentials = &owned.credentials;
+                server_version =
+                    query_json::<String>(credentials, "SELECT JSON_QUOTE(VERSION());")?
+                        .into_iter()
+                        .next();
                 let database = "fxi_read_fixture";
                 let table = "rows` \u{e5}";
                 let target = format!(
@@ -1498,6 +1513,12 @@ mod tests {
                 checks.push("admin stale-schema refusal preserves rows, one-shot permits and protected-schema refusal");
                 exercise_user_commands(credentials)?;
                 checks.push("actual account create/update/drop with quoted/backslash SQL-fragment inputs, password/plugin preservation, strict/ANSI/NO_BACKSLASH mode retention and privilege-injection refusal");
+                boundary_integration::exercise_grant_boundaries(credentials)?;
+                checks.push("underscore and percent database grants allow exact target but deny lookalike databases under default and NO_BACKSLASH_ESCAPES modes");
+                boundary_integration::exercise_batch_output(credentials)?;
+                checks.push("production TSV client round-trips Unicode, multiline, tabs, NUL, backslashes, carriage returns, whitespace and empty rows under both SQL modes");
+                boundary_integration::exercise_defaults_isolation(credentials, &owned.directory)?;
+                checks.push("production credential builder ignores fixture ambient init-command/force; explicit fixture-only control proves those options execute and continue after errors");
                 Ok(())
             },
         ));
@@ -1505,9 +1526,10 @@ mod tests {
         let passed = matches!(&outcome, Ok(Ok(()))) && stopped.is_ok();
         let report = serde_json::json!({
             "passed": passed, "checks": checks, "serverPid": pid,
+            "serverVersion": server_version,
             "port": owned.credentials.port, "ownedProcessStoppedAndReaped": stopped.is_ok(),
             "datadir": owned.directory.join("data"), "existingServicesOrDatabasesUsed": false,
-            "clientConfiguration": "fixture defaults-file only", "serverConfiguration": "no-defaults",
+            "clientConfiguration": "production credential builder; fixture defaults-file only", "serverConfiguration": "no-defaults",
         });
         let report_path = owned.directory.join("results.json");
         std::fs::write(

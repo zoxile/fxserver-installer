@@ -4,7 +4,7 @@ use crate::{
         MariaDBUserPrivilege, MariaDBUserUpdateConfig,
     },
     services::mariadb::permissions::{
-        escape_identifier, escape_string, generated_sql, normalize_privileges,
+        escape_grant_database, escape_string, generated_sql, normalize_privileges,
     },
 };
 
@@ -42,7 +42,7 @@ fn validate_user_change(
         return Err("Password must not contain control characters.".into());
     }
     if let Some(database) = database.filter(|v| !v.trim().is_empty()) {
-        escape_identifier(database)?;
+        escape_grant_database(database)?;
         normalize_privileges(privileges.to_vec())?;
     } else if !privileges.is_empty() {
         normalize_privileges(privileges.to_vec())?;
@@ -215,7 +215,7 @@ pub fn grant_permissions(
     privileges: Vec<String>,
 ) -> Result<(), String> {
     validate_account(&username, &host)?;
-    let database = escape_identifier(&database)?;
+    let database = escape_grant_database(&database)?;
     let privileges = normalize_privileges(privileges)?;
     let query = format!(
         "GRANT {privileges} ON {database}.* TO {};",

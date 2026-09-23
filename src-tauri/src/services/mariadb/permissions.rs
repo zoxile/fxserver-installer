@@ -11,6 +11,16 @@ pub fn escape_string(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
 }
 
+pub fn escape_grant_database(value: &str) -> Result<String, String> {
+    // Database-level GRANT treats wildcards as patterns even inside quoted identifiers.
+    escape_identifier(
+        &value
+            .replace('\\', "\\\\")
+            .replace('_', "\\_")
+            .replace('%', "\\%"),
+    )
+}
+
 // Only generated statements use this mode. Arbitrary user queries retain their session modes.
 pub fn generated_sql(sql: &str) -> String {
     format!("SET SESSION sql_mode = IF(FIND_IN_SET('NO_BACKSLASH_ESCAPES', @@SESSION.sql_mode), @@SESSION.sql_mode, CONCAT_WS(',', NULLIF(@@SESSION.sql_mode, ''), 'NO_BACKSLASH_ESCAPES'));\n{sql}")
@@ -65,6 +75,22 @@ pub fn normalize_privileges(privileges: Vec<String>) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn database_grants_escape_patterns_as_well_as_identifiers() {
+        assert_eq!(escape_grant_database("qbx_core").unwrap(), "`qbx\\_core`");
+        assert_eq!(
+            escape_grant_database("game%backup").unwrap(),
+            "`game\\%backup`"
+        );
+        assert_eq!(
+            escape_grant_database("a\\_%`b").unwrap(),
+            "`a\\\\\\_\\%``b`"
+        );
+        assert_eq!(escape_grant_database("game").unwrap(), "`game`");
+        assert!(escape_grant_database("bad\nname").is_err());
+        assert!(escape_grant_database("").is_err());
+    }
+
     #[test]
     fn privileges_are_an_allowlist_not_sql_fragments() {
         for values in [

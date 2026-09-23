@@ -36,6 +36,8 @@ pub fn execute_query(
 
     let (mut command, _credentials_file) = configured_client(&credentials)?;
     configure_query_command(&mut command, credentials.database.as_deref())?;
+    // Structured JSON callers retain raw mode; TSV needs escaped cell delimiters.
+    command.arg("--skip-raw");
     let mut result = run_query_client(&mut command, query, QUERY_TIMEOUT)?;
     if !credentials.password.is_empty() {
         result.stderr = result.stderr.replace(&credentials.password, "[redacted]");
@@ -107,7 +109,7 @@ fn run_query_client(
     timeout: Duration,
 ) -> Result<MariaDBQueryResult, String> {
     let output = run_client(command, query, timeout)?;
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
     let (columns, rows) = parse_tabular_output(&stdout)?;
     Ok(MariaDBQueryResult {
         success: output.status.success(),
@@ -252,7 +254,8 @@ pub(crate) fn apply_credentials_args(
     command: &mut Command,
     credentials: &MariaDBCredentials,
 ) -> Result<CredentialFile, String> {
-    configure_credentials_args(command, credentials, "--defaults-extra-file=")
+    // Ambient option files can execute SQL or enable --force, bypassing fail-closed scripts.
+    configure_credentials_args(command, credentials, "--defaults-file=")
 }
 
 #[cfg(all(test, windows))]
@@ -263,7 +266,17 @@ pub(crate) fn isolated_credentials_args(
     if credentials.host != "127.0.0.1" {
         return Err("Isolated tests require literal IPv4 loopback.".into());
     }
-    configure_credentials_args(command, credentials, "--defaults-file=")
+    let guard = apply_credentials_args(command, credentials)?;
+    if !command
+        .get_args()
+        .next()
+        .is_some_and(|arg| arg.to_string_lossy().starts_with("--defaults-file="))
+    {
+        return Err(
+            "Disposable tests refuse ambient client configuration before connecting.".into(),
+        );
+    }
+    Ok(guard)
 }
 
 fn configure_credentials_args(
@@ -307,7 +320,7 @@ fn allows_plaintext(host: &str) -> bool {
         || host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback())
 }
 
-fn option_value(value: &str) -> Result<String, String> {
+pub(super) fn option_value(value: &str) -> Result<String, String> {
     if value.len() > 1024 {
         return Err("Client credential exceeds the option-file length limit.".into());
     }
@@ -387,14 +400,11 @@ fn find_mariadb_client_uncached() -> Option<PathBuf> {
 }
 
 fn parse_tabular_output(stdout: &str) -> Result<(Vec<String>, Vec<Vec<String>>), String> {
-    let mut lines = stdout.lines();
+    // MariaDB batch output uses LF; a preceding CR can be part of the last cell.
+    let mut lines = stdout.split_terminator('\n');
     let Some(header) = lines.next() else {
         return Ok((Vec::new(), Vec::new()));
     };
-
-    if !header.contains('\t') && lines.clone().next().is_none() {
-        return Ok((Vec::new(), Vec::new()));
-    }
 
     let mut cells = 0;
     let mut parse_line = |line: &str| -> Result<Vec<String>, String> {
@@ -404,7 +414,7 @@ fn parse_tabular_output(stdout: &str) -> Result<(Vec<String>, Vec<Vec<String>>),
                 if cells > MAX_QUERY_CELLS {
                     return Err("Query exceeded 100,000 result cells. Narrow the query.".into());
                 }
-                Ok(value.to_string())
+                Ok(decode_batch_cell(value))
             })
             .collect()
     };
@@ -417,6 +427,29 @@ fn parse_tabular_output(stdout: &str) -> Result<(Vec<String>, Vec<Vec<String>>),
         rows.push(parse_line(line)?);
     }
     Ok((columns, rows))
+}
+
+fn decode_batch_cell(value: &str) -> String {
+    let mut decoded = String::with_capacity(value.len());
+    let mut characters = value.chars();
+    while let Some(character) = characters.next() {
+        if character != '\\' {
+            decoded.push(character);
+            continue;
+        }
+        match characters.next() {
+            Some('n') => decoded.push('\n'),
+            Some('t') => decoded.push('\t'),
+            Some('0') => decoded.push('\0'),
+            Some('\\') => decoded.push('\\'),
+            Some(other) => {
+                decoded.push('\\');
+                decoded.push(other);
+            }
+            None => decoded.push('\\'),
+        }
+    }
+    decoded
 }
 
 #[cfg(test)]
@@ -502,7 +535,7 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn credential_arguments_preserve_defaults_and_force_remote_verification() {
+    fn credential_arguments_isolate_defaults_and_force_remote_verification() {
         for host in ["127.0.0.1", "db.example"] {
             let mut command = Command::new("inert");
             command.env("MYSQL_PWD", "must-not-inherit");
@@ -511,7 +544,10 @@ mod tests {
                 .get_args()
                 .map(|arg| arg.to_string_lossy().into_owned())
                 .collect();
-            assert!(args[0].starts_with("--defaults-extra-file="));
+            assert!(args[0].starts_with("--defaults-file="));
+            assert!(!args
+                .iter()
+                .any(|arg| arg.starts_with("--defaults-extra-file=")));
             assert!(!args.iter().any(|arg| arg.contains("fixture-password")
                 || arg == "--no-defaults"
                 || arg == "--ssl=0"));
@@ -650,6 +686,42 @@ mod tests {
         assert!(parse_tabular_output(&"\t".repeat(MAX_QUERY_CELLS)).is_err());
     }
 
+    #[test]
+    fn batch_cells_preserve_delimiters_backslashes_empty_values_and_whitespace() {
+        let (columns, rows) = parse_tabular_output(
+            " name\\tlabel\tvalue\n leading\\tcell\\nnext\\0\tliteral\\\\n \\q\n\t\n",
+        )
+        .unwrap();
+        assert_eq!(columns, [" name\tlabel", "value"]);
+        assert_eq!(
+            rows,
+            [
+                vec![" leading\tcell\nnext\0", "literal\\n \\q"],
+                vec!["", ""]
+            ]
+        );
+        assert_eq!(parse_tabular_output("name\n\n").unwrap().1, [vec![""]]);
+        assert_eq!(parse_tabular_output("name\n").unwrap().0, ["name"]);
+        assert_eq!(
+            parse_tabular_output("name\nvalue\r\n\n").unwrap().1,
+            [vec!["value\r"], vec![""]]
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn query_result_does_not_trim_empty_last_rows_or_cell_spaces() {
+        let mut command = Command::new("powershell");
+        command.no_window().args([
+            "-NoProfile", "-Command",
+            "[Console]::In.ReadToEnd() | Out-Null; [Console]::Out.Write(\" name`tvalue`n leading `ttrailing `n`t`n\")",
+        ]);
+        let result =
+            run_query_client(&mut command, "fixture".into(), Duration::from_secs(10)).unwrap();
+        assert_eq!(result.columns, [" name", "value"]);
+        assert_eq!(result.rows, [vec![" leading ", "trailing "], vec!["", ""]]);
+    }
+
     #[cfg(windows)]
     #[test]
     #[ignore = "Requires FXI_TEST_MARIADB_CLIENT; executes only --print-defaults with fixture credentials"]
@@ -671,7 +743,7 @@ mod tests {
             );
             let guard = CredentialFile::create(&contents).unwrap();
             let path = guard.path().to_owned();
-            let mut option = OsString::from("--defaults-extra-file=");
+            let mut option = OsString::from("--defaults-file=");
             option.push(&path);
             let mut command = Command::new(&client);
             command
