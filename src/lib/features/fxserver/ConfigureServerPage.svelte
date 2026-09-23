@@ -22,8 +22,8 @@
 	import PasswordInput from "$lib/components/ui/password-input.svelte";
 	import * as Select from "$lib/components/ui/select/index.js";
 	import { chooseFolder } from "$lib/core/selectFolder";
-	import { databaseSession, formatMariaDBConnectionString, rememberDatabaseCredentials } from "$lib/core/databaseSession.svelte";
-	import { listMariaDBDatabases, validateMariaDBCredentials, type MariaDBCredentials } from "$lib/modules/mariadb";
+	import { databaseSession, ensureDatabaseSession, formatMariaDBConnectionString, handleDatabaseConnectionError, isDatabaseSessionValidated } from "$lib/core/databaseSession.svelte";
+	import { listMariaDBDatabases, type MariaDBCredentials } from "$lib/modules/mariadb";
 	import { readServerConfig, type ServerConfigFile, type ServerConfigResult } from "$lib/modules/fxserver";
 	import { readConfigHistoryFile, saveConfigWithHistory } from "$lib/modules/configHistory";
 	import ConfigHistoryPanel from "$lib/features/config-history/ConfigHistoryPanel.svelte";
@@ -57,7 +57,8 @@
 	});
 	let fxDatabases = $state<string[]>([]);
 	let showDbConnectionString = $state(false);
-	let dbCredentialsReady = $state(Boolean(databaseSession.credentials));
+	const dbCredentialsReady = $derived(isDatabaseSessionValidated(dbCredentials));
+	let dbBusy = $state(false);
 	let dbNotice = $state("");
 	let dbNoticeLevel = $state<"success" | "error">("success");
 	let serverPrincipalIdentifier = $state("");
@@ -98,7 +99,7 @@
 	});
 	const highlightedLines = $derived(richEditor ? editorContent.split("\n").map((line) => highlightCfgLine(line)) : []);
 	const rconReady = $derived(Boolean(result?.rconPasswordFound && result?.rconlogFound));
-	const dbConnectionString = $derived(dbCredentialsReady ? formatMariaDBConnectionString({ ...dbCredentials, database: selectedFxDatabase }) : databaseSession.connectionString);
+	const dbConnectionString = $derived(dbCredentialsReady && fxDatabases.includes(selectedFxDatabase) ? formatMariaDBConnectionString({ ...dbCredentials, database: selectedFxDatabase }) : "");
 	const fxDatabaseOptions = $derived(fxDatabases.map((database) => ({ value: database, label: database })));
 	const popularCfgValues = $derived({
 		hostname: getCfgValue(editorContent, "sv_hostname"),
@@ -124,15 +125,12 @@
 		loadFxserverSettings();
 		dataPath = fxserverSettings.txDataPath;
 		profile = fxserverSettings.profile;
+		if (databaseSession.credentials) void validateFxDatabaseCredentials(false);
 		void (async () => {
 			await refreshTxDataProfiles(getInstallPath());
 			if (!active) return;
 			dataPath = fxserverSettings.txDataPath;
 			profile = fxserverSettings.profile;
-			if (databaseSession.credentials) {
-				await validateFxDatabaseCredentials(false);
-			}
-			if (!active) return;
 			if (dataPath.trim() && profile.trim()) {
 				await loadConfig();
 			}
@@ -178,33 +176,32 @@
 	}
 
 	async function validateFxDatabaseCredentials(showNotice = true) {
-		if (!active) return;
+		if (!active || dbBusy) return;
 		const original = { ...dbCredentials };
 		const revision = databaseSession.revision;
-		dbCredentialsReady = false;
+		dbBusy = true;
 		if (showNotice) dbNotice = "";
 		fxDatabases = [];
 
 		try {
-			await validateMariaDBCredentials(original);
-			const databases = await listMariaDBDatabases(original);
-			if (!active || JSON.stringify(original) !== JSON.stringify(dbCredentials) || !rememberDatabaseCredentials(original, revision)) return;
+			if (!await ensureDatabaseSession(original, showNotice)) return;
+			const databases = await listMariaDBDatabases({ ...original, database: null });
+			if (!active || revision !== databaseSession.revision || JSON.stringify(original) !== JSON.stringify(dbCredentials)) return;
 			fxDatabases = databases;
-			dbCredentialsReady = true;
-			dbCredentials.database = selectedFxDatabase;
-			if (!selectedFxDatabase && fxDatabases.length) {
-				selectedFxDatabase = fxDatabases[0];
-				dbCredentials.database = selectedFxDatabase;
-			}
+			if (!fxDatabases.includes(selectedFxDatabase)) selectedFxDatabase = fxDatabases[0] ?? "";
 			if (showNotice) {
 				dbNotice = "Database credentials validated.";
 				dbNoticeLevel = "success";
 			}
 		} catch (error) {
+			if (!active || revision !== databaseSession.revision) return;
+			handleDatabaseConnectionError(original, error);
 			if (showNotice) {
 				dbNotice = error instanceof Error ? error.message : String(error);
 				dbNoticeLevel = "error";
 			}
+		} finally {
+			dbBusy = false;
 		}
 	}
 
@@ -785,7 +782,7 @@
 				{:else}
 					<div class="rounded-sm border border-border bg-background/70 px-3 py-2 text-xs text-muted-foreground">Connection string hidden.</div>
 				{/if}
-				<Button variant="outline" onclick={() => validateFxDatabaseCredentials()} disabled={busy} title="Validate these database credentials">
+				<Button variant="outline" onclick={() => validateFxDatabaseCredentials()} disabled={dbBusy} title="Validate these database credentials">
 					<KeyRoundIcon />
 					Validate
 				</Button>

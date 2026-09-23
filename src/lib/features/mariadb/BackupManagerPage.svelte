@@ -21,10 +21,10 @@
 	import { Input } from "$lib/components/ui/input/index.js";
 	import { Notice } from "$lib/components/ui/notice/index.js";
 	import ConnectionCard from "./ConnectionCard.svelte";
-	import { databaseSession, rememberDatabaseCredentials } from "$lib/core/databaseSession.svelte";
+	import { databaseSession, ensureDatabaseSession, handleDatabaseConnectionError, isDatabaseSessionValidated } from "$lib/core/databaseSession.svelte";
 	import { chooseFolder } from "$lib/core/selectFolder";
 	import { getWorkspaceId } from "$lib/core/workspaces.svelte";
-	import { listMariaDBDatabases, validateMariaDBCredentials, type MariaDBCredentials } from "$lib/modules/mariadb";
+	import { listMariaDBDatabases, type MariaDBCredentials } from "$lib/modules/mariadb";
 	import {
 		getBackupManager, previewBackupRestore, removeBackupSchedule,
 		restoreBackupSnapshot, runBackupNow, saveBackupSchedule,
@@ -36,7 +36,6 @@
 	const workspaceId = getWorkspaceId();
 	const systemDatabases = new Set(["mysql", "sys", "information_schema", "performance_schema"]);
 	let credentials = $state<MariaDBCredentials>({ ...databaseSession.defaults, password: "", ...databaseSession.credentials });
-	let validated = $state("");
 	let databases = $state<string[]>([]);
 	let overview = $state<BackupOverview>({ schedules: [], snapshots: [], busy: false });
 	let config = $state<BackupSchedule>(newSchedule());
@@ -57,7 +56,7 @@
 	let testsShown = $state(25);
 	let active = true;
 	let refreshPending: Promise<void> | undefined;
-	const credentialsReady = $derived(Boolean(validated) && JSON.stringify(credentials) === validated);
+	const credentialsReady = $derived(isDatabaseSessionValidated(credentials));
 	const databaseOptions = $derived(databases.map((database) => ({ value: database, label: database })));
 	const working = $derived(busy || overview.busy);
 	const restoreTests = $derived(overview.restoreTests ?? []);
@@ -81,7 +80,7 @@
 			}).then((stop) => { if (active) unlisten = stop; else stop(); }).catch((caught) => { if (active) error = String(caught); });
 		}
 		const interval = window.setInterval(() => { if (!document.hidden) void refresh(); }, 15_000);
-		if (databaseSession.credentials) void connect();
+		if (databaseSession.credentials) void connect(false);
 		return () => { active = false; unlisten?.(); window.clearInterval(interval); window.clearTimeout(refreshTimer); };
 	});
 
@@ -100,25 +99,23 @@
 		error = "";
 		message = "";
 		try { await work(); }
-		catch (caught) { if (active) error = caught instanceof Error ? caught.message : String(caught); }
+		catch (caught) { if (active) { handleDatabaseConnectionError(credentials, caught); error = caught instanceof Error ? caught.message : String(caught); } }
 		finally { if (active) { busy = false; await refresh(); } }
 	}
 
-	async function connect() {
+	async function connect(force = true) {
 		await action(async () => {
 			connectionError = "";
 			const original = { ...credentials };
 			const signature = JSON.stringify(original);
 			const requested = { ...original, database: null };
 			try {
-				await validateMariaDBCredentials(requested);
+				if (!await ensureDatabaseSession(original, force)) return;
 				const available = await listMariaDBDatabases(requested);
 				if (!active || JSON.stringify(credentials) !== signature) return;
 				databases = available.filter((name) => !systemDatabases.has(name.toLowerCase()));
-				validated = signature;
-				rememberDatabaseCredentials(original);
 				if (!config.database && databases[0]) config.database = databases[0];
-			} catch (caught) { validated = ""; connectionError = String(caught); throw caught; }
+			} catch (caught) { connectionError = String(caught); throw caught; }
 		});
 	}
 
@@ -226,7 +223,7 @@
 	{#if working && stage}<div role="status" class="flex items-center gap-2 text-sm text-muted-foreground"><LoaderCircleIcon class="size-4 shrink-0 animate-spin" /><span>{stage}</span></div>{/if}
 
 	<div class="grid items-start gap-4 xl:grid-cols-2">
-		<ConnectionCard bind:credentials busy={working} {credentialsReady} {connectionError} stretch={false} onApply={connect} />
+		<ConnectionCard bind:credentials busy={working} {credentialsReady} {connectionError} stretch={false} onApply={() => connect()} />
 		<Card.Root class="min-w-0 rounded-md">
 			<Card.Header class="border-b border-border pb-4">
 				<div class="flex items-center justify-between gap-3"><Card.Title>Schedule</Card.Title><Button size="icon-sm" variant="ghost" title="New schedule" aria-label="New schedule" disabled={working} onclick={() => { config = newSchedule(); enabled = false; }}><PlusIcon /></Button></div>

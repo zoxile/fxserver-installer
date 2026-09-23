@@ -12,7 +12,7 @@
 	import { Input } from "$lib/components/ui/input/index.js";
 	import { Notice } from "$lib/components/ui/notice/index.js";
 	import * as Select from "$lib/components/ui/select/index.js";
-	import { databaseSession, rememberDatabaseCredentials } from "$lib/core/databaseSession.svelte";
+	import { databaseSession, ensureDatabaseSession, handleDatabaseConnectionError, isDatabaseSessionValidated } from "$lib/core/databaseSession.svelte";
 	import { chooseSqlFile } from "$lib/core/selectFile";
 	import {
 		backupMariaDB,
@@ -20,7 +20,6 @@
 		getDefaultMariaDBBackupOutputDir,
 		listMariaDBDatabases,
 		listMariaDBTables,
-		validateMariaDBCredentials,
 		type MariaDBBackupOptions,
 		type MariaDBCredentials,
 		type MariaDBQueryResult,
@@ -40,6 +39,8 @@
 	let queryDatabase = $state(globalScope);
 	let query = $state("SELECT VERSION();");
 	let queryResult = $state<MariaDBQueryResult | null>(null);
+	let queryError = $state("");
+	let sqlError = $state("");
 	let sqlPath = $state("");
 	let sqlContent = $state("");
 	let busy = $state(false);
@@ -47,8 +48,7 @@
 	let messageTone = $state<"success" | "warn">("success");
 	let error = $state("");
 	let result = $state<MariaDBQueryResult | null>(null);
-	let validatedCredentials = $state("");
-	const credentialsReady = $derived(Boolean(validatedCredentials) && validatedCredentials === JSON.stringify(credentials));
+	const credentialsReady = $derived(isDatabaseSessionValidated(credentials));
 	let connectionError = $state("");
 	let backupWarningDismissed = $state(false);
 	let backupTables = $state<string[]>([]);
@@ -125,6 +125,7 @@
 			sqlPath = selected;
 			sqlContent = content;
 			result = null;
+			sqlError = "";
 			messageTone = "success";
 			message = `Loaded ${selected}.`;
 		} catch (caught) {
@@ -136,23 +137,22 @@
 		if (busy || !active) return;
 		const original = { ...credentials };
 		const revision = databaseSession.revision;
-		validatedCredentials = "";
 		busy = true;
 		error = "";
 		message = "";
 		connectionError = "";
 		try {
-			await validateMariaDBCredentials(original);
-			if (!active || !rememberDatabaseCredentials(original, revision)) return;
-			validatedCredentials = JSON.stringify(original);
-			databases = await listMariaDBDatabases(original);
-			if (!active) return;
+			if (!await ensureDatabaseSession(original, showLoadedMessage)) return;
+			const available = await listMariaDBDatabases({ ...original, database: null });
+			if (!active || revision !== databaseSession.revision || JSON.stringify(original) !== JSON.stringify(credentials)) return;
+			databases = available;
 			selectedScope = credentials.database && databases.includes(credentials.database) ? credentials.database : selectedScope;
 			queryDatabase = credentials.database && databases.includes(credentials.database) ? credentials.database : queryDatabase;
 			backupDatabaseName ||= credentials.database && databases.includes(credentials.database) ? credentials.database : databases[0] || "";
 			if (showLoadedMessage) { messageTone = "success"; message = `Loaded ${databases.length} database${databases.length === 1 ? "" : "s"}.`; }
 		} catch (caught) {
-			validatedCredentials = "";
+			if (!active || revision !== databaseSession.revision) return;
+			handleDatabaseConnectionError(original, caught);
 			connectionError = caught instanceof Error ? caught.message : String(caught);
 			error = connectionError;
 		} finally {
@@ -166,16 +166,20 @@
 		error = "";
 		message = "";
 		result = null;
+		sqlError = "";
 		try {
 			const scopedCredentials = {
 				...credentials,
 				database: selectedScope === globalScope ? null : selectedScope,
 			};
 			result = await executeMariaDBQuery(scopedCredentials, sqlContent);
+			if (!result.success) handleDatabaseConnectionError(scopedCredentials, result.stderr);
 			messageTone = result.success ? "success" : "warn";
 			message = result.success ? "SQL file executed." : "SQL file returned an error.";
 		} catch (caught) {
-			error = caught instanceof Error ? caught.message : String(caught);
+			handleDatabaseConnectionError(credentials, caught);
+			sqlError = caught instanceof Error ? caught.message : String(caught);
+			error = sqlError;
 		} finally {
 			busy = false;
 		}
@@ -192,6 +196,7 @@
 		error = "";
 		message = "";
 		queryResult = null;
+		queryError = "";
 		try {
 			queryResult = await executeMariaDBQuery(
 				{
@@ -201,9 +206,12 @@
 				query,
 			);
 			message = queryResult.success ? "Query executed." : "Query returned an error.";
+			if (!queryResult.success) handleDatabaseConnectionError(credentials, queryResult.stderr);
 			messageTone = queryResult.success ? "success" : "warn";
 		} catch (caught) {
-			error = caught instanceof Error ? caught.message : String(caught);
+			handleDatabaseConnectionError(credentials, caught);
+			queryError = caught instanceof Error ? caught.message : String(caught);
+			error = queryError;
 		} finally {
 			busy = false;
 		}
@@ -221,6 +229,7 @@
 			if (selectedBackupTable && !tables.includes(selectedBackupTable)) selectedBackupTable = "";
 		} catch (caught) {
 			if (!active || requestId !== backupTableRequestId) return;
+			handleDatabaseConnectionError(credentials, caught);
 			error = caught instanceof Error ? caught.message : String(caught);
 			backupTables = [];
 		}
@@ -252,6 +261,7 @@
 			messageTone = "success";
 			message = `Backup created: ${backup.path}`;
 		} catch (caught) {
+			handleDatabaseConnectionError(credentials, caught);
 			error = caught instanceof Error ? caught.message : String(caught);
 		} finally {
 			busy = false;
@@ -320,7 +330,7 @@
 					<PlayIcon />
 					Run SQL
 				</Button>
-				<SqlDiagnostics {credentials} database={selectedScope} error={result?.success === false ? result.stderr : ""} disabled={busy || !credentialsReady} />
+				<SqlDiagnostics {credentials} {credentialsReady} database={selectedScope} error={sqlError || (result?.success === false ? result.stderr : "")} disabled={busy} />
 			</Card.Content>
 		</Card.Root>
 	</div>
@@ -342,6 +352,6 @@
 	/>
 
 	<QueryConsole bind:query bind:selectedDatabase={queryDatabase} {busy} canExecute={credentialsReady} {databases} result={queryResult} onExecute={executeQuery}>
-		<SqlDiagnostics {credentials} database={queryDatabase} error={queryResult?.success === false ? queryResult.stderr : ""} disabled={busy || !credentialsReady} />
+		<SqlDiagnostics {credentials} {credentialsReady} database={queryDatabase} error={queryError || (queryResult?.success === false ? queryResult.stderr : "")} disabled={busy} />
 	</QueryConsole>
 </section>

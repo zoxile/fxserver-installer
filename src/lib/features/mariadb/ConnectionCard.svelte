@@ -11,6 +11,7 @@
 
 	type Props = {
 		busy: boolean;
+		validating?: boolean;
 		credentialsReady: boolean;
 		connectionError: string;
 		credentials: MariaDBCredentials;
@@ -18,7 +19,7 @@
 		onApply: () => void;
 	};
 
-	let { busy, credentialsReady, connectionError, credentials = $bindable(), stretch = true, onApply }: Props = $props();
+	let { busy, validating = databaseSession.validating, credentialsReady, connectionError, credentials = $bindable(), stretch = true, onApply }: Props = $props();
 </script>
 
 <Card.Root class={`${stretch ? "h-full" : ""} rounded-md border-border bg-card shadow-sm`}>
@@ -68,8 +69,8 @@
 				<Button variant="outline" size="sm" onclick={() => setRememberDatabaseLogin(false)} disabled={databaseSession.savingLogin}>Forget</Button>
 			</div>
 		{/if}
-		<Button class="w-full" onclick={onApply} disabled={busy} title="Apply admin credentials and refresh MariaDB status, users, and selected user details">
-			<RefreshCwIcon class={busy ? "animate-spin" : undefined} />
+		<Button class="w-full" onclick={onApply} disabled={busy || validating} title="Validate these credentials and reload this panel's database information">
+			<RefreshCwIcon class={validating ? "animate-spin" : undefined} />
 			Change Credentials
 		</Button>
 		{#if connectionError}

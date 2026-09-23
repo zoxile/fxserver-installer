@@ -167,7 +167,7 @@ for (const editorContent of ["x\n".repeat(20_000), "x".repeat(200_001)]) {
 
 const sqlSource = read("features/mariadb/SqlRunnerPage.svelte").match(/<script lang="ts">([\s\S]*?)<\/script>/)[1];
 const sqlAst = ts.createSourceFile("sql.ts", sqlSource, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
-const sqlVariables = new Set(["credentials", "validatedCredentials", "credentialsReady", "backupTables", "selectedBackupTable", "backupMode", "backupDatabaseName", "backupOptions", "backupTableRequestId", "active", "error"]);
+const sqlVariables = new Set(["credentials", "credentialsReady", "backupTables", "selectedBackupTable", "backupMode", "backupDatabaseName", "backupOptions", "backupTableRequestId", "active", "error"]);
 const sqlFixture = sqlAst.statements.filter((node) =>
   ts.isVariableStatement(node) && node.declarationList.declarations.some((entry) => sqlVariables.has(entry.name.getText(sqlAst)))
   || ts.isFunctionDeclaration(node) && node.name?.text === "refreshBackupTables"
@@ -179,9 +179,11 @@ const internalUrl = import.meta.resolve("svelte/internal/client");
 const fixtureSource = `import { untrack } from ${JSON.stringify(internalUrl)};
 const databaseSession = { credentials: null, defaults: { host: "localhost", port: 3306, username: "root", database: "fixture" } };
 const listMariaDBTables = (...args) => globalThis.managerSafety.tables(...args);
+const isDatabaseSessionValidated = () => true;
+const handleDatabaseConnectionError = () => {};
 export function createFixture() {
 ${sqlFixture}
-return { select(database) { backupDatabaseName = database; validatedCredentials = JSON.stringify(credentials); backupMode = "tables"; }, rows() { return backupTables; } };
+return { select(database) { backupDatabaseName = database; backupMode = "tables"; }, rows() { return backupTables; } };
 }`;
 let fixtureCode = compileModule(ts.transpile(fixtureSource, { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 }), { filename: "sql-effects.svelte.js", generate: "client" }).js.code;
 fixtureCode = fixtureCode.replace(/(from\s+|import\s+)["'](svelte\/[^"']+)["']/g, (_, prefix, name) => `${prefix}${JSON.stringify(import.meta.resolve(name))}`);

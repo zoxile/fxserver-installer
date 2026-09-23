@@ -25,12 +25,12 @@
 	import { inspectionTabs, type InspectionView } from "$lib/modules/databaseInspection";
 	import type { AdminResult } from "$lib/modules/databaseAdmin";
 	import { getWorkspaceId } from "$lib/core/workspaces.svelte";
-	import { databaseSession, rememberDatabaseCredentials } from "$lib/core/databaseSession.svelte";
-	import { listMariaDBDatabases, listMariaDBTables, validateMariaDBCredentials, type MariaDBCredentials } from "$lib/modules/mariadb";
+	import { databaseSession, ensureDatabaseSession, handleDatabaseConnectionError, isDatabaseSessionValidated } from "$lib/core/databaseSession.svelte";
+	import { listMariaDBDatabases, listMariaDBTables, type MariaDBCredentials } from "$lib/modules/mariadb";
 	import { exportBrowserCsv, getBrowserMetadata, getBrowserRows, type BrowserFilter, type BrowserMetadata, type BrowserPage, type BrowserRequest, type FilterOperator } from "$lib/modules/databaseBrowser";
 
 	let credentials = $state<MariaDBCredentials>({ ...databaseSession.defaults, password: "", ...databaseSession.credentials });
-	let validated = $state("");
+	const credentialSignature = $derived(JSON.stringify(credentials));
 	let databases = $state<string[]>([]);
 	let tables = $state<string[]>([]);
 	let database = $state("");
@@ -53,7 +53,7 @@
 	let editor = $state<{ kind: "insert" | "update" | "delete"; original: (string | null)[] | null } | null>(null);
 	const workspaceId = getWorkspaceId();
 	let active = true;
-	const credentialsReady = $derived(Boolean(validated) && JSON.stringify(credentials) === validated);
+	const credentialsReady = $derived(isDatabaseSessionValidated(credentials));
 	const operators: { value: FilterOperator; label: string }[] = [
 		{ value: "eq", label: "Equals" }, { value: "ne", label: "Not equal" }, { value: "contains", label: "Contains" },
 		{ value: "lt", label: "Less than" }, { value: "lte", label: "At most" }, { value: "gt", label: "Greater than" },
@@ -66,12 +66,12 @@
 	const columnOptions = $derived(metadata.columns.map(({ name }) => ({ value: name, label: name })));
 	const rowView = $derived(["rows", "columns", "indexes"].includes(view));
 
-	onMount(() => { active = true; if (databaseSession.credentials) void connect(); return () => { active = false; }; });
+	onMount(() => { active = true; if (databaseSession.credentials) void connect(false); return () => { active = false; }; });
 
 	async function action(work: () => Promise<void>) {
 		if (busy || !active) return;
 		busy = true; error = ""; message = ""; messageTone = "success";
-		try { await work(); } catch (caught) { if (active) error = String(caught); }
+		try { await work(); } catch (caught) { if (active) { handleDatabaseConnectionError(credentials, caught); error = String(caught); } }
 		finally { if (active) busy = false; }
 	}
 	function resetTable() {
@@ -79,15 +79,15 @@
 		metadata = { columns: [], indexes: [] }; page = { rows: [], hasMore: false, truncatedCells: false };
 		filters = []; appliedFilters = []; offset = 0; sortColumn = null; descending = false;
 	}
-	async function connect() {
+	async function connect(force = true) {
 		await action(async () => {
 			const original = { ...credentials }; const signature = JSON.stringify(original);
-			connectionError = ""; validated = ""; databases = []; tables = []; database = ""; table = ""; resetTable();
+			connectionError = ""; databases = []; tables = []; database = ""; table = ""; resetTable();
 			try {
-				await validateMariaDBCredentials({ ...original, database: null });
+				if (!await ensureDatabaseSession(original, force)) return;
 				const available = await listMariaDBDatabases({ ...original, database: null });
 				if (!active || signature !== JSON.stringify(credentials)) return;
-				validated = signature; databases = available; rememberDatabaseCredentials(original);
+				databases = available;
 				database = available.includes(original.database ?? "") ? original.database! : available.find((name) => !["mysql", "sys", "information_schema", "performance_schema"].includes(name)) ?? available[0] ?? "";
 				await loadTables();
 			} catch (caught) { connectionError = String(caught); throw caught; }
@@ -152,7 +152,7 @@
 	</header>
 	{#if error}<Notice tone="error" message={error} onDismiss={() => error = ""} />{/if}
 	{#if message}<Notice tone={messageTone} {message} onDismiss={() => message = ""} />{/if}
-	<details open={!credentialsReady}><summary class="mb-3 cursor-pointer text-sm font-medium">Connection {credentialsReady ? ` / ${credentials.host}:${credentials.port}` : ""}</summary><ConnectionCard bind:credentials {busy} {credentialsReady} {connectionError} stretch={false} onApply={connect} /></details>
+	<details open={!credentialsReady}><summary class="mb-3 cursor-pointer text-sm font-medium">Connection {credentialsReady ? ` / ${credentials.host}:${credentials.port}` : ""}</summary><ConnectionCard bind:credentials {busy} {credentialsReady} {connectionError} stretch={false} onApply={() => connect()} /></details>
 	<div class="grid gap-4 border-y border-border py-4 sm:grid-cols-2">
 		<div class="grid min-w-0 gap-2"><label for="browser-database" class="text-xs font-medium">Database</label><Select.Root type="single" value={database} items={databaseOptions} disabled={busy || !credentialsReady} onValueChange={(value) => { database = value; void action(loadTables); }}><Select.Trigger id="browser-database" class="w-full min-w-0 font-mono text-xs"><span class="truncate">{database || "Choose database"}</span></Select.Trigger><Select.Content>{#each databaseOptions as option}<Select.Item value={option.value} label={option.label}>{option.label}</Select.Item>{/each}</Select.Content></Select.Root></div>
 		<div class="grid min-w-0 gap-2"><label for="browser-table" class="text-xs font-medium">Table</label><Select.Root type="single" value={table} items={tableOptions} disabled={busy || !credentialsReady || !database} onValueChange={(value) => { table = value; void action(loadMetadata); }}><Select.Trigger id="browser-table" class="w-full min-w-0 font-mono text-xs"><span class="truncate">{table || "Choose table"}</span></Select.Trigger><Select.Content>{#each tableOptions as option}<Select.Item value={option.value} label={option.label}>{option.label}</Select.Item>{/each}</Select.Content></Select.Root></div>
@@ -210,7 +210,7 @@
 			</Tabs.Content>
 		{:else if view === "tables"}
 			<Tabs.Content value="tables">
-				{#key `${database}/${table}/${validated}`}
+				{#key `${database}/${table}/${credentialSignature}`}
 					<TableListView
 						{credentials} {database} {workspaceId} blocked={busy}
 						onBusy={(value) => busy = value} onChanged={administrationChanged}
@@ -220,7 +220,7 @@
 			</Tabs.Content>
 		{:else}
 			<Tabs.Content value={view}>
-				{#key `${view}/${database}/${validated}`}
+				{#key `${view}/${database}/${credentialSignature}`}
 					<DatabaseInspection {credentials} {database} view={view as InspectionView} />
 				{/key}
 			</Tabs.Content>
