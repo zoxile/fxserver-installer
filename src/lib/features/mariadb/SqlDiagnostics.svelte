@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { onDestroy } from "svelte";
+	import SlowQueryAnalyzer from "./SlowQueryAnalyzer.svelte";
 	import SearchCheckIcon from "@lucide/svelte/icons/search-check";
 	import LoaderCircleIcon from "@lucide/svelte/icons/loader-circle";
 	import { Button } from "$lib/components/ui/button/index.js";
@@ -187,5 +188,8 @@
 				<p class="text-muted-foreground">Only metadata visible to this account is included. Inspection does not verify row data, indexes, SQL syntax or whether a failed script was partially applied.</p>
 			</div>
 		{/if}
+		{#key JSON.stringify([credentials, database])}
+			<SlowQueryAnalyzer {database} {disabled} />
+		{/key}
 	</div>
 </details>
