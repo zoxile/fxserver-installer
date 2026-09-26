@@ -108,6 +108,13 @@ async (page) => {
             if (!version) throw new Error("Version no longer exists. Refresh history.");
             return structuredClone(version);
           }
+          case "validate_config_change":
+            target(args.request);
+            if (typeof args.content !== "string") throw new Error("Validation requires the exact draft");
+            return { revision: `validation-${state.resourceRevision}`, fileCount: 1, issues: [{
+              code: "secret-exposed", severity: "warning", file: "Edited file", line: 1,
+              message: "A potentially sensitive value is stored in plaintext configuration. Values are omitted.",
+            }] };
           case "save_server_config":
             target({ txDataPath: args.txDataPath, profile: args.profile, path: args.request.path });
             return write(args.expectedContent, args.request.content, "save");
@@ -177,6 +184,22 @@ async (page) => {
     await page.setViewportSize({ width: 1440, height: 1000 });
   };
 
+  const reviewSave = async () => {
+    const review = page.getByRole("region", { name: "Configuration change review", exact: true });
+    const submit = review.getByRole("button", { name: "Save reviewed change", exact: true });
+    const reveal = review.getByRole("checkbox", { name: "Reveal exact diff, including secrets", exact: true });
+    const acknowledge = review.getByRole("checkbox", { name: "I reviewed this exact file change.", exact: true });
+    await review.waitFor();
+    check(await submit.isDisabled() && !await reveal.isChecked() && await acknowledge.isDisabled(), "Config save bypassed the new review gate");
+    check(!((await review.textContent()) || "").includes("history-only-fixture-token"), "Save review exposed secrets before reveal");
+    await reveal.check();
+    await review.getByRole("region", { name: "Draft to save", exact: true }).waitFor();
+    await acknowledge.check();
+    check(await submit.isDisabled(), "Config save bypassed advisory acknowledgement");
+    await review.getByRole("checkbox", { name: "I reviewed the advisory warnings and accept them for this save only.", exact: true }).check();
+    await submit.click();
+  };
+
   await navigate("Configure Server");
   await history.getByText("Encrypted on this Windows account.", { exact: false }).waitFor();
   await chooseVersion("previousId");
@@ -213,6 +236,7 @@ async (page) => {
   await page.evaluate(() => { window.configHistoryTest.current += "# external editor change\n"; });
   const save = page.getByRole("button", { name: "Save", exact: true });
   await save.click();
+  await reviewSave();
   await page.getByText("This file changed on disk. Saving is paused.", { exact: true }).waitFor();
   check(await save.isDisabled(), "Stale-save conflict did not pause saving");
   const keepDraft = page.getByRole("button", { name: "Keep reviewed draft", exact: true });
@@ -220,6 +244,7 @@ async (page) => {
   await page.getByRole("checkbox", { name: "I reviewed the external changes and my draft.", exact: true }).check();
   await keepDraft.click();
   await save.click();
+  await reviewSave();
   await page.getByText("server.cfg saved with encrypted history.", { exact: true }).waitFor();
   check(await page.evaluate(() => window.configHistoryTest.writes.filter((write) => write.reason === "save").length === 1
     && window.configHistoryTest.versions.some((item) => item.version.reason === "before-save" && item.content.includes("# external editor change"))), "Reviewed stale-save did not preserve the external source snapshot");

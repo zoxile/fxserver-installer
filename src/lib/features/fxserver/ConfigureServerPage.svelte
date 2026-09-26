@@ -11,7 +11,7 @@
 	import SaveIcon from "@lucide/svelte/icons/save";
 	import SearchIcon from "@lucide/svelte/icons/search";
 	import Undo2Icon from "@lucide/svelte/icons/undo-2";
-	import { onDestroy, onMount } from "svelte";
+	import { onDestroy, onMount, untrack } from "svelte";
 	import { getInstallPath } from "$lib/core/paths.svelte";
 	import { confirm } from "@tauri-apps/plugin-dialog";
 	import * as Card from "$lib/components/ui/card/index.js";
@@ -28,6 +28,8 @@
 	import { readConfigHistoryFile, saveConfigWithHistory } from "$lib/modules/configHistory";
 	import ConfigHistoryPanel from "$lib/features/config-history/ConfigHistoryPanel.svelte";
 	import ConfigDiff from "$lib/features/config-history/ConfigDiff.svelte";
+	import ConfigChangeReviewPanel from "$lib/features/config-validation/ConfigChangeReview.svelte";
+	import { canSaveReview, reviewMatches, validateConfigChange, type ConfigChangeReview } from "$lib/modules/configValidation";
 	import { fxserverSettings, loadFxserverSettings, refreshTxDataProfiles, setServerProfile, setTxDataPath } from "./fxserverSettings.svelte";
 
 	let dataPath = $state("");
@@ -40,6 +42,9 @@
 	let active = true;
 	onDestroy(() => { active = false; });
 	let saving = $state(false);
+	let validating = $state(false);
+	let changeReview = $state<ConfigChangeReview | null>(null);
+	let validationGeneration = 0;
 	let externalFile = $state<ServerConfigFile | null>(null);
 	let externalReviewed = $state(false);
 	let checkingExternal = false;
@@ -82,6 +87,10 @@
 	);
 	const selectedFile = $derived((result?.files ?? []).find((file) => file.path === selectedPath) ?? null);
 	const historyRequest = $derived(result && selectedFile ? { txDataPath: result.txDataPath, profile: result.profile, path: selectedFile.path } : null);
+	$effect(() => {
+		editorContent; selectedPath; selectedFile?.content; result?.txDataPath; result?.profile; externalFile;
+		untrack(() => { validationGeneration += 1; changeReview = null; validating = false; });
+	});
 	$effect(() => { editorContent; externalFile; externalReviewed = false; });
 	const selectedFileName = $derived(selectedFile?.name.toLowerCase() ?? "");
 	const serverCfgSelected = $derived(selectedFileName === "server.cfg");
@@ -290,17 +299,50 @@
 	}
 
 	async function saveFile() {
-		if (!selectedFile || !historyRequest || saving || busy || externalFile) return;
-		const target = historyRequest;
-		const expected = selectedFile.content;
-		const submitted = editorContent;
+		if (!active || !selectedFile || !historyRequest || !dirty || saving || validating || busy || externalFile) return;
+		const generation = ++validationGeneration;
+		const snapshot = { target: { ...historyRequest }, before: selectedFile.content, after: editorContent };
+		changeReview = null;
+		validating = true;
+		notice = "";
+		try {
+			const report = await validateConfigChange(snapshot.target, snapshot.after);
+			const review = { ...snapshot, report };
+			if (active && generation === validationGeneration && reviewMatches(review, historyRequest, selectedFile?.content ?? "", editorContent) && !externalFile) changeReview = review;
+		} catch {
+			if (active && generation === validationGeneration) {
+				notice = "Configuration validation could not complete. No file was saved. Check the selected profile and retry.";
+				noticeLevel = "error";
+			}
+		} finally { if (generation === validationGeneration) validating = false; }
+	}
+
+	async function saveReviewedFile(diffReviewed: boolean, warningsReviewed: boolean) {
+		const review = changeReview;
+		if (!active || !review || !selectedFile || saving || validating || busy || externalFile
+			|| !canSaveReview(review.report, diffReviewed, warningsReviewed)
+			|| !reviewMatches(review, historyRequest, selectedFile.content, editorContent)) return;
+		const { target, before: expected, after: submitted } = review;
+		const generation = validationGeneration;
 
 		saving = true;
 		notice = "";
 
 		try {
+			let current;
+			try { current = await validateConfigChange(target, submitted); }
+			catch { throw new Error("Configuration revalidation could not complete. No file was saved."); }
+			if (!active || generation !== validationGeneration || externalFile || !reviewMatches(review, historyRequest, selectedFile?.content ?? "", editorContent)) return;
+			if (current.revision !== review.report.revision || !canSaveReview(current, diffReviewed, warningsReviewed)) {
+				changeReview = { ...review, report: current };
+				notice = "Configuration dependencies changed during review. Review the updated validation before saving.";
+				noticeLevel = "error";
+				return;
+			}
 			const savedFile = await saveConfigWithHistory(target, expected, submitted);
+			if (!active) return;
 			acceptFile(savedFile, editorContent === submitted);
+			changeReview = null;
 			notice = `${savedFile.name} saved with encrypted history.`;
 			noticeLevel = "success";
 		} catch (error) {
@@ -888,9 +930,9 @@
 								<Undo2Icon />
 								Revert
 							</Button>
-							<Button onclick={saveFile} disabled={!selectedFile || !dirty || saving || busy || Boolean(externalFile)} title="Save this config file">
+							<Button onclick={saveFile} disabled={!selectedFile || !dirty || saving || validating || busy || Boolean(externalFile)} title="Validate and review this config change">
 								<SaveIcon />
-								{saving ? "Saving" : "Save"}
+								{saving ? "Saving" : validating ? "Validating" : "Save"}
 							</Button>
 						</div>
 					</div>
@@ -909,6 +951,9 @@
 							<span class="rounded-sm border border-emerald-400/30 bg-emerald-400/10 px-2 py-1 text-emerald-100">rconlog line {rconlogLineInSelectedFile}</span>
 						{/if}
 					</div>
+					{#if changeReview}
+						<ConfigChangeReviewPanel review={changeReview} {saving} onSave={saveReviewedFile} onCancel={() => changeReview = null} />
+					{/if}
 					{#if !richEditor}
 						<textarea bind:this={editorElement} bind:value={editorContent} disabled={!selectedFile || saving || busy} spellcheck="false" wrap="off" onkeydown={handleEditorKeydown} title="Server config editor" class="h-160 w-full resize-none overflow-auto rounded-sm border border-border bg-background/70 p-3 font-mono text-xs leading-5"></textarea>
 					{:else}

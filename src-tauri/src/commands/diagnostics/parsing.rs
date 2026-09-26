@@ -173,7 +173,7 @@ pub(super) fn config_commands(source: &str) -> Vec<(usize, Vec<String>)> {
     config_commands_checked(source).0
 }
 
-pub(super) fn config_commands_checked(source: &str) -> (Vec<(usize, Vec<String>)>, bool) {
+pub(crate) fn config_commands_checked(source: &str) -> (Vec<(usize, Vec<String>)>, bool) {
     let mut commands = Vec::new();
     let mut uncertain = false;
     for (line, source) in source.lines().enumerate() {

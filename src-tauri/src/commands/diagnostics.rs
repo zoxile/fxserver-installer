@@ -1,5 +1,5 @@
 pub mod guided;
-mod parsing;
+pub(crate) mod parsing;
 mod redaction;
 
 use std::{

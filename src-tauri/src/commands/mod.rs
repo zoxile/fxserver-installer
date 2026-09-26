@@ -2,6 +2,7 @@ pub mod app_release;
 pub mod artifact;
 pub mod backup_manager;
 pub mod config_history;
+pub mod config_validation;
 pub mod database_admin;
 pub mod database_browser;
 pub mod database_credentials;
