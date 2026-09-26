@@ -9,6 +9,12 @@
 	import TrashIcon from "@lucide/svelte/icons/trash-2";
 	import ListPlusIcon from "@lucide/svelte/icons/list-plus";
 	import ResourceReleaseNotes from "./ResourceReleaseNotes.svelte";
+	import ResourceDependencyDialog from "./ResourceDependencyDialog.svelte";
+	import { dependencyRequestKey, type DependencyRequest } from "$lib/modules/resourceDependencies";
+	import { getWorkspaceId, workspaceSession } from "$lib/core/workspaces.svelte";
+	import { getInstallPath } from "$lib/core/paths.svelte";
+	import { fxserverSettings } from "./fxserverSettings.svelte";
+	import { taskSession } from "$lib/core/tasks.svelte";
 	import { protectedResourcePaths } from "$lib/modules/resourcePlan";
 	import { Button } from "$lib/components/ui/button/index.js";
 	import { Checkbox } from "$lib/components/ui/checkbox/index.js";
@@ -19,8 +25,9 @@
 		type ResourceTarget, type ResourceSnapshot, type ResourceUpdatePreview,
 	} from "$lib/modules/resourceUpdates";
 
-	let { target, branch, name, reinstall = false, history = false, onclose, oncomplete, onqueue }: {
+	let { target, dependencyRequest, branch, name, reinstall = false, history = false, onclose, oncomplete, onqueue }: {
 		target: ResourceTarget; branch: string; name: string; reinstall?: boolean; history?: boolean;
+		dependencyRequest: DependencyRequest;
 		onclose: () => void; oncomplete: (message: string) => void;
 		onqueue?: (preview: ResourceUpdatePreview, protectedPaths: string[]) => void;
 	} = $props();
@@ -36,12 +43,30 @@
 	let page = $state(0);
 	let selectedSnapshot = $state<ResourceSnapshot | null>(null);
 	let deletingSnapshot = $state<ResourceSnapshot | null>(null);
+	let dependencyAction = $state<"Update" | "Re-install" | "Restore" | "Queue Update" | null>(null);
+	const workspaceRevision = workspaceSession.revision;
 	let active = true;
 	let transferred = false;
 	const filtered = $derived(preview?.changes.filter((file) => file.path.toLowerCase().includes(search.trim().toLowerCase())) ?? []);
 	const pages = $derived(Math.max(1, Math.ceil(filtered.length / 100)));
 	const visible = $derived(filtered.slice(Math.min(page, pages - 1) * 100, (Math.min(page, pages - 1) + 1) * 100));
 	const preserved = $derived(new Set(protectedPaths));
+	function assertCurrentTarget() {
+		if (taskSession.exclusiveOwner) throw new Error("Wait for maintenance to finish before changing resources.");
+		const current = { artifactPath: getInstallPath(), txDataPath: fxserverSettings.txDataPath, profile: fxserverSettings.profile };
+		if (!active || taskSession.switching || getWorkspaceId() !== target.workspaceId || workspaceRevision !== workspaceSession.revision || dependencyRequestKey(current) !== dependencyRequestKey(dependencyRequest)) {
+			throw new Error("Server selection changed. Close this preview and review the current profile.");
+		}
+	}
+	async function confirmDependencyAction() {
+		assertCurrentTarget();
+		const action = dependencyAction;
+		if (!action) return;
+		dependencyAction = null;
+		if (action === "Queue Update") queue();
+		else if (action === "Restore") await restore();
+		else await apply();
+	}
 
 	onMount(() => { void initialize(); });
 	onDestroy(() => {
@@ -72,6 +97,7 @@
 	function queue() {
 		if (!preview || busy || !onqueue) return;
 		try {
+			assertCurrentTarget();
 			transferred = true;
 			onqueue(preview, protectedResourcePaths(preview, protectedPaths));
 		} catch (caught) { transferred = false; error = String(caught); }
@@ -81,6 +107,7 @@
 		if (!preview || busy) return;
 		busy = true; error = "";
 		try {
+			assertCurrentTarget();
 			await applyResourceUpdate(target, preview.id, protectedResourcePaths(preview, protectedPaths));
 			if (active) oncomplete(`${name} ${reinstall ? "re-installed" : "updated"}. A verified rollback snapshot was saved.`);
 		} catch (caught) { if (active) error = String(caught); }
@@ -94,6 +121,7 @@
 		if (!selectedSnapshot || busy) return;
 		busy = true; error = "";
 		try {
+			assertCurrentTarget();
 			await rollbackResourceUpdate(target, selectedSnapshot.id);
 			if (active) oncomplete(`${name} restored. The previous files were saved in a new snapshot.`);
 		} catch (caught) { if (active) error = String(caught); }
@@ -104,6 +132,7 @@
 		if (!deletingSnapshot || busy) return;
 		busy = true; error = "";
 		try {
+			assertCurrentTarget();
 			await deleteResourceSnapshot(target, deletingSnapshot.id);
 			snapshots = snapshots.filter((snapshot) => snapshot.id !== deletingSnapshot!.id);
 			if (selectedSnapshot?.id === deletingSnapshot.id) selectedSnapshot = null;
@@ -118,7 +147,7 @@
 <Dialog.Root bind:open onOpenChange={(value) => { if (!value) onclose(); }}>
 	<Dialog.Portal>
 		<Dialog.Overlay class="fixed inset-0 z-[119] bg-black/65 data-[state=open]:animate-in data-[state=open]:fade-in-0" />
-		<Dialog.Content class="fixed top-1/2 left-1/2 z-[120] flex max-h-[85vh] w-[calc(100vw-2rem)] max-w-4xl -translate-x-1/2 -translate-y-1/2 flex-col gap-4 overflow-hidden rounded-md border border-border bg-background p-5 shadow-xl data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=open]:zoom-in-95">
+		<Dialog.Content class="fixed top-1/2 left-1/2 z-[120] flex max-h-[90dvh] w-[calc(100vw-1.5rem)] max-w-4xl -translate-x-1/2 -translate-y-1/2 flex-col gap-4 overflow-y-auto rounded-md border border-border bg-background p-4 shadow-xl data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=open]:zoom-in-95 sm:p-5">
 			<div class="flex items-start justify-between gap-4">
 				<div class="min-w-0">
 					<Dialog.Title class="break-all text-lg font-semibold">{history ? "Snapshots" : reinstall ? "Preview Re-install" : "Preview Update"}: {name}</Dialog.Title>
@@ -163,10 +192,14 @@
 			{/if}
 			<div class="flex flex-wrap justify-end gap-2 border-t border-border pt-4">
 				<Button variant="outline" onclick={onclose}>{busy ? "Close" : "Cancel"}</Button>
-				{#if !history && onqueue}<Button variant="outline" onclick={queue} disabled={!preview || busy}><ListPlusIcon />Queue Reviewed Update</Button>{/if}
-				{#if history}<Button onclick={restore} disabled={!selectedSnapshot || busy}>{#if busy}<LoaderCircleIcon class="animate-spin" />{:else}<HistoryIcon />{/if}{busy ? "Restoring..." : "Confirm Restore"}</Button>
-				{:else}<Button onclick={apply} disabled={!preview || busy}>{#if busy}<LoaderCircleIcon class="animate-spin" />{:else}<DownloadIcon />{/if}{busy ? "Applying..." : reinstall ? "Snapshot & Re-install" : "Snapshot & Update"}</Button>{/if}
+				{#if !history && onqueue}<Button variant="outline" onclick={() => (dependencyAction = "Queue Update")} disabled={!preview || busy || Boolean(taskSession.exclusiveOwner)}><ListPlusIcon />Queue Reviewed Update</Button>{/if}
+				{#if history}<Button onclick={() => (dependencyAction = "Restore")} disabled={!selectedSnapshot || busy || Boolean(taskSession.exclusiveOwner)}>{#if busy}<LoaderCircleIcon class="animate-spin" />{:else}<HistoryIcon />{/if}{busy ? "Restoring..." : "Review Restore"}</Button>
+				{:else}<Button onclick={() => (dependencyAction = reinstall ? "Re-install" : "Update")} disabled={!preview || busy || Boolean(taskSession.exclusiveOwner)}>{#if busy}<LoaderCircleIcon class="animate-spin" />{:else}<DownloadIcon />{/if}{busy ? "Applying..." : reinstall ? "Review Re-install" : "Review Update"}</Button>{/if}
 			</div>
 		</Dialog.Content>
 	</Dialog.Portal>
 </Dialog.Root>
+
+{#if dependencyAction}
+	<ResourceDependencyDialog request={dependencyRequest} path={target.resourcePath} action={dependencyAction} onclose={() => (dependencyAction = null)} onconfirm={confirmDependencyAction} />
+{/if}

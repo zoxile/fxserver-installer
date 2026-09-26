@@ -11,6 +11,10 @@ export const resourcePlanSession = $state({
 
 const storageKey = (workspaceId: string) => `fxserver-installer.resource-preferences.v1.${workspaceId}`;
 
+function requireQueueAccess() {
+	if (taskSession.exclusiveOwner) throw new Error("Wait for maintenance to stop before changing the reviewed update queue.");
+}
+
 export function getResourcePlan(workspaceId: string) {
 	return resourcePlanSession.plans[workspaceId] ??= newResourcePlan();
 }
@@ -27,6 +31,7 @@ export function getResourcePreference(target: ResourceTarget): ResourcePreferenc
 }
 
 export function saveResourcePreference(target: ResourceTarget, preference: ResourcePreference) {
+	requireQueueAccess();
 	const plan = getResourcePlan(target.workspaceId);
 	if (plan.status === "running") throw new Error("Pause the queue before changing resource preferences.");
 	if (resourcePlanSession.preferenceErrors[target.workspaceId]) throw new Error("Saved preferences could not be read. No preferences were overwritten.");
@@ -42,11 +47,13 @@ export function saveResourcePreference(target: ResourceTarget, preference: Resou
 }
 
 export function queueResourceUpdate(target: ResourceTarget, name: string, preview: ResourceUpdatePreview, protectedPaths: string[]) {
+	requireQueueAccess();
 	if (target.workspaceId !== taskSession.workspaceId || taskSession.switching) throw new Error("The active workspace changed. Review the resource again.");
 	addReviewedUpdate(getResourcePlan(target.workspaceId), target, name, preview, protectedPaths, getResourcePreference(target));
 }
 
 export async function runResourcePlan(workspaceId: string) {
+	requireQueueAccess();
 	if (taskSession.workspaceId !== workspaceId || taskSession.switching) throw new Error("Switch to this workspace before applying its reviewed queue.");
 	const plan = getResourcePlan(workspaceId);
 	if (plan.status === "running") return;
@@ -61,10 +68,12 @@ export async function runResourcePlan(workspaceId: string) {
 }
 
 export function pauseResourcePlan(workspaceId: string) {
+	requireQueueAccess();
 	getResourcePlan(workspaceId).pauseRequested = true;
 }
 
 export async function stopResourcePlan(workspaceId: string) {
+	requireQueueAccess();
 	const plan = getResourcePlan(workspaceId);
 	plan.stopRequested = true;
 	if (plan.status === "running") return;
@@ -79,6 +88,7 @@ export async function stopResourcePlan(workspaceId: string) {
 }
 
 export async function removeResourcePlanEntry(workspaceId: string, id: string) {
+	requireQueueAccess();
 	const plan = getResourcePlan(workspaceId);
 	if (plan.status === "running") return;
 	const entry = plan.entries.find((entry) => entry.id === id);

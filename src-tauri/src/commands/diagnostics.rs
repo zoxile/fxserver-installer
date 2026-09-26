@@ -1,6 +1,7 @@
 pub mod guided;
 pub(crate) mod parsing;
 mod redaction;
+pub mod resource_dependencies;
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashSet},

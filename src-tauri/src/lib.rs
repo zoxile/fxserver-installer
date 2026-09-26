@@ -141,6 +141,7 @@ pub fn run() {
             commands::resource_updates::delete_resource_snapshot,
             commands::fxserver::get_fxserver_status,
             commands::config_validation::validate_config_change,
+            commands::diagnostics::resource_dependencies::scan_resource_dependencies,
             commands::fxserver::get_fxserver_terminal,
             commands::fxserver::get_fxserver_rcon_password,
             commands::fxserver::list_txdata_profiles,

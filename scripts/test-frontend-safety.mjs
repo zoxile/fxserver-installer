@@ -56,15 +56,21 @@ function workspaceBindings() {
   tasks.taskSession.items = [];
   tasks.taskSession.workspaceId = "A";
   tasks.taskSession.switching = false;
+  tasks.taskSession.exclusiveOwner = "";
   return { workspaceId: "A", currentWorkspace: "A", workspaceRevision: 1, workspaceSession: { revision: 1 },
     taskSession: tasks.taskSession, trackTask: tasks.trackTask, error: "", message: "" };
 }
 function resourceFixture(overrides = {}) {
-  const context = component(resourcePath, ["workspaceIsCurrent", "pageIsCurrent", "initialize", "runResourceCommand"], {
-    ...workspaceBindings(), active: true, busyCommand: "", recentCommands: [],
+  const dependencyLogic = loadLogic("src/lib/modules/resourceDependencies.ts");
+  const context = component(resourcePath, ["workspaceIsCurrent", "pageIsCurrent", "initialize", "runResourceCommand", "executeResourceCommand", "confirmResourceCommand", "dependencyRequest"], {
+    ...workspaceBindings(), active: true, busyCommand: "", recentCommands: [], dependencyDialog: null,
+    loadInstallPath: () => {}, getInstallPath: () => "A/artifacts", fxserverSettings: { txDataPath: "A/txData", profile: "test" },
+    dependencyRequestKey: dependencyLogic.dependencyRequestKey,
     rcon: { host: "original", port: 30120, password: "original-secret" }, ...overrides,
   });
   context.getWorkspaceId = () => context.currentWorkspace;
+  Object.defineProperty(context, "resourceOperationBusy", { get: () => Boolean(tasks.taskSession.exclusiveOwner) });
+  Object.defineProperty(context, "commandBlocked", { get: () => Boolean(context.busyCommand) || context.resourceOperationBusy });
   return context;
 }
 function managerFixture(overrides = {}) {
@@ -88,7 +94,10 @@ test("resource commands snapshot the full target and remain tracked through save
   const saved = deferred(), sent = deferred(), calls = [];
   const c = resourceFixture({ saveFxserverRconPassword: (password, workspace) => { calls.push({ password, workspace }); return saved.promise; },
     sendFxserverRconCommand: (command, config) => { calls.push({ command, ...config }); return sent.promise; } });
-  const action = c.runResourceCommand("stop", { name: "test", path: "A/test" });
+  await c.runResourceCommand("stop", { name: "test", path: "A/test" });
+  assert.equal(tasks.hasRunningTasks(), false, "Opening dependency review must not dispatch a command");
+  assert.equal(calls.length, 0);
+  const action = c.confirmResourceCommand();
   assert.equal(tasks.hasRunningTasks(), true);
   c.rcon.host = "changed"; c.rcon.port = 30121; c.rcon.password = "changed-secret";
   await c.runResourceCommand("restart", { name: "duplicate", path: "A/duplicate" });
@@ -107,7 +116,9 @@ test("resource commands refuse workspace changes and do not send after password-
   for (const scenario of ["id", "revision", "switching", "failure"]) {
     const saved = deferred(); let sends = 0;
     const c = resourceFixture({ saveFxserverRconPassword: () => saved.promise, sendFxserverRconCommand: async () => sends++ });
-    const action = c.runResourceCommand("stop", { name: "test", path: "A/test" });
+    await c.runResourceCommand("stop", { name: "test", path: "A/test" });
+    assert.equal(tasks.hasRunningTasks(), false);
+    const action = c.confirmResourceCommand();
     assert.equal(tasks.hasRunningTasks(), true);
     if (scenario === "id") c.currentWorkspace = "B";
     if (scenario === "revision") c.workspaceSession.revision++;
@@ -116,6 +127,35 @@ test("resource commands refuse workspace changes and do not send after password-
     await action;
     assert.equal(sends, 0);
     assert.equal(tasks.hasRunningTasks(), false);
+  }
+});
+
+test("resource dependency reviews reject changed profiles and maintenance before saving or sending", async () => {
+  for (const scenario of ["profile", "dataPath", "artifact", "workspace", "maintenance"]) {
+    let mutations = 0;
+    const c = resourceFixture({ saveFxserverRconPassword: async () => mutations++, sendFxserverRconCommand: async () => mutations++ });
+    await c.runResourceCommand("restart", { name: "test", path: "A/test" });
+    assert.equal(mutations, 0);
+    if (scenario === "profile") c.fxserverSettings.profile = "other";
+    if (scenario === "dataPath") c.fxserverSettings.txDataPath = "B/txData";
+    if (scenario === "artifact") c.getInstallPath = () => "B/artifacts";
+    if (scenario === "workspace") c.workspaceSession.revision++;
+    if (scenario === "maintenance") c.taskSession.exclusiveOwner = "maintenance";
+    await assert.rejects(c.confirmResourceCommand(), /changed|maintenance/);
+    assert.equal(mutations, 0);
+    assert.equal(tasks.hasRunningTasks(), false);
+  }
+  tasks.taskSession.exclusiveOwner = "";
+});
+
+test("resource names cannot inject additional RCON commands after review", async () => {
+  let sends = 0;
+  const c = resourceFixture({ saveFxserverRconPassword: async () => {}, sendFxserverRconCommand: async () => sends++ });
+  for (const name of ["ok;quit", "ok\nquit", "two words", 'quote"']) {
+    await c.runResourceCommand("stop", { name, path: "A/test" });
+    await c.confirmResourceCommand();
+    assert.equal(sends, 0);
+    assert.match(c.error, /cannot safely/);
   }
 });
 

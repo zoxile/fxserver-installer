@@ -21,6 +21,10 @@
 	import { openExternalUrl } from "$lib/core/openExternal";
 	import { getWorkspaceId, workspaceSession } from "$lib/core/workspaces.svelte";
 	import ResourceUpdateDialog from "./ResourceUpdateDialog.svelte";
+	import ResourceDependencyDialog from "./ResourceDependencyDialog.svelte";
+	import NetworkIcon from "@lucide/svelte/icons/network";
+	import { getInstallPath, loadInstallPath } from "$lib/core/paths.svelte";
+	import { dependencyRequestKey, type DependencyRequest } from "$lib/modules/resourceDependencies";
 	import ResourceUpdatePlan from "./ResourceUpdatePlan.svelte";
 	import { bridgeSession } from "$lib/core/liveBridge.svelte";
 	import { taskSession, trackTask } from "$lib/core/tasks.svelte";
@@ -78,7 +82,9 @@
 	let showUpdateBackupNotice = $state(true);
 	let contextMenuResource = $state<ResourceView | null>(null);
 	let contextMenuPosition = $state({ x: 0, y: 0 });
-	let updateDialog = $state<{ resource: ResourceView; reinstall: boolean; history: boolean } | null>(null);
+	let updateDialog = $state<{ resource: ResourceView; reinstall: boolean; history: boolean; request: DependencyRequest; target: ResourceTarget } | null>(null);
+	type ResourceAction = "start" | "stop" | "restart" | "ensure" | "refresh";
+	let dependencyDialog = $state<{ request: DependencyRequest; path: string; action?: ResourceAction; resource?: ResourceView; config?: FxserverRconConfig } | null>(null);
 	const workspaceId = getWorkspaceId();
 	const workspaceRevision = workspaceSession.revision;
 	let active = true;
@@ -86,6 +92,23 @@
 		return workspaceId === getWorkspaceId() && workspaceRevision === workspaceSession.revision && !taskSession.switching;
 	}
 	function pageIsCurrent() { return active && workspaceIsCurrent(); }
+	function dependencyRequest(): DependencyRequest {
+		return { artifactPath: getInstallPath(), txDataPath: fxserverSettings.txDataPath, profile: fxserverSettings.profile };
+	}
+	function inspectDependencies(resource?: ResourceView) {
+		closeResourceContextMenu();
+		dependencyDialog = { request: dependencyRequest(), path: resource?.path ?? "" };
+	}
+	async function confirmResourceCommand() {
+		const review = dependencyDialog;
+		if (!review?.action || !review.resource || !review.config) return;
+		if (taskSession.exclusiveOwner || resourceOperationBusy || busyCommand) throw new Error("Wait for maintenance and current resource operations to finish, then rescan.");
+		if (!pageIsCurrent() || dependencyRequestKey(review.request) !== dependencyRequestKey(dependencyRequest())) {
+			throw new Error("Server selection changed. Close this review and scan the current profile.");
+		}
+		await executeResourceCommand(review.action, review.resource, review.config);
+		dependencyDialog = null;
+	}
 	const liveResources = $derived(new Map(bridgeSession.connected && bridgeSession.workspaceId === workspaceId
 		? bridgeSession.snapshot?.resources.map((resource) => [resource.name, resource.state]) ?? [] : []));
 	const plan = getResourcePlan(workspaceId);
@@ -98,7 +121,8 @@
 		}
 	});
 	loadResourcePreferences(workspaceId);
-	const resourceOperationBusy = $derived(taskSession.items.some((task) => task.status === "running" && ["preview_resource_update", "apply_resource_update", "rollback_resource_update", "apply_resource_plan"].includes(task.command)));
+	const resourceOperationBusy = $derived(Boolean(taskSession.exclusiveOwner) || taskSession.items.some((task) => task.status === "running" && ["preview_resource_update", "apply_resource_update", "rollback_resource_update", "apply_resource_plan"].includes(task.command)));
+	const commandBlocked = $derived(Boolean(busyCommand) || resourceOperationBusy);
 
 	function resourceTarget(resource: Pick<FxserverResourceInfo, "path">): ResourceTarget {
 		return { workspaceId, txDataPath: fxserverSettings.txDataPath, profile: fxserverSettings.profile, resourcePath: resource.path };
@@ -111,6 +135,7 @@
 		return plan.entries.some((entry) => ["ready", "applying"].includes(entry.status) && resourcePreferenceKey(entry.target) === resourcePreferenceKey(resourceTarget(resource)));
 	}
 	function changePreference(resource: ResourceView, key: "pin" | "ignore") {
+		if (resourceOperationBusy) return;
 		try {
 			const current = preferenceFor(resource);
 			saveResourcePreference(resourceTarget(resource), key === "pin" ? { ...current, pinnedVersion: current.pinnedVersion === null ? resource.version || "Unknown" : null } : { ...current, ignored: !current.ignored });
@@ -118,7 +143,7 @@
 	}
 	function onQueueReviewed(preview: ResourceUpdatePreview, protectedPaths: string[]) {
 		if (!updateDialog) return;
-		queueResourceUpdate(resourceTarget(updateDialog.resource), updateDialog.resource.name, preview, protectedPaths);
+		queueResourceUpdate(updateDialog.target, updateDialog.resource.name, preview, protectedPaths);
 		updateDialog = null;
 		message = "Reviewed update added to the queue.";
 	}
@@ -156,6 +181,7 @@
 	async function initialize() {
 		try {
 			loadFxserverSettings();
+			loadInstallPath();
 			const saved = readSavedEnvironment();
 			const password = await getSavedFxserverRconPassword(workspaceId);
 			if (!pageIsCurrent()) return;
@@ -284,13 +310,14 @@
 			return;
 		}
 
-		updateDialog = { resource: target, reinstall: force, history: false };
+		if (!pageIsCurrent()) return;
+		updateDialog = { resource: target, reinstall: force, history: false, request: dependencyRequest(), target: resourceTarget(target) };
 	}
 
 	function openSnapshots(resource: ResourceView) {
 		if (resourceOperationBusy || hasQueuedUpdate(resource)) return;
 		closeResourceContextMenu();
-		updateDialog = { resource, reinstall: false, history: true };
+		updateDialog = { resource, reinstall: false, history: true, request: dependencyRequest(), target: resourceTarget(resource) };
 	}
 
 	async function onUpdateComplete(result: string) {
@@ -336,9 +363,21 @@
 	}
 
 	async function runResourceCommand(action: "start" | "stop" | "restart" | "ensure" | "refresh", resource: ResourceView) {
-		if (!pageIsCurrent() || busyCommand) return;
+		if (!pageIsCurrent() || busyCommand || dependencyDialog || resourceOperationBusy) return;
+		if (action !== "start") {
+			dependencyDialog = { request: dependencyRequest(), path: resource.path, action, resource, config: { ...rcon } };
+			return;
+		}
+		await executeResourceCommand(action, resource, { ...rcon });
+	}
+
+	async function executeResourceCommand(action: ResourceAction, resource: ResourceView, config: FxserverRconConfig) {
+		if (!pageIsCurrent() || commandBlocked) return;
+		if (!/^[a-zA-Z0-9_.-]+$/.test(resource.name)) {
+			error = "This resource name contains characters that cannot safely be sent through RCON.";
+			return;
+		}
 		const command = action === "refresh" ? `refresh\nensure ${resource.name}` : `${action} ${resource.name}`;
-		const config = { ...rcon };
 		busyCommand = `${action}:${resource.path}`;
 		error = "";
 		message = "";
@@ -700,6 +739,7 @@
 						{/if}
 						Check Updates
 					</Button>
+					<Button variant="outline" onclick={() => inspectDependencies()} disabled={!fxserverSettings.profile || !fxserverSettings.txDataPath} title="Inspect declared dependencies, startup order and affected resources"><NetworkIcon />Dependencies</Button>
 				</div>
 			</Card.Content>
 		</Card.Root>
@@ -762,6 +802,7 @@
 								<div class="min-w-0">
 									<div class="flex flex-wrap items-center gap-2">
 										<p class="text-base font-semibold text-foreground">{resource.name}</p>
+										<Button size="icon" variant="ghost" onclick={() => inspectDependencies(resource)} aria-label={`Inspect dependencies for ${resource.name}`} title="Inspect dependencies"><NetworkIcon /></Button>
 										{#if liveResources.has(resource.name) && liveResources.get(resource.name) !== "unknown"}
 											<span title="Live bridge resource state" class={`inline-flex items-center gap-1.5 text-xs ${liveResources.get(resource.name) === "started" ? "text-emerald-400" : "text-muted-foreground"}`}><span class={`size-1.5 rounded-full ${liveResources.get(resource.name) === "started" ? "bg-emerald-400" : "bg-zinc-500"}`}></span>{liveResources.get(resource.name)}</span>
 										{/if}
@@ -818,16 +859,16 @@
 								<div class="min-w-0">
 									<p class="mb-2 text-[10px] font-semibold tracking-wide text-muted-foreground uppercase">RCON Controls</p>
 									<div class="flex flex-wrap gap-2">
-										<Button size="xs" onclick={() => runResourceCommand("start", resource)} disabled={!rcon.password.trim() || Boolean(busyCommand)} title="Start resource">
+										<Button size="xs" onclick={() => runResourceCommand("start", resource)} disabled={!rcon.password.trim() || commandBlocked} title="Start resource">
 											<PlayIcon class={isCommandBusy("start", resource) ? "animate-spin" : undefined} />Start
 										</Button>
-										<Button size="xs" variant="destructive" onclick={() => runResourceCommand("stop", resource)} disabled={!rcon.password.trim() || Boolean(busyCommand)} title="Stop resource">
+										<Button size="xs" variant="destructive" onclick={() => runResourceCommand("stop", resource)} disabled={!rcon.password.trim() || commandBlocked} title="Stop resource">
 											<SquareIcon class={isCommandBusy("stop", resource) ? "animate-spin" : undefined} />Stop
 										</Button>
-										<Button size="xs" variant="outline" onclick={() => runResourceCommand("restart", resource)} disabled={!rcon.password.trim() || Boolean(busyCommand)} title="Restart resource">
+										<Button size="xs" variant="outline" onclick={() => runResourceCommand("restart", resource)} disabled={!rcon.password.trim() || commandBlocked} title="Restart resource">
 											<RotateCcwIcon class={isCommandBusy("restart", resource) ? "animate-spin" : undefined} />Restart
 										</Button>
-										<Button size="xs" variant="outline" onclick={() => runResourceCommand("ensure", resource)} disabled={!rcon.password.trim() || Boolean(busyCommand)} title="Ensure resource">
+										<Button size="xs" variant="outline" onclick={() => runResourceCommand("ensure", resource)} disabled={!rcon.password.trim() || commandBlocked} title="Ensure resource">
 											<ShieldIcon class={isCommandBusy("ensure", resource) ? "animate-spin" : undefined} />Ensure
 										</Button>
 									</div>
@@ -888,19 +929,20 @@
 				<p class="mt-1 truncate font-mono text-xs text-muted-foreground">{displayResourcePath(contextMenuResource.path)}</p>
 			</div>
 			<div class="grid gap-4 pt-3">
+				<Button variant="outline" onclick={() => inspectDependencies(contextMenuResource!)}><NetworkIcon />Dependencies</Button>
 				<div>
 					<p class="mb-2 text-[10px] font-semibold tracking-wide text-muted-foreground uppercase">RCON Controls</p>
 					<div class="grid grid-cols-2 gap-2">
-						<Button size="lg" onclick={() => runContextCommand("start", contextMenuResource!)} disabled={!rcon.password.trim() || Boolean(busyCommand)} title="Start resource">
+						<Button size="lg" onclick={() => runContextCommand("start", contextMenuResource!)} disabled={!rcon.password.trim() || commandBlocked} title="Start resource">
 							<PlayIcon />Start
 						</Button>
-						<Button size="lg" variant="destructive" onclick={() => runContextCommand("stop", contextMenuResource!)} disabled={!rcon.password.trim() || Boolean(busyCommand)} title="Stop resource">
+						<Button size="lg" variant="destructive" onclick={() => runContextCommand("stop", contextMenuResource!)} disabled={!rcon.password.trim() || commandBlocked} title="Stop resource">
 							<SquareIcon />Stop
 						</Button>
-						<Button size="lg" variant="outline" onclick={() => runContextCommand("restart", contextMenuResource!)} disabled={!rcon.password.trim() || Boolean(busyCommand)} title="Restart resource">
+						<Button size="lg" variant="outline" onclick={() => runContextCommand("restart", contextMenuResource!)} disabled={!rcon.password.trim() || commandBlocked} title="Restart resource">
 							<RotateCcwIcon />Restart
 						</Button>
-						<Button size="lg" variant="outline" onclick={() => runContextCommand("ensure", contextMenuResource!)} disabled={!rcon.password.trim() || Boolean(busyCommand)} title="Ensure resource">
+						<Button size="lg" variant="outline" onclick={() => runContextCommand("ensure", contextMenuResource!)} disabled={!rcon.password.trim() || commandBlocked} title="Ensure resource">
 							<ShieldIcon />Ensure
 						</Button>
 					</div>
@@ -952,7 +994,8 @@
 
 {#if updateDialog}
 	<ResourceUpdateDialog
-		target={{ workspaceId, txDataPath: fxserverSettings.txDataPath, profile: fxserverSettings.profile, resourcePath: updateDialog.resource.path }}
+		target={updateDialog.target}
+		dependencyRequest={updateDialog.request}
 		branch={updateDialog.resource.defaultBranch}
 		name={updateDialog.resource.name}
 		reinstall={updateDialog.reinstall}
@@ -960,5 +1003,15 @@
 		onclose={() => (updateDialog = null)}
 		oncomplete={onUpdateComplete}
 		onqueue={onQueueReviewed}
+	/>
+{/if}
+
+{#if dependencyDialog}
+	<ResourceDependencyDialog
+		request={dependencyDialog.request}
+		path={dependencyDialog.path}
+		action={dependencyDialog.action}
+		onclose={() => (dependencyDialog = null)}
+		onconfirm={confirmResourceCommand}
 	/>
 {/if}

@@ -61,10 +61,29 @@ export const taskSession = $state({
 	items: [] as BackgroundTask[],
 	workspaceId: "default",
 	switching: false,
+	exclusiveOwner: "" as string,
+	pendingMutations: 0,
 });
 
+const isReadCommand = (command: string) => /^(get_|list_|read_|scan_|inspect_|validate_mariadb_credentials$)/.test(command);
+
+export function requireTaskAccess(command: string) {
+	if (taskSession.exclusiveOwner && !isReadCommand(command)) {
+		throw new Error("A maintenance plan is running. Stop it at a safe boundary before making other changes.");
+	}
+}
+
+export function trackExclusiveTask<T>(command: string, label: string, action: () => Promise<T>) {
+	if (taskSession.exclusiveOwner || taskSession.switching || hasRunningTasks()) return Promise.reject<T>(new Error("Wait for current tasks to finish before starting maintenance."));
+	return trackTask(command, label, async () => {
+		taskSession.exclusiveOwner = command;
+		try { return await action(); }
+		finally { taskSession.exclusiveOwner = ""; }
+	});
+}
+
 export function hasRunningTasks() {
-	return taskSession.items.some((task) => task.status === "running");
+	return taskSession.pendingMutations > 0 || taskSession.items.some((task) => task.status === "running");
 }
 
 export function clearFinishedTasks() {
@@ -73,6 +92,7 @@ export function clearFinishedTasks() {
 
 export async function trackTask<T>(command: string, label: string, action: () => Promise<T>): Promise<T> {
 	if (taskSession.switching) throw new Error("Wait for the workspace switch to finish.");
+	requireTaskAccess(command);
 	const id = crypto.randomUUID();
 	taskSession.items = [
 		{ id, command, label, workspaceId: taskSession.workspaceId, status: "running", startedAt: Date.now() },
@@ -104,12 +124,17 @@ function finish(id: string, status: TaskStatus) {
 }
 
 export function taskInvoke<T>(command: string, args?: Record<string, unknown>): Promise<T> {
+	try { requireTaskAccess(command); } catch (error) { return Promise.reject(error); }
 	const label = labels[command];
-	return label ? trackTask(command, label, () => invoke<T>(command, args)) : invoke<T>(command, args);
+	if (label) return trackTask(command, label, () => invoke<T>(command, args));
+	if (isReadCommand(command)) return invoke<T>(command, args);
+	if (taskSession.switching) return Promise.reject(new Error("Wait for the workspace switch to finish."));
+	taskSession.pendingMutations++;
+	return invoke<T>(command, args).finally(() => { taskSession.pendingMutations--; });
 }
 
 export function acceptBackupProgress(event: { workspaceId: string; scheduleId: string; stage: string; timestamp: number }) {
-	if (taskSession.items.some((item) => item.workspaceId === event.workspaceId && item.status === "running" && ["run_scheduled_backup_now", "restore_backup_snapshot", "test_backup_restore"].includes(item.command))) return;
+	if (taskSession.items.some((item) => item.workspaceId === event.workspaceId && item.status === "running" && ["run_maintenance_plan", "run_scheduled_backup_now", "restore_backup_snapshot", "test_backup_restore"].includes(item.command))) return;
 	const command = `scheduled-backup:${event.scheduleId}`;
 	const existing = taskSession.items.find((item) => item.command === command && item.workspaceId === event.workspaceId && item.status === "running");
 	if (event.stage === "running" && !existing) {

@@ -41,6 +41,7 @@ async (page) => {
           case "get_mariadb_package_info": return { latestVersion: "12.3.3", updateAvailable: false };
           case "run_fxserver_preflight": return { checkedAt: Date.now(), blocking: false, errorCount: 0, warningCount: 0, resourceCount: 3, configCount: 1, checks: [] };
           case "scan_fxserver_resources": return { txDataPath: "C:/fixture/txData", profile: "test", dataPath: "C:/fixture", resourceRoot: "C:/fixture/resources", resources: ["alpha", "beta", "gamma"].map((name) => ({ name, path: `C:/fixture/resources/${name}`, manifestPath: `C:/fixture/resources/${name}/fxmanifest.lua`, manifestName: "fxmanifest.lua", version: "1.0.0", repository: "https://github.com/example/fixture" })) };
+          case "scan_resource_dependencies": return { resources: ["alpha", "beta", "gamma"].map((name, index, names) => ({ name, path: `C:/fixture/resources/${name}`, origin: "data", dependencies: index ? [names[index - 1]] : [], provides: [], groups: [], dynamic: false })), resourcesIncomplete: false, configsIncomplete: false, startup: [{ command: "ensure", target: "gamma" }], warnings: [] };
           case "preview_resource_update": {
             const id = `preview-${++state.previewCount}`;
             const name = args.request.target.resourcePath.split("/").at(-1);
@@ -98,6 +99,12 @@ async (page) => {
       await dialog.getByText("Fixture release notes: configuration migration required.", { exact: true }).waitFor();
     }
     await dialog.getByRole("button", { name: "Queue Reviewed Update" }).click();
+    const review = page.getByRole("dialog", { name: "Queue Update: Dependency Review", exact: true });
+    await review.getByRole("heading", { name: "Direct Dependents (1)", exact: true }).waitFor();
+    if (await review.getByRole("button", { name: "Confirm Queue Update", exact: true }).isEnabled()) throw new Error("Queue bypassed dependency acknowledgment");
+    if (await page.evaluate(() => window.artifactPlanFixture.calls.some((entry) => entry.command === "apply_resource_update"))) throw new Error("Resource applied before dependency review");
+    await review.getByRole("checkbox", { name: "Acknowledge dependency impact", exact: true }).check();
+    await review.getByRole("button", { name: "Confirm Queue Update", exact: true }).click();
   }
   await nav.getByTitle("Home", { exact: true }).click();
   await navigate("FXServer", "Resource Manager");
@@ -122,5 +129,5 @@ async (page) => {
   const overflow = await queue.evaluate((element) => element.scrollWidth > element.clientWidth + 1);
   if (overflow) throw new Error("Queue overflows narrow viewport");
   if (errors.length) throw new Error(errors.join("\n"));
-  return "Artifact and resource planning UI fixtures passed: badges/filter/pagination, explicit risky install, locked config protection, release notes, persisted pin, navigation retention, paused failure, explicit remaining apply.";
+  return "Artifact and resource planning UI fixtures passed: badges/filter/pagination, explicit risky install, locked config protection, dependency acknowledgment, release notes, persisted pin, navigation retention, paused failure, explicit remaining apply.";
 }
