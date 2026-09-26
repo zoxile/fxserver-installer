@@ -3,13 +3,12 @@
 
 use crate::models::artifact::{EnhancedArtifactBuild, EnhancedArtifactCatalog};
 use reqwest::{blocking::Client, redirect::Policy, Url};
-use std::{io::Read, time::Duration};
+use std::time::Duration;
 
-pub(super) const ENHANCED_PAGE: &str =
-    "https://docs.fivem.net/docs/server-download/?platform=enhanced&os=windows";
+use super::download_page;
+
 const ARTIFACT_HOST: &str = "downloads.cfx-services.net";
 const ARTIFACT_FILE: &str = "cfx-server_win_x64.zip";
-const MAX_PAGE: u64 = 4 * 1024 * 1024;
 
 pub(super) fn client(timeout: Duration) -> Result<Client, String> {
     Client::builder()
@@ -57,16 +56,7 @@ fn is_build_id(value: &str) -> bool {
         })
 }
 
-fn parse_catalog(page: &str) -> Result<EnhancedArtifactCatalog, String> {
-    let start = page.find("id=\"__NEXT_DATA__\"").or_else(|| page.find("id='__NEXT_DATA__'"))
-        .ok_or("Official download data was not found. Open the official page and paste its Windows download link.")?;
-    let tail = &page[start..];
-    let tail = &tail[tail.find('>').ok_or("Invalid official download page.")? + 1..];
-    let json = &tail[..tail
-        .find("</script>")
-        .ok_or("Incomplete official download page.")?];
-    let data: serde_json::Value = serde_json::from_str(json)
-        .map_err(|error| format!("Invalid official download data: {error}"))?;
+fn parse_catalog(data: &serde_json::Value) -> Result<EnhancedArtifactCatalog, String> {
     let windows = data
         .pointer("/props/pageProps/enhanced/windows")
         .and_then(|value| value.as_array())
@@ -90,31 +80,13 @@ fn parse_catalog(page: &str) -> Result<EnhancedArtifactCatalog, String> {
     }
     Ok(EnhancedArtifactCatalog {
         builds,
-        source_url: ENHANCED_PAGE.into(),
+        source_url: download_page::ENHANCED_PAGE.into(),
         warning: None,
     })
 }
 
 pub(super) fn load_catalog() -> Result<EnhancedArtifactCatalog, String> {
-    let response = client(Duration::from_secs(30))?
-        .get(ENHANCED_PAGE)
-        .send()
-        .map_err(|e| e.to_string())?;
-    if !response.status().is_success() {
-        return Err(format!(
-            "Official download page returned {}.",
-            response.status()
-        ));
-    }
-    let mut bytes = Vec::new();
-    response
-        .take(MAX_PAGE + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|e| e.to_string())?;
-    if bytes.len() as u64 > MAX_PAGE {
-        return Err("Official download page exceeded the size limit.".into());
-    }
-    parse_catalog(std::str::from_utf8(&bytes).map_err(|e| e.to_string())?)
+    parse_catalog(&download_page::load(download_page::ENHANCED_PAGE)?)
 }
 
 #[cfg(test)]
@@ -141,8 +113,30 @@ mod tests {
         let data = serde_json::json!({"props":{"pageProps":{"enhanced":{"windows":[{"downloadURL":URL},{"downloadURL":URL}],"linux":[{"downloadURL":"https://evil.example"}]}}}});
         let page =
             format!("<script id=\"__NEXT_DATA__\" type=\"application/json\">{data}</script>");
-        assert_eq!(parse_catalog(&page).unwrap().builds.len(), 1);
-        assert!(parse_catalog(URL).is_err());
-        assert!(parse_catalog("<script id=\"__NEXT_DATA__\">{}</script>").is_err());
+        assert_eq!(
+            parse_catalog(&download_page::parse(&page).unwrap())
+                .unwrap()
+                .builds
+                .len(),
+            1
+        );
+        assert!(parse_catalog(&serde_json::json!({})).is_err());
+    }
+
+    #[test]
+    #[ignore = "contacts the official Cfx Enhanced download page"]
+    fn live_official_enhanced_catalog() {
+        let catalog = load_catalog().unwrap();
+        assert!(!catalog.builds.is_empty());
+        for build in &catalog.builds {
+            assert_eq!(
+                validate_enhanced_url(&build.download_url).unwrap(),
+                build.version
+            );
+        }
+        println!(
+            "Live Enhanced catalog: {} published Windows build(s).",
+            catalog.builds.len()
+        );
     }
 }

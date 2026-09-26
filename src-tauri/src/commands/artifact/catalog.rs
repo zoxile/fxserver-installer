@@ -1,14 +1,12 @@
 use std::{
     collections::BTreeMap,
-    process::Command,
     sync::Mutex,
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use crate::{
-    models::artifact::{ArtifactBuild, ArtifactCatalog, ArtifactIssue, ArtifactMetadata},
-    process::CommandNoWindowExt,
-};
+use crate::models::artifact::{ArtifactBuild, ArtifactCatalog, ArtifactIssue, ArtifactMetadata};
+
+use super::download_page;
 
 const BASE: &str = "https://runtime.fivem.net/artifacts/fivem/build_server_windows/master/";
 const CACHE_SECONDS: u64 = 15 * 60;
@@ -83,25 +81,25 @@ pub(super) fn load_catalog(refresh: bool) -> Result<ArtifactCatalog, String> {
 }
 
 fn fetch_builds() -> Result<Vec<ArtifactBuild>, String> {
-    let script = format!(
-        r#"
-$ErrorActionPreference = 'Stop'
-$ProgressPreference = 'SilentlyContinue'
-[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-$page = Invoke-WebRequest -Uri '{BASE}' -UseBasicParsing -TimeoutSec 30
-ConvertTo-Json -InputObject @($page.Links | ForEach-Object {{ $_.href }}) -Compress
-"#
-    );
-    let output = Command::new("powershell")
-        .no_window()
-        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
-        .output()
-        .map_err(|error| format!("Could not load official artifact listing: {error}"))?;
-    if !output.status.success() {
-        return Err("Official Windows artifact listing request failed.".into());
+    parse_catalog(&download_page::load(download_page::LEGACY_PAGE)?)
+}
+
+fn parse_catalog(data: &serde_json::Value) -> Result<Vec<ArtifactBuild>, String> {
+    let mut links = Vec::new();
+    for branch in ["recommended", "latest"] {
+        let windows = data
+            .pointer(&format!("/props/pageProps/legacy/{branch}/windows"))
+            .and_then(|value| value.as_array())
+            .filter(|items| !items.is_empty() && items.len() <= 4096)
+            .ok_or("Official download data is missing a complete Legacy Windows build list.")?;
+        for item in windows {
+            let link = item
+                .get("downloadURL")
+                .and_then(|value| value.as_str())
+                .ok_or("Official Windows build is missing its download URL.")?;
+            links.push(link.to_string());
+        }
     }
-    let links: Vec<String> = serde_json::from_slice(&output.stdout)
-        .map_err(|error| format!("Invalid official artifact listing: {error}"))?;
     parse_links(&links)
 }
 
@@ -249,6 +247,53 @@ mod tests {
     use super::*;
     fn link(version: &str) -> String {
         format!("./{version}-0123456789abcdef0123456789abcdef01234567/server.7z")
+    }
+
+    #[test]
+    fn new_download_page_includes_latest_and_recommended_windows_builds() {
+        let data = serde_json::json!({"props":{"pageProps":{
+            "legacy": {
+                "recommended": {"windows": [{"downloadURL": link("35245")}]},
+                "latest": {"windows": [
+                    {"downloadURL": link("35945")},
+                    {"downloadURL": link("35245")},
+                    {"downloadURL": link("35186")}
+                ], "linux": [{"downloadURL": link("99999")}]}
+            },
+            "enhanced": {"windows": [{"downloadURL": link("88888")}]}
+        }}});
+        let page = format!(
+            "<a href='{}'>Download</a><script id=\"__NEXT_DATA__\">{data}</script>",
+            link("35245")
+        );
+        let builds = parse_catalog(&download_page::parse(&page).unwrap()).unwrap();
+        assert_eq!(
+            builds
+                .iter()
+                .map(|build| build.version.as_str())
+                .collect::<Vec<_>>(),
+            ["35945", "35245", "35186"]
+        );
+        assert!(parse_catalog(&serde_json::json!({})).is_err());
+        let mut missing_latest = data.clone();
+        missing_latest["props"]["pageProps"]["legacy"]["latest"]["windows"] = serde_json::json!([]);
+        assert!(parse_catalog(&missing_latest).is_err());
+    }
+
+    #[test]
+    #[ignore = "contacts the official Cfx download page and JG metadata"]
+    fn live_official_catalog_has_multiple_builds_and_jg_annotations() {
+        let catalog = load_catalog(true).unwrap();
+        assert!(catalog.builds.len() > 1);
+        assert!(!catalog.stale, "{:?}", catalog.warning);
+        assert!(catalog.builds.iter().any(|build| build.recommended));
+        for build in &catalog.builds {
+            validate_download(&build.download_url, &build.version).unwrap();
+        }
+        println!(
+            "Live catalog: {} official Windows builds, JG metadata loaded.",
+            catalog.builds.len()
+        );
     }
 
     #[test]

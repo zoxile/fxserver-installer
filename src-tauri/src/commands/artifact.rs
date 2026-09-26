@@ -8,6 +8,8 @@ use std::{
 
 #[path = "artifact/catalog.rs"]
 mod catalog;
+#[path = "artifact/download_page.rs"]
+mod download_page;
 #[path = "artifact/enhanced.rs"]
 mod enhanced;
 #[path = "artifact/install.rs"]

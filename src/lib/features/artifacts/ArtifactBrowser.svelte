@@ -61,7 +61,7 @@
 	<div class="flex flex-wrap items-center justify-between gap-3">
 		<h2 class="text-lg font-semibold">Official Windows Builds</h2>
 		<div class="flex gap-2">
-			<Button variant="outline" size="sm" onclick={() => openExternalUrl("https://runtime.fivem.net/artifacts/fivem/build_server_windows/master/")}><ExternalLinkIcon />Official Listing</Button>
+			<Button variant="outline" size="sm" onclick={() => openExternalUrl("https://docs.fivem.net/docs/server-download/?platform=legacy&os=windows")}><ExternalLinkIcon />Official Listing</Button>
 			<Button variant="outline" size="icon" title="Refresh official builds and JG issue metadata" aria-label="Refresh artifact catalog" disabled={loading || disabled} onclick={() => refresh(true)}><RefreshCwIcon class={loading ? "animate-spin" : undefined} /></Button>
 		</div>
 	</div>
