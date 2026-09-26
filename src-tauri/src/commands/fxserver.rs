@@ -1,5 +1,6 @@
 // Enhanced executable support adapted from Huntercorlett's fork (53f1834).
 use super::server_exe;
+mod maintenance_launch;
 
 use std::{
     collections::VecDeque,
@@ -41,6 +42,7 @@ pub struct FxserverManager {
     lifecycle: Arc<Mutex<()>>,
     terminal: Arc<Mutex<TerminalState>>,
     launch_intent: Arc<Mutex<LaunchIntent>>,
+    maintenance_launch: Arc<Mutex<Option<maintenance_launch::MaintenanceLaunch>>>,
     shutting_down: Arc<AtomicBool>,
 }
 
@@ -167,6 +169,7 @@ impl Default for FxserverManager {
             lifecycle: Arc::new(Mutex::new(())),
             terminal: Arc::new(Mutex::new(TerminalState::default())),
             launch_intent: Arc::new(Mutex::new(LaunchIntent::default())),
+            maintenance_launch: Arc::new(Mutex::new(None)),
             shutting_down: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -446,6 +449,52 @@ impl FxserverManager {
 
         Ok(())
     }
+}
+
+#[tauri::command]
+pub async fn prepare_fxserver_maintenance_launch(
+    request: FxserverLaunchRequest,
+    expected_pid: u32,
+    manager: tauri::State<'_, FxserverManager>,
+) -> Result<String, String> {
+    let manager = manager.inner().clone();
+    super::run_blocking(move || maintenance_launch::prepare(&manager, request, expected_pid)).await
+}
+
+#[tauri::command]
+pub async fn validate_fxserver_maintenance_launch(
+    token: String,
+    manager: tauri::State<'_, FxserverManager>,
+) -> Result<(), String> {
+    let manager = manager.inner().clone();
+    super::run_blocking(move || maintenance_launch::validate(&manager, &token)).await
+}
+
+#[tauri::command]
+pub async fn stop_fxserver_for_maintenance(
+    token: String,
+    manager: tauri::State<'_, FxserverManager>,
+) -> Result<(), String> {
+    let manager = manager.inner().clone();
+    super::run_blocking(move || maintenance_launch::stop(&manager, &token)).await
+}
+
+#[tauri::command]
+pub async fn start_fxserver_after_maintenance(
+    token: String,
+    manager: tauri::State<'_, FxserverManager>,
+) -> Result<FxserverLaunchResult, String> {
+    let manager = manager.inner().clone();
+    super::run_blocking(move || maintenance_launch::start(&manager, &token)).await
+}
+
+#[tauri::command]
+pub async fn discard_fxserver_maintenance_launch(
+    token: String,
+    manager: tauri::State<'_, FxserverManager>,
+) -> Result<(), String> {
+    let manager = manager.inner().clone();
+    super::run_blocking(move || maintenance_launch::discard(&manager, &token)).await
 }
 
 #[tauri::command]
@@ -2831,6 +2880,32 @@ pub(crate) fn decrypt_secret(_: &[u8]) -> Result<Vec<u8>, String> {
 
 #[cfg(test)]
 mod tests {
+    use super::maintenance_launch::public_scope_matches as launch_matches;
+    #[test]
+    fn maintenance_requires_matching_profile_environment_and_artifact() {
+        let request = FxserverLaunchRequest {
+            artifact_path: "C:/server".into(),
+            server_profile: Some("production".into()),
+            environment: vec![FxserverEnvironmentVariable {
+                key: "TXHOST_DATA_PATH".into(),
+                value: "C:/data".into(),
+            }],
+        };
+        let saved = SavedLaunch::from_request(&request);
+        assert!(launch_matches(&saved, &request));
+        let mut changed = saved.clone().into_request();
+        changed.artifact_path = "c:\\SERVER\\".into();
+        assert!(launch_matches(&saved, &changed));
+        changed.server_profile = Some("staging".into());
+        assert!(!launch_matches(&saved, &changed));
+        changed = saved.clone().into_request();
+        changed.environment[0].value = "C:/other".into();
+        assert!(!launch_matches(&saved, &changed));
+        changed = saved.clone().into_request();
+        changed.environment.clear();
+        assert!(!launch_matches(&saved, &changed));
+    }
+
     #[test]
     fn console_incidents_are_filtered_bounded_and_cleared() {
         let manager = super::FxserverManager::default();

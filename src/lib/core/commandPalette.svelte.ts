@@ -26,6 +26,7 @@ export const commandPaletteSettings = $state<CommandPaletteSettings>({
 });
 
 export const commandDefinitions: CommandDefinition[] = [
+	{ id: "open-maintenance", title: "Maintenance Plans", description: "Review backups, resource updates, downtime, and startup checks.", category: "FXServer", page: "maintenance", keywords: ["backup", "update", "restart", "maintenance"] },
 	{ id: "open-live-bridge", title: "Live Server Bridge", description: "Install the optional bridge and view live resources and players.", category: "FXServer", page: "live-bridge", keywords: ["players", "runtime", "bridge"] },
 	{ id: "open-database-browser", title: "Database Browser", description: "Browse tables, filter rows, export CSV, and review row changes.", category: "Database", page: "database-browser", keywords: ["tables", "rows", "data"] },
 	{ id: "open-incidents", title: "Incident Timeline", description: "Search server incidents and maintenance history.", category: "Logs", page: "incidents", keywords: ["history", "errors", "events"] },

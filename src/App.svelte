@@ -54,6 +54,7 @@
 			| "backup-manager"
 			| "diagnostics"
 			| "health"
+			| "maintenance"
 			| "live-bridge"
 			| "database-browser"
 			| "incidents"
@@ -193,6 +194,8 @@
 					{#await import("$lib/features/diagnostics/DiagnosticsPage.svelte")}<p role="status" class="text-sm text-muted-foreground">Loading diagnostics...</p>{:then { default: Page }}<Page onNavigate={navigate} />{/await}
 				{:else if activePage === "health"}
 					{#await import("$lib/features/fxserver/HealthPage.svelte")}<p role="status" class="text-sm text-muted-foreground">Loading health settings...</p>{:then { default: Page }}<Page />{/await}
+				{:else if activePage === "maintenance"}
+					{#await import("$lib/features/fxserver/MaintenancePage.svelte")}<p role="status" class="text-sm text-muted-foreground">Loading maintenance...</p>{:then { default: Page }}<Page onNavigate={navigate} />{/await}
 				{:else if activePage === "live-bridge"}
 					{#await import("$lib/features/fxserver/LiveBridgePage.svelte")}<p role="status" class="text-sm text-muted-foreground">Loading live bridge...</p>{:then { default: Page }}<Page />{/await}
 				{:else if activePage === "database-browser"}

@@ -1,5 +1,7 @@
 use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, State};
+
+use super::backup_manager::BackupManager;
 
 use crate::{
     models::mariadb::{
@@ -37,11 +39,24 @@ pub(crate) fn maintenance_access() -> Result<RwLockWriteGuard<'static, ()>, Stri
         .map_err(|_| "A MariaDB operation is in progress. Wait for backups, restores, and queries to finish before changing the service.".into())
 }
 
+pub(crate) async fn run_mutation<T: Send + 'static>(
+    manager: BackupManager,
+    task: impl FnOnce() -> Result<T, String> + Send + 'static,
+) -> Result<T, String> {
+    super::run_blocking(move || {
+        // Admission precedes database locks and lasts through the entire operation.
+        let _operation = manager.manual_operation()?;
+        task()
+    })
+    .await
+}
+
 async fn run_installer(
     app: AppHandle,
+    manager: BackupManager,
     task: impl FnOnce(&dyn Fn(&str)) -> Result<String, String> + Send + 'static,
 ) -> Result<String, String> {
-    super::run_blocking(move || {
+    run_mutation(manager, move || {
         let _guard = maintenance_access()?;
         clear_detection_cache();
         let result = task(&|stage| {
@@ -79,9 +94,13 @@ pub async fn list_mariadb_releases(
 #[tauri::command]
 pub async fn install_mariadb(
     app: AppHandle,
+    manager: State<'_, BackupManager>,
     options: MariaDBInstallOptions,
 ) -> Result<String, String> {
-    run_installer(app, move |report| install_mariadb_service(options, report)).await
+    run_installer(app, manager.inner().clone(), move |report| {
+        install_mariadb_service(options, report)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -92,18 +111,33 @@ pub async fn get_mariadb_package_info() -> Result<MariaDBPackageInfo, String> {
 }
 
 #[tauri::command]
-pub async fn uninstall_mariadb(app: AppHandle) -> Result<String, String> {
-    run_installer(app, |report| uninstall_mariadb_service(report)).await
+pub async fn uninstall_mariadb(
+    app: AppHandle,
+    manager: State<'_, BackupManager>,
+) -> Result<String, String> {
+    run_installer(app, manager.inner().clone(), |report| {
+        uninstall_mariadb_service(report)
+    })
+    .await
 }
 
 #[tauri::command]
-pub async fn update_mariadb(app: AppHandle) -> Result<String, String> {
-    run_installer(app, |report| update_mariadb_service(report)).await
+pub async fn update_mariadb(
+    app: AppHandle,
+    manager: State<'_, BackupManager>,
+) -> Result<String, String> {
+    run_installer(app, manager.inner().clone(), |report| {
+        update_mariadb_service(report)
+    })
+    .await
 }
 
 #[tauri::command]
-pub async fn start_mariadb_service(service_name: Option<String>) -> Result<MariaDBStatus, String> {
-    super::run_blocking(move || {
+pub async fn start_mariadb_service(
+    manager: State<'_, BackupManager>,
+    service_name: Option<String>,
+) -> Result<MariaDBStatus, String> {
+    run_mutation(manager.inner().clone(), move || {
         let _guard = maintenance_access()?;
         start_service(service_name)?;
         Ok(detect_mariadb())
@@ -112,8 +146,11 @@ pub async fn start_mariadb_service(service_name: Option<String>) -> Result<Maria
 }
 
 #[tauri::command]
-pub async fn stop_mariadb_service(service_name: Option<String>) -> Result<MariaDBStatus, String> {
-    super::run_blocking(move || {
+pub async fn stop_mariadb_service(
+    manager: State<'_, BackupManager>,
+    service_name: Option<String>,
+) -> Result<MariaDBStatus, String> {
+    run_mutation(manager.inner().clone(), move || {
         let _guard = maintenance_access()?;
         stop_service(service_name)?;
         Ok(detect_mariadb())
@@ -123,9 +160,10 @@ pub async fn stop_mariadb_service(service_name: Option<String>) -> Result<MariaD
 
 #[tauri::command]
 pub async fn restart_mariadb_service(
+    manager: State<'_, BackupManager>,
     service_name: Option<String>,
 ) -> Result<MariaDBStatus, String> {
-    super::run_blocking(move || {
+    run_mutation(manager.inner().clone(), move || {
         let _guard = maintenance_access()?;
         restart_service(service_name)?;
         Ok(detect_mariadb())
@@ -135,10 +173,11 @@ pub async fn restart_mariadb_service(
 
 #[tauri::command]
 pub async fn execute_mariadb_query(
+    manager: State<'_, BackupManager>,
     credentials: MariaDBCredentials,
     query: String,
 ) -> Result<MariaDBQueryResult, String> {
-    super::run_blocking(move || {
+    run_mutation(manager.inner().clone(), move || {
         let _guard = database_access()?;
         execute_query(credentials, query)
     })
@@ -179,10 +218,11 @@ pub async fn list_mariadb_tables(
 
 #[tauri::command]
 pub async fn backup_mariadb(
+    manager: State<'_, BackupManager>,
     credentials: MariaDBCredentials,
     options: MariaDBBackupOptions,
 ) -> Result<MariaDBBackupResult, String> {
-    super::run_blocking(move || {
+    run_mutation(manager.inner().clone(), move || {
         let _guard = database_access()?;
         create_backup(credentials, options)
     })
@@ -191,10 +231,11 @@ pub async fn backup_mariadb(
 
 #[tauri::command]
 pub async fn save_mariadb_user(
+    manager: State<'_, BackupManager>,
     credentials: MariaDBCredentials,
     config: MariaDBUserConfig,
 ) -> Result<(), String> {
-    super::run_blocking(move || {
+    run_mutation(manager.inner().clone(), move || {
         let _guard = database_access()?;
         create_or_update_user(credentials, config)
     })
@@ -214,10 +255,11 @@ pub async fn list_mariadb_users(
 
 #[tauri::command]
 pub async fn update_mariadb_user(
+    manager: State<'_, BackupManager>,
     credentials: MariaDBCredentials,
     config: MariaDBUserUpdateConfig,
 ) -> Result<(), String> {
-    super::run_blocking(move || {
+    run_mutation(manager.inner().clone(), move || {
         let _guard = database_access()?;
         update_user(credentials, config)
     })
@@ -239,13 +281,14 @@ pub async fn get_mariadb_user_access(
 
 #[tauri::command]
 pub async fn grant_mariadb_permissions(
+    manager: State<'_, BackupManager>,
     credentials: MariaDBCredentials,
     username: String,
     host: String,
     database: String,
     privileges: Vec<String>,
 ) -> Result<(), String> {
-    super::run_blocking(move || {
+    run_mutation(manager.inner().clone(), move || {
         let _guard = database_access()?;
         grant_permissions(credentials, username, host, database, privileges)
     })
@@ -254,11 +297,12 @@ pub async fn grant_mariadb_permissions(
 
 #[tauri::command]
 pub async fn delete_mariadb_user(
+    manager: State<'_, BackupManager>,
     credentials: MariaDBCredentials,
     username: String,
     host: String,
 ) -> Result<(), String> {
-    super::run_blocking(move || {
+    run_mutation(manager.inner().clone(), move || {
         let _guard = database_access()?;
         drop_user(credentials, username, host)
     })

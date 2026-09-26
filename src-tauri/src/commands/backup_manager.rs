@@ -7,7 +7,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex, MutexGuard,
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use serde::{Deserialize, Serialize};
@@ -119,6 +119,48 @@ struct RestorePermit {
     credentials: MariaDBCredentials,
 }
 
+const MAINTENANCE_RESERVATION_TTL: Duration = Duration::from_secs(120);
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MaintenanceBackupReservation {
+    token: String,
+    expires_at: u64,
+}
+
+struct BackupReservation {
+    token: String,
+    workspace_id: String,
+    schedule_ids: Vec<String>,
+    deadline: Instant,
+}
+
+impl BackupReservation {
+    fn matches(&self, workspace_id: &str, token: &str) -> bool {
+        self.workspace_id == workspace_id && self.token == token
+    }
+
+    fn receipt(&self) -> MaintenanceBackupReservation {
+        MaintenanceBackupReservation {
+            token: self.token.clone(),
+            expires_at: now_ms()
+                + self
+                    .deadline
+                    .saturating_duration_since(Instant::now())
+                    .as_millis() as u64,
+        }
+    }
+}
+
+fn expire_reservation(reservation: &mut Option<BackupReservation>, now: Instant) {
+    if reservation
+        .as_ref()
+        .is_some_and(|permit| permit.deadline <= now)
+    {
+        *reservation = None;
+    }
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RestoreResult {
@@ -139,6 +181,7 @@ struct Inner {
 pub struct BackupManager {
     inner: Arc<Mutex<Inner>>,
     operation: Arc<Mutex<()>>,
+    reservation: Arc<Mutex<Option<BackupReservation>>>,
     started: Arc<AtomicBool>,
     stopped: Arc<AtomicBool>,
 }
@@ -180,7 +223,123 @@ impl BackupManager {
     }
 
     pub fn is_busy(&self) -> bool {
-        self.operation.try_lock().is_err()
+        self.manual_operation().is_err()
+    }
+
+    pub(crate) fn manual_operation(&self) -> Result<MutexGuard<'_, ()>, String> {
+        self.begin_operation(None)
+    }
+
+    fn reservation(&self) -> Result<MutexGuard<'_, Option<BackupReservation>>, String> {
+        self.reservation
+            .lock()
+            .map_err(|_| "Backup reservation state is unavailable.".into())
+    }
+
+    fn begin_operation(
+        &self,
+        authorization: Option<(&str, &str, &str)>,
+    ) -> Result<MutexGuard<'_, ()>, String> {
+        let operation = self
+            .operation
+            .try_lock()
+            .map_err(|_| "A backup or restore is in progress.")?;
+        let mut reservation = self.reservation()?;
+        expire_reservation(&mut reservation, Instant::now());
+        match (reservation.as_ref(), authorization) {
+            (None, None) => {}
+            (Some(permit), Some((workspace_id, schedule_id, token)))
+                if permit.matches(workspace_id, token)
+                    && permit.schedule_ids.iter().any(|id| id == schedule_id) => {}
+            (Some(_), None) => {
+                return Err(
+                    "Backups are reserved for maintenance. Wait for maintenance to finish.".into(),
+                )
+            }
+            _ => {
+                return Err(
+                    "The maintenance backup reservation expired or does not authorize this backup."
+                        .into(),
+                )
+            }
+        }
+        // Keep the existing operation gate for the full backup, even after release or expiry.
+        Ok(operation)
+    }
+
+    fn reserve_backups(
+        &self,
+        workspace_id: String,
+        schedule_ids: Vec<String>,
+        token: String,
+    ) -> Result<MaintenanceBackupReservation, String> {
+        validate_id(&workspace_id)?;
+        if schedule_ids.is_empty() || schedule_ids.len() > 100 {
+            return Err("Choose between 1 and 100 backup schedules for maintenance.".into());
+        }
+        for id in &schedule_ids {
+            validate_id(id)?;
+        }
+        let _operation = self.manual_operation()?;
+        if self.stopped.load(Ordering::Relaxed) {
+            return Err("The backup manager is shutting down.".into());
+        }
+        {
+            let inner = self.lock()?;
+            if schedule_ids.iter().any(|id| {
+                !inner.registry.schedules.iter().any(|schedule| {
+                    schedule.config.workspace_id == workspace_id && schedule.config.id == *id
+                })
+            }) {
+                return Err(
+                    "A selected backup schedule no longer exists in this workspace.".into(),
+                );
+            }
+        }
+        let permit = BackupReservation {
+            token,
+            workspace_id,
+            schedule_ids,
+            deadline: Instant::now() + MAINTENANCE_RESERVATION_TTL,
+        };
+        let receipt = permit.receipt();
+        *self.reservation()? = Some(permit);
+        Ok(receipt)
+    }
+
+    fn renew_reservation(
+        &self,
+        workspace_id: &str,
+        token: &str,
+    ) -> Result<MaintenanceBackupReservation, String> {
+        // Renewal must also work while an authorized backup holds the operation gate.
+        let mut reservation = self.reservation()?;
+        let now = Instant::now();
+        expire_reservation(&mut reservation, now);
+        let permit = reservation
+            .as_mut()
+            .filter(|permit| permit.matches(workspace_id, token))
+            .ok_or(
+                "The maintenance backup reservation expired or changed. Review maintenance again.",
+            )?;
+        if self.stopped.load(Ordering::Relaxed) {
+            return Err("The backup manager is shutting down.".into());
+        }
+        permit.deadline = now + MAINTENANCE_RESERVATION_TTL;
+        Ok(permit.receipt())
+    }
+
+    fn release_reservation(&self, workspace_id: &str, token: &str) -> Result<(), String> {
+        let mut reservation = self.reservation()?;
+        expire_reservation(&mut reservation, Instant::now());
+        match reservation.as_ref() {
+            None => Ok(()),
+            Some(permit) if permit.matches(workspace_id, token) => {
+                *reservation = None;
+                Ok(())
+            }
+            Some(_) => Err("The maintenance backup reservation belongs to another plan.".into()),
+        }
     }
 
     fn lock(&self) -> Result<MutexGuard<'_, Inner>, String> {
@@ -232,7 +391,7 @@ impl BackupManager {
             return Ok(());
         }
         self.initialize(app)?;
-        let Ok(_operation) = self.operation.try_lock() else {
+        let Ok(_operation) = self.manual_operation() else {
             return Ok(());
         };
         if self.stopped.load(Ordering::Relaxed) {
@@ -521,6 +680,41 @@ fn apply_retention(registry: &mut Registry, config: &BackupSchedule) -> Result<(
 }
 
 #[tauri::command]
+pub async fn reserve_maintenance_backups(
+    app: AppHandle,
+    manager: State<'_, BackupManager>,
+    workspace_id: String,
+    schedule_ids: Vec<String>,
+) -> Result<MaintenanceBackupReservation, String> {
+    let manager = manager.inner().clone();
+    super::run_blocking(move || {
+        manager.initialize(&app)?;
+        manager.reserve_backups(workspace_id, schedule_ids, storage::secure_token()?)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn renew_maintenance_backup_reservation(
+    manager: State<'_, BackupManager>,
+    workspace_id: String,
+    token: String,
+) -> Result<MaintenanceBackupReservation, String> {
+    let manager = manager.inner().clone();
+    super::run_blocking(move || manager.renew_reservation(&workspace_id, &token)).await
+}
+
+#[tauri::command]
+pub async fn release_maintenance_backup_reservation(
+    manager: State<'_, BackupManager>,
+    workspace_id: String,
+    token: String,
+) -> Result<(), String> {
+    let manager = manager.inner().clone();
+    super::run_blocking(move || manager.release_reservation(&workspace_id, &token)).await
+}
+
+#[tauri::command]
 pub async fn get_backup_manager(
     app: AppHandle,
     manager: State<'_, BackupManager>,
@@ -571,10 +765,7 @@ pub async fn save_backup_schedule(
 ) -> Result<(), String> {
     let manager = manager.inner().clone();
     super::run_blocking(move || {
-        let _operation = manager
-            .operation
-            .try_lock()
-            .map_err(|_| "A backup or restore is in progress.")?;
+        let _operation = manager.manual_operation()?;
         manager.initialize(&app)?;
         validate_config(&config)?;
         let _database = super::mariadb::database_access()?;
@@ -641,10 +832,7 @@ pub async fn remove_backup_schedule(
 ) -> Result<(), String> {
     let manager = manager.inner().clone();
     super::run_blocking(move || {
-        let _operation = manager
-            .operation
-            .try_lock()
-            .map_err(|_| "A backup or restore is in progress.")?;
+        let _operation = manager.manual_operation()?;
         manager.initialize(&app)?;
         let mut inner = manager.lock()?;
         if !inner
@@ -680,13 +868,15 @@ pub async fn run_scheduled_backup_now(
     workspace_id: String,
     schedule_id: String,
     credentials: MariaDBCredentials,
+    reservation_token: Option<String>,
 ) -> Result<BackupSnapshot, String> {
     let manager = manager.inner().clone();
     super::run_blocking(move || {
-        let _operation = manager
-            .operation
-            .try_lock()
-            .map_err(|_| "A backup or restore is in progress.")?;
+        let _operation = manager.begin_operation(
+            reservation_token
+                .as_deref()
+                .map(|token| (workspace_id.as_str(), schedule_id.as_str(), token)),
+        )?;
         manager.initialize(&app)?;
         let config = manager
             .lock()?
@@ -712,7 +902,7 @@ pub async fn preview_backup_restore(
 ) -> Result<RestorePreview, String> {
     let manager = manager.inner().clone();
     super::run_blocking(move || {
-        let _operation = manager.operation.try_lock().map_err(|_| "A backup or restore is in progress.")?;
+        let _operation = manager.manual_operation()?;
         let _database = super::mariadb::database_access()?;
         manager.initialize(&app)?;
         let snapshot = manager.lock()?.registry.snapshots.iter()
@@ -764,7 +954,7 @@ pub async fn restore_backup_snapshot(
 ) -> Result<RestoreResult, String> {
     let manager = manager.inner().clone();
     super::run_blocking(move || {
-        let _operation = manager.operation.try_lock().map_err(|_| "A backup or restore is in progress.")?;
+        let _operation = manager.manual_operation()?;
         let _database = super::mariadb::maintenance_access()?;
         manager.initialize(&app)?;
         let permit = manager.lock()?.previews.remove(&token).ok_or("Preview expired. Review this restore again.")?;
@@ -936,10 +1126,7 @@ pub async fn preview_backup_restore_test(
 ) -> Result<RestoreTestPreview, String> {
     let manager = manager.inner().clone();
     super::run_blocking(move || {
-        let _operation = manager
-            .operation
-            .try_lock()
-            .map_err(|_| "A backup or restore is in progress.")?;
+        let _operation = manager.manual_operation()?;
         manager.initialize(&app)?;
         validate_id(&workspace_id)?;
         let snapshot = manager
@@ -1038,7 +1225,7 @@ pub async fn test_backup_restore(
 ) -> Result<RestoreTestEvidence, String> {
     let manager = manager.inner().clone();
     super::run_blocking(move || {
-        let _operation = manager.operation.try_lock().map_err(|_| "A backup or restore is in progress.")?;
+        let _operation = manager.manual_operation()?;
         let _database = super::mariadb::maintenance_access()?;
         manager.initialize(&app)?;
         let permit = manager.lock()?.test_previews.remove(&token).ok_or("Restore test preview expired. Review it again.")?;
@@ -1094,10 +1281,7 @@ pub async fn cleanup_backup_restore_test(
 ) -> Result<RestoreTestEvidence, String> {
     let manager = manager.inner().clone();
     super::run_blocking(move || {
-        let _operation = manager
-            .operation
-            .try_lock()
-            .map_err(|_| "A backup or restore is in progress.")?;
+        let _operation = manager.manual_operation()?;
         let _database = super::mariadb::maintenance_access()?;
         manager.initialize(&app)?;
         let mut evidence = manager
@@ -1172,6 +1356,314 @@ mod tests {
             interval_minutes: 60,
             retain_count: 1,
         }
+    }
+
+    fn reservation_manager() -> BackupManager {
+        let manager = BackupManager::default();
+        manager
+            .lock()
+            .unwrap()
+            .registry
+            .schedules
+            .push(ScheduleStatus {
+                config: fixture_config("C:/backups"),
+                enabled: true,
+                running: false,
+                next_run: Some(0),
+                last_run: None,
+                last_error: None,
+            });
+        manager
+    }
+
+    fn reserve(manager: &BackupManager, token: &str) -> MaintenanceBackupReservation {
+        manager
+            .reserve_backups("development".into(), vec!["daily".into()], token.into())
+            .unwrap()
+    }
+
+    #[test]
+    fn maintenance_reservation_rejects_invalid_or_foreign_schedule_scope() {
+        let manager = reservation_manager();
+        for (workspace, ids) in [
+            ("development", vec![]),
+            ("development", vec!["daily".into(); 101]),
+            ("development", vec!["missing".into()]),
+            ("production", vec!["daily".into()]),
+            ("../development", vec!["daily".into()]),
+            ("development", vec!["../daily".into()]),
+        ] {
+            assert!(manager
+                .reserve_backups(workspace.into(), ids, "token".into())
+                .is_err());
+            assert!(!manager.is_busy());
+        }
+    }
+
+    #[test]
+    fn maintenance_reservation_defers_timer_and_manual_work_but_authorizes_selected_backup() {
+        let manager = reservation_manager();
+        let permit = reserve(&manager, "owned-token");
+        assert!(manager.is_busy());
+        assert!(manager.manual_operation().is_err());
+        assert!(is_due(
+            &manager.lock().unwrap().registry.schedules[0],
+            now_ms()
+        ));
+        for (workspace, schedule, token) in [
+            ("production", "daily", permit.token.as_str()),
+            ("development", "other", permit.token.as_str()),
+            ("development", "daily", "wrong-token"),
+        ] {
+            assert!(manager
+                .begin_operation(Some((workspace, schedule, token)))
+                .is_err());
+        }
+        let operation = manager
+            .begin_operation(Some(("development", "daily", &permit.token)))
+            .unwrap();
+        assert!(manager
+            .begin_operation(Some(("development", "daily", &permit.token)))
+            .is_err());
+        drop(operation);
+        assert!(manager.manual_operation().is_err());
+        manager
+            .release_reservation("development", &permit.token)
+            .unwrap();
+        assert!(manager.manual_operation().is_ok());
+    }
+
+    #[test]
+    fn maintenance_reservation_acquisition_and_manual_work_share_the_operation_gate() {
+        let manager = reservation_manager();
+        let operation = manager.manual_operation().unwrap();
+        assert!(manager
+            .reserve_backups("development".into(), vec!["daily".into()], "token".into())
+            .is_err());
+        drop(operation);
+        let permit = reserve(&manager, "token");
+        assert!(manager
+            .reserve_backups(
+                "development".into(),
+                vec!["daily".into()],
+                "replacement".into()
+            )
+            .is_err());
+        manager
+            .release_reservation("development", &permit.token)
+            .unwrap();
+        assert!(!manager.is_busy());
+    }
+
+    #[test]
+    fn only_one_concurrent_maintenance_reservation_is_admitted() {
+        let manager = reservation_manager();
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+        let workers: Vec<_> = ["first", "second"]
+            .into_iter()
+            .map(|token| {
+                let manager = manager.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    manager
+                        .reserve_backups("development".into(), vec!["daily".into()], token.into())
+                        .is_ok()
+                })
+            })
+            .collect();
+        barrier.wait();
+        let admitted = workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap())
+            .filter(|admitted| *admitted)
+            .count();
+        assert_eq!(admitted, 1);
+    }
+
+    #[test]
+    fn maintenance_reservation_renewal_works_during_backup_and_rejects_other_owners() {
+        let manager = reservation_manager();
+        let permit = reserve(&manager, "token");
+        let operation = manager
+            .begin_operation(Some(("development", "daily", &permit.token)))
+            .unwrap();
+        let short_deadline = Instant::now() + Duration::from_secs(1);
+        manager.reservation().unwrap().as_mut().unwrap().deadline = short_deadline;
+        assert!(manager
+            .renew_reservation("production", &permit.token)
+            .is_err());
+        assert!(manager
+            .renew_reservation("development", "wrong-token")
+            .is_err());
+        let renewed = manager
+            .renew_reservation("development", &permit.token)
+            .unwrap();
+        assert_eq!(renewed.token, permit.token);
+        assert!(manager.reservation().unwrap().as_ref().unwrap().deadline > short_deadline);
+        drop(operation);
+    }
+
+    #[test]
+    fn expired_maintenance_tokens_fail_closed_and_cannot_release_replacements() {
+        let manager = reservation_manager();
+        let expired = reserve(&manager, "expired-token");
+        manager.reservation().unwrap().as_mut().unwrap().deadline = Instant::now();
+        assert!(manager
+            .renew_reservation("development", &expired.token)
+            .is_err());
+        assert!(manager
+            .begin_operation(Some(("development", "daily", &expired.token)))
+            .is_err());
+        assert!(!manager.is_busy());
+        let replacement = reserve(&manager, "replacement-token");
+        assert!(manager
+            .release_reservation("development", &expired.token)
+            .is_err());
+        assert!(manager
+            .release_reservation("production", &replacement.token)
+            .is_err());
+        assert!(manager.manual_operation().is_err());
+        manager
+            .release_reservation("development", &replacement.token)
+            .unwrap();
+        manager
+            .release_reservation("development", &replacement.token)
+            .unwrap();
+    }
+
+    #[test]
+    fn reservation_expiry_or_release_never_unlocks_an_inflight_backup() {
+        for expire in [false, true] {
+            let manager = reservation_manager();
+            let permit = reserve(&manager, "token");
+            let operation = manager
+                .begin_operation(Some(("development", "daily", &permit.token)))
+                .unwrap();
+            if expire {
+                manager.reservation().unwrap().as_mut().unwrap().deadline = Instant::now();
+            } else {
+                manager
+                    .release_reservation("development", &permit.token)
+                    .unwrap();
+            }
+            assert!(manager.manual_operation().is_err());
+            assert!(manager
+                .reserve_backups("development".into(), vec!["daily".into()], "new".into())
+                .is_err());
+            drop(operation);
+            assert!(!manager.is_busy());
+            assert!(manager.reservation().unwrap().is_none());
+        }
+    }
+
+    #[test]
+    fn reservation_expiration_uses_a_monotonic_deadline_inclusively() {
+        let deadline = Instant::now() + MAINTENANCE_RESERVATION_TTL;
+        let mut reservation = Some(BackupReservation {
+            token: "token".into(),
+            workspace_id: "development".into(),
+            schedule_ids: vec!["daily".into()],
+            deadline,
+        });
+        expire_reservation(&mut reservation, deadline - Duration::from_nanos(1));
+        assert!(reservation.is_some());
+        expire_reservation(&mut reservation, deadline);
+        assert!(reservation.is_none());
+    }
+
+    #[test]
+    fn maintenance_reservation_is_ephemeral_and_has_a_minimal_receipt() {
+        let manager = reservation_manager();
+        let before = now_ms();
+        let permit = reserve(&manager, "ephemeral-capability");
+        assert!(permit.expires_at >= before);
+        assert!(permit.expires_at <= now_ms() + MAINTENANCE_RESERVATION_TTL.as_millis() as u64);
+        let receipt = serde_json::to_value(&permit).unwrap();
+        assert_eq!(receipt.as_object().unwrap().len(), 2);
+        assert_eq!(receipt["token"], "ephemeral-capability");
+        assert!(receipt["expiresAt"].is_u64());
+        let registry = serde_json::to_string(&manager.lock().unwrap().registry).unwrap();
+        assert!(!registry.contains("ephemeral-capability"));
+        manager.stop();
+        assert!(manager
+            .renew_reservation("development", &permit.token)
+            .is_err());
+        manager
+            .release_reservation("development", &permit.token)
+            .unwrap();
+        assert!(manager
+            .reserve_backups("development".into(), vec!["daily".into()], "new".into())
+            .is_err());
+    }
+
+    #[test]
+    fn maintenance_reservation_blocks_native_mutation_workers_and_reviewed_apply_paths() {
+        let manager = reservation_manager();
+        let permit = reserve(&manager, "native-admission-token");
+        let executed = Arc::new(AtomicBool::new(false));
+        let worker_executed = executed.clone();
+        let error = tauri::async_runtime::block_on(super::super::mariadb::run_mutation(
+            manager.clone(),
+            move || {
+                worker_executed.store(true, Ordering::Relaxed);
+                Ok(())
+            },
+        ))
+        .unwrap_err();
+        assert!(error.contains("reserved for maintenance"));
+        assert!(!executed.load(Ordering::Relaxed));
+
+        let admin = tauri::async_runtime::block_on(
+            super::super::database_admin::apply_database_admin_action_with_manager(
+                manager.clone(),
+                "development".into(),
+                "unused-admin-preview".into(),
+                "db.table".into(),
+            ),
+        )
+        .err()
+        .expect("Reserved administration must be refused before preview consumption");
+        assert!(admin.contains("reserved for maintenance"));
+        let row = tauri::async_runtime::block_on(
+            super::super::database_browser::apply_database_browser_change_with_manager(
+                manager.clone(),
+                "development".into(),
+                "unused-row-preview".into(),
+                "db.table".into(),
+            ),
+        )
+        .unwrap_err();
+        assert!(row.contains("reserved for maintenance"));
+        manager
+            .release_reservation("development", &permit.token)
+            .unwrap();
+        assert!(!manager.is_busy());
+    }
+
+    #[test]
+    fn native_mutation_admission_holds_the_operation_gate_and_releases_it_on_error() {
+        let manager = reservation_manager();
+        let worker = manager.clone();
+        let result: Result<(), String> = tauri::async_runtime::block_on(
+            super::super::mariadb::run_mutation(manager.clone(), move || {
+                assert!(worker.manual_operation().is_err());
+                assert!(worker
+                    .reserve_backups(
+                        "development".into(),
+                        vec!["daily".into()],
+                        "competing-token".into(),
+                    )
+                    .is_err());
+                Err("fixture mutation failed".into())
+            }),
+        );
+        assert_eq!(result.unwrap_err(), "fixture mutation failed");
+        assert!(!manager.is_busy());
+        let permit = reserve(&manager, "after-error-token");
+        manager
+            .release_reservation("development", &permit.token)
+            .unwrap();
     }
 
     #[test]

@@ -28,6 +28,7 @@ export type PageId =
 	| "backup-manager"
 	| "diagnostics"
 	| "health"
+	| "maintenance"
 	| "live-bridge"
 	| "database-browser"
 	| "incidents"
@@ -131,6 +132,7 @@ export const navigation: NavigationItem[] = [
 			},
 			{ id: "diagnostics", label: "Diagnostics", icon: ClipboardCheckIcon },
 			{ id: "health", label: "Health & Recovery", icon: ActivityIcon },
+			{ id: "maintenance", label: "Maintenance Plans", icon: ClipboardCheckIcon },
 			{ id: "live-bridge", label: "Live Bridge", icon: PlugIcon },
 		],
 	},

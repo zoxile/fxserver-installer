@@ -2,7 +2,10 @@
 //! table metadata, column definitions, primary/unique keys and default helpers.
 //! Mutations use new single-target, one-shot previews; no FK-check bypass.
 use super::{
-    backup_manager::storage::{now_ms, secure_token, validate_id},
+    backup_manager::{
+        storage::{now_ms, secure_token, validate_id},
+        BackupManager,
+    },
     database_browser::{query_json, quote_identifier, sql_text},
 };
 use crate::{models::mariadb::MariaDBCredentials, services::mariadb::query::execute_query};
@@ -12,6 +15,7 @@ use std::{
     sync::{Mutex, OnceLock},
     time::Duration,
 };
+use tauri::State;
 
 const MAX_COLUMNS: usize = 32;
 const MAX_SQL: usize = 8000;
@@ -529,11 +533,27 @@ pub async fn preview_database_admin_action(
 
 #[tauri::command]
 pub async fn apply_database_admin_action(
+    manager: State<'_, BackupManager>,
     workspace_id: String,
     token: String,
     confirmation: String,
 ) -> Result<AdminResult, String> {
-    super::run_blocking(move || {
+    apply_database_admin_action_with_manager(
+        manager.inner().clone(),
+        workspace_id,
+        token,
+        confirmation,
+    )
+    .await
+}
+
+pub(crate) async fn apply_database_admin_action_with_manager(
+    manager: BackupManager,
+    workspace_id: String,
+    token: String,
+    confirmation: String,
+) -> Result<AdminResult, String> {
+    super::mariadb::run_mutation(manager, move || {
         // Serializes against this application's queries, row edits, backups and restores.
         let _guard = super::mariadb::maintenance_access()?;
         let permit = take_permit(&workspace_id, &token, &confirmation)?;

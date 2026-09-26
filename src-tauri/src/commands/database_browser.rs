@@ -7,6 +7,7 @@ use std::{
     time::Duration,
 };
 
+use super::backup_manager::BackupManager;
 use crate::{
     models::mariadb::MariaDBCredentials,
     services::mariadb::query::{
@@ -14,6 +15,7 @@ use crate::{
     },
 };
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use tauri::State;
 #[cfg(all(test, windows))]
 use {crate::process::CommandNoWindowExt, std::process::Command};
 
@@ -704,11 +706,27 @@ pub async fn preview_database_browser_change(
 
 #[tauri::command]
 pub async fn apply_database_browser_change(
+    manager: State<'_, BackupManager>,
     workspace_id: String,
     token: String,
     confirmation: String,
 ) -> Result<u64, String> {
-    super::run_blocking(move || {
+    apply_database_browser_change_with_manager(
+        manager.inner().clone(),
+        workspace_id,
+        token,
+        confirmation,
+    )
+    .await
+}
+
+pub(crate) async fn apply_database_browser_change_with_manager(
+    manager: BackupManager,
+    workspace_id: String,
+    token: String,
+    confirmation: String,
+) -> Result<u64, String> {
+    super::mariadb::run_mutation(manager, move || {
         let _guard = super::mariadb::maintenance_access()?;
         let permit = changes().lock().map_err(|_| "Change preview lock unavailable.")?.remove(&token).ok_or("Change preview expired or was already used.")?;
         validate_change_permit(&permit, &workspace_id, &confirmation, super::backup_manager::storage::now_ms())?;
@@ -1144,8 +1162,9 @@ mod tests {
         credentials: &MariaDBCredentials,
     ) -> Result<(), String> {
         use crate::commands::database_admin::{
-            apply_database_admin_action, preview_database_admin_action, AdminRequest,
+            apply_database_admin_action_with_manager, preview_database_admin_action, AdminRequest,
         };
+        let manager = BackupManager::default();
         let database = "fxi_admin_fixture";
         let table = "admin_rows";
         let preview = |database: &str,
@@ -1166,7 +1185,8 @@ mod tests {
         let apply = |preview: &serde_json::Value| -> Result<serde_json::Value, String> {
             assert_eq!(preview["host"], "127.0.0.1");
             assert_eq!(preview["port"], credentials.port);
-            serde_json::to_value(runtime.block_on(apply_database_admin_action(
+            serde_json::to_value(runtime.block_on(apply_database_admin_action_with_manager(
+                manager.clone(),
                 "fixture".into(),
                 preview["token"].as_str().unwrap().into(),
                 preview["confirmation"].as_str().unwrap().into(),
