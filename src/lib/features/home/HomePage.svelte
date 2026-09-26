@@ -168,6 +168,8 @@
 				"Service controls",
 				"User grants",
 				"Query helpers",
+				"Saved queries and table bookmarks",
+				"Slow query analysis",
 				"SQL console",
 				"Scheduled backups and restore tests",
 				"Table browser and CSV export",
@@ -210,11 +212,12 @@
 			size="wide"
 			className="md:[grid-area:server]"
 			kicker="Server core"
-			highlights={["Live console", "Resource controls", "Secure RCON password", "Performance charts"]}
+			highlights={["Live console", "Resource dependencies", "Secure RCON password", "Reviewed maintenance"]}
 			actions={[
 				{ label: "Manage", onclick: () => onNavigate("server-manage") },
 				{ label: "Resources", onclick: () => onNavigate("resource-manager") },
 				{ label: "Live Bridge", onclick: () => onNavigate("live-bridge") },
+				{ label: "Maintenance", onclick: () => onNavigate("maintenance") },
 			]}
 			onclick={() => onNavigate("server-manage")}
 		/>
@@ -225,7 +228,7 @@
 			size="compact"
 			className="md:[grid-area:config]"
 			kicker="Configuration"
-			highlights={["Colored cfg editor", "Encrypted version history", "Diff and restore", "Permission helpers"]}
+			highlights={["Colored cfg editor", "Change validation", "Encrypted version history", "Permission helpers"]}
 			actionLabel="Configure"
 			onclick={() => onNavigate("server-configure")}
 		/>
@@ -236,7 +239,7 @@
 			size="wide"
 			className="md:[grid-area:logs]"
 			kicker="Diagnostics"
-			highlights={["Dedicated nav section", "Application logs", "Server logs", "Client logs"]}
+			highlights={["Grouped console issues", "Application logs", "Server logs", "Client logs"]}
 			actions={[
 				{ label: "App Logs", onclick: () => onNavigate("logs") },
 				{ label: "Server Logs", onclick: () => onNavigate("server-logs") },
@@ -252,7 +255,7 @@
 			size="feature"
 			className="md:[grid-area:tools]"
 			kicker="Utility"
-			highlights={["Command palette", "JSON formatter", "JOOAT resolver", "Profiler", "Lua configurator"]}
+			highlights={["Command palette", "JSON formatter", "JOOAT resolver", "Guided profiler and comparison", "Lua configurator"]}
 			actions={[
 				{ label: "Palette", onclick: () => onNavigate("command-palette") },
 				{ label: "JSON", onclick: () => onNavigate("json-formatter") },

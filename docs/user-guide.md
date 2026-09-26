@@ -473,6 +473,8 @@ The JOOAT hasher works immediately. The full offline resolver requires an option
 
 ## Troubleshooting
 
+For saved queries and bookmarks, slow-query analysis, grouped console issues, resource dependencies, profiler recording, maintenance plans, and configuration change validation, see the [reviewed operations guide](operations-guide.md).
+
 ### `index.html` not found when running a release binary
 
 Build the frontend with the Tauri build command:

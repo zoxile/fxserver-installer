@@ -66,6 +66,7 @@ Quick note: The main purpose of this app was for me to learn how to build with T
 
 - [User Guide](docs/user-guide.md): Install, build, update, and operate the app without relying on the installer workflow.
 - [Live Bridge](docs/live-bridge.md): Optional local pairing, real runtime data, installation, removal, and security limits.
+- [Reviewed Operations](docs/operations-guide.md): Maintenance plans, query tools, dependency inspection, profiler recording, and config validation.
 - [Security Policy](SECURITY.md): Report vulnerabilities privately and review the application's trust boundaries.
 - [JOOAT Resolver Pack](docs/jooat-resolver-pack.md): Build and host the optional offline JOOAT hash resolver database.
 - [Contributing Guide](CONTRIBUTING.md): How to report issues, open pull requests, and write conventional commits.
@@ -111,6 +112,8 @@ Quick note: The main purpose of this app was for me to learn how to build with T
 
 ### Queries & Files
 
+- Saved query folders with typed value parameters and explicit execution review.
+- Local slow-query log analysis with redacted fingerprints, time rankings, and review-only EXPLAIN templates.
 - Shared MariaDB connection card with the Manage MariaDB panel.
 - Query console with helper snippets for common SELECT, filter, update, delete, and schema tasks.
 - SQL file runner with global or database-scoped execution.
@@ -119,6 +122,7 @@ Quick note: The main purpose of this app was for me to learn how to build with T
 
 ### Database Browser
 
+- Named table/filter bookmarks scoped to the workspace and database login endpoint.
 - Read-only-by-default table browsing, column and index metadata, pagination, sorting, filters, and bounded CSV export.
 - Explicitly enabled single-row insert, update, and delete previews for supported InnoDB tables.
 - Read-only server status, variables, processes, character sets, engines, accounts, and visible grants.
@@ -136,6 +140,7 @@ Quick note: The main purpose of this app was for me to learn how to build with T
 
 ### Configure Server
 
+- Reviewed configuration changes with duplicate-setting, include, endpoint, and secret-exposure checks before saving.
 - Read txAdmin profile data from `txData/{profile}/config.json`.
 - Discover txData from an artifact folder or selected profile while preserving explicitly configured paths.
 - Resolve the server `dataPath` from the profile configuration.
@@ -163,6 +168,7 @@ Quick note: The main purpose of this app was for me to learn how to build with T
 
 ### Resource Manager
 
+- Declared dependency inspection, reverse impact, cycles, and suggested startup order; disruptive actions require impact review.
 - Scan resources from the configured server resources folder.
 - Read `fxmanifest.lua` metadata, local versions, and repository URLs.
 - Check GitHub repositories for available updates.
@@ -176,6 +182,7 @@ Quick note: The main purpose of this app was for me to learn how to build with T
 
 ### Logs
 
+- Grouped managed-console errors and warnings with counts, first/last occurrence, and nearby context in a bounded in-memory window.
 - Application Logs for app-side operations.
 - Server Logs for FXServer output.
 - Client Logs for FiveM client logs from the local FiveM log folder.
@@ -185,11 +192,19 @@ Quick note: The main purpose of this app was for me to learn how to build with T
 
 ### Tools & Utils
 
+- Guided local FXServer profiler recordings and before/after capture comparisons.
 - Command Palette with configurable shortcuts.
 - Configurator for structured Lua/config editing.
 - Profiler viewer for FXServer profiler exports.
 - JOOAT hasher and optional offline resolver database.
 - JSON formatter and repair tool.
+
+### Reviewed Maintenance
+
+- Coordinate a managed shutdown, selected database backups, individually reviewed resource updates, readiness checks, restart, and startup observation.
+- Optional RCON announcement and Live Bridge player wait; tasks continue while navigating or using the tray.
+- Pause on failure or stop at a safe boundary. No automatic SQL migrations, rollback, or silent retry of completed actions.
+- See the [operations guide](docs/operations-guide.md) for prerequisites, limits, and recovery steps.
 
 ### Desktop App Behavior
 
