@@ -71,6 +71,37 @@ export type ProfilerAnalysis = {
 	tips: string[];
 };
 
+export type ProfilerComparison = {
+	averageFrameDeltaMs: number;
+	worstFrameDeltaMs: number;
+	heavyFrameDeltaPoints: number;
+	entries: Array<{ name: string; beforeMsPerFrame: number; afterMsPerFrame: number; deltaMsPerFrame: number }>;
+	warnings: string[];
+};
+
+export type ProfilerComparableAnalysis = Pick<ProfilerAnalysis, "stats" | "resources">;
+
+export function compareProfilerCaptures(before: ProfilerComparableAnalysis, after: ProfilerComparableAnalysis): ProfilerComparison {
+	const warnings: string[] = [];
+	if (!before.stats.frameCount || !after.stats.frameCount) warnings.push("One capture has no measured frames; per-frame comparison is unavailable.");
+	if (!before.stats.resourceManagerCalls || !after.stats.resourceManagerCalls) warnings.push("One capture uses inferred frame boundaries; frame metrics may not be directly comparable.");
+	if (before.stats.frameCount !== after.stats.frameCount) warnings.push("Capture lengths differ. Entry timings are normalized per captured frame.");
+	const prior = new Map(before.resources.filter((entry) => entry.kind !== "frame").map((entry) => [entry.name, entry]));
+	const next = new Map(after.resources.filter((entry) => entry.kind !== "frame").map((entry) => [entry.name, entry]));
+	const names = new Set([...prior.keys(), ...next.keys()]);
+	return {
+		averageFrameDeltaMs: after.stats.averageScriptMsPerFrame - before.stats.averageScriptMsPerFrame,
+		worstFrameDeltaMs: after.stats.worstFrameMs - before.stats.worstFrameMs,
+		heavyFrameDeltaPoints: after.stats.heavyTickPercent - before.stats.heavyTickPercent,
+		entries: before.stats.frameCount && after.stats.frameCount ? [...names].map((name) => {
+			const beforeMsPerFrame = (prior.get(name)?.totalMs ?? 0) / before.stats.frameCount;
+			const afterMsPerFrame = (next.get(name)?.totalMs ?? 0) / after.stats.frameCount;
+			return { name, beforeMsPerFrame, afterMsPerFrame, deltaMsPerFrame: afterMsPerFrame - beforeMsPerFrame };
+		}).sort((a, b) => Math.abs(b.deltaMsPerFrame) - Math.abs(a.deltaMsPerFrame)) : [],
+		warnings,
+	};
+}
+
 type TraceEvent = {
 	name?: unknown;
 	ph?: unknown;
@@ -190,7 +221,8 @@ function getTraceEvents(value: unknown): TraceEvent[] {
 		throw new Error("Profiler JSON is missing traceEvents. Use FiveM's profiler saveJSON output.");
 	}
 
-	return traceEvents as TraceEvent[];
+	if (traceEvents.length > 500_000) throw new Error("Profiler export exceeds the 500,000 event limit.");
+	return traceEvents.filter((event): event is TraceEvent => event !== null && typeof event === "object" && !Array.isArray(event));
 }
 
 function pairTraceSpans(events: TraceEvent[]) {
@@ -208,13 +240,13 @@ function pairTraceSpans(events: TraceEvent[]) {
 	for (const event of events) {
 		const name = typeof event.name === "string" ? event.name : "";
 		const phase = typeof event.ph === "string" ? event.ph : "";
-		const ts = typeof event.ts === "number" ? event.ts : undefined;
-		if (!name || ts === undefined) continue;
+		const ts = typeof event.ts === "number" && Number.isFinite(event.ts) && event.ts >= 0 ? event.ts : undefined;
+		if (ts === undefined || (!name && phase !== "E")) continue;
 
 		const threadKey = `${String(event.pid ?? "0")}:${String(event.tid ?? "0")}`;
 		const stack = stacks.get(threadKey) ?? [];
 
-		if (phase === "X" && typeof event.dur === "number" && event.dur >= 0) {
+		if (phase === "X" && typeof event.dur === "number" && Number.isFinite(event.dur) && event.dur >= 0 && Number.isFinite(ts + event.dur)) {
 			addSpan({
 				name,
 				...getSpanInfo(name),
@@ -239,10 +271,11 @@ function pairTraceSpans(events: TraceEvent[]) {
 
 		if (phase !== "E" || !stack.length) continue;
 
-		const index = findOpenSpanIndex(stack, name);
+		const index = name ? findOpenSpanIndex(stack, name) : stack.length - 1;
 		if (index === -1) continue;
 
 		const [open] = stack.splice(index, 1);
+		if (ts < open.start) continue;
 		const durationMs = Math.max(0, (ts - open.start) / 1000);
 		addSpan({ ...open, end: ts, durationMs });
 	}
@@ -487,7 +520,7 @@ function buildFrameTimeline(frames: FrameBucket[], firstTs: number) {
 }
 
 function countEvents(events: TraceEvent[], name: string) {
-	return events.filter((event) => event.name === name && event.ph === "B").length;
+	return events.filter((event) => event.name === name && (event.ph === "B" || event.ph === "I" || event.ph === "O")).length;
 }
 
 function isHeavyFrame(frame: Pick<FrameBucket, "durationMs">) {

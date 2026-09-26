@@ -1,22 +1,45 @@
 <script lang="ts">
+	import { onDestroy } from "svelte";
 	import AlertCircleIcon from "@lucide/svelte/icons/alert-circle";
 	import BarChart3Icon from "@lucide/svelte/icons/bar-chart-3";
 	import FileJsonIcon from "@lucide/svelte/icons/file-json";
 	import GaugeIcon from "@lucide/svelte/icons/gauge";
 	import LightbulbIcon from "@lucide/svelte/icons/lightbulb";
-	import TerminalIcon from "@lucide/svelte/icons/terminal";
 	import UploadCloudIcon from "@lucide/svelte/icons/upload-cloud";
+	import XIcon from "@lucide/svelte/icons/x";
+	import ChevronLeftIcon from "@lucide/svelte/icons/chevron-left";
+	import ChevronRightIcon from "@lucide/svelte/icons/chevron-right";
 	import * as Card from "$lib/components/ui/card/index.js";
+	import { Button } from "$lib/components/ui/button/index.js";
 	import { log } from "$lib/core/logger.svelte";
+	import { getWorkspaceId } from "$lib/core/workspaces.svelte";
 	import { Progress } from "$lib/components/ui/progress/index.js";
-	import { analyzeProfilerJson, type FrameProfile, type ProfilerAnalysis, type ResourceState } from "./profilerAnalyzer";
+	import * as Select from "$lib/components/ui/select/index.js";
+	import type { FrameProfile, ResourceState } from "./profilerAnalyzer";
+	import { importProfilerCapture, profilerCaptureSession, selectProfilerCapture } from "./profilerCapture.svelte";
+	import ProfilerCaptureControls from "./ProfilerCaptureControls.svelte";
 
-	let analysis = $state<ProfilerAnalysis | null>(null);
-	let hoveredFrame = $state<FrameProfile | null>(null);
-	let fileName = $state("");
+	const id = $props.id();
+	let captureOptions = $derived(profilerCaptureSession.captures.map((capture) => ({ value: capture.id, label: capture.name })));
+	let selectedCapture = $derived(profilerCaptureSession.captures.find((capture) => capture.id === profilerCaptureSession.selectedId) ?? null);
+	let analysis = $derived(selectedCapture?.analysis ?? null);
+	let comparison = $derived(profilerCaptureSession.comparison);
+	let hoveredFrame = $state.raw<FrameProfile | null>(null);
+	let fileName = $derived(selectedCapture?.name ?? "");
 	let error = $state("");
 	let dragging = $state(false);
-	let activeFrame = $derived(hoveredFrame ?? analysis?.frameTimeline[0] ?? null);
+	let importing = $state(false);
+	let entryPage = $state(0);
+	let framePage = $state(0);
+	const entryPageSize = 100;
+	const framePageSize = 500;
+	let visibleEntries = $derived(analysis?.resources.slice(entryPage * entryPageSize, (entryPage + 1) * entryPageSize) ?? []);
+	let visibleFrames = $derived(analysis?.frameTimeline.slice(framePage * framePageSize, (framePage + 1) * framePageSize) ?? []);
+	let activeFrame = $derived(hoveredFrame ?? visibleFrames[0] ?? null);
+	let importRequest = 0;
+	let importAbort: AbortController | undefined;
+	onDestroy(() => { importRequest += 1; importAbort?.abort(); });
+	$effect(() => { selectedCapture?.id; hoveredFrame = null; entryPage = 0; framePage = 0; });
 
 	const stateLabels: Record<ResourceState, string> = {
 		excellent: "Excellent",
@@ -27,16 +50,19 @@
 	};
 
 	async function handleFile(file?: File) {
-		if (!file) return;
-		fileName = file.name || "profiler.json";
+		if (!file || importing || profilerCaptureSession.busy || profilerCaptureSession.analyzing) return;
+		const request = ++importRequest;
+		importAbort = new AbortController();
+		importing = true;
+		const workspaceId = getWorkspaceId();
+		const name = file.name || "profiler.json";
 		error = "";
-		log("Profiler file load started.", { scope: "profiler", detail: `${fileName} (${file.size} bytes)` });
+		log("Profiler file load started.", { scope: "profiler", detail: `${name} (${file.size} bytes)` });
 
 		try {
-			const text = await file.text();
-			const parsed: unknown = JSON.parse(text);
-			const nextAnalysis = analyzeProfilerJson(parsed);
-			analysis = nextAnalysis;
+			const capture = await importProfilerCapture(file, name, { workspaceId, signal: importAbort.signal });
+			if (request !== importRequest || workspaceId !== getWorkspaceId()) return;
+			const nextAnalysis = capture.analysis;
 			hoveredFrame = nextAnalysis.frameTimeline[0] ?? null;
 			log("Profiler file analyzed successfully.", {
 				level: "success",
@@ -44,10 +70,12 @@
 				detail: `${nextAnalysis.stats.frameCount} frames, ${nextAnalysis.resources.length} resources`,
 			});
 		} catch (caught) {
-			analysis = null;
+			if (request !== importRequest) return;
 			hoveredFrame = null;
 			error = caught instanceof Error ? caught.message : String(caught);
-			log("Profiler file analysis failed.", { level: "error", scope: "profiler", detail: error });
+			if (!(caught instanceof DOMException && caught.name === "AbortError")) log("Profiler file analysis failed.", { level: "error", scope: "profiler", detail: error });
+		} finally {
+			if (request === importRequest) { importing = false; importAbort = undefined; }
 		}
 	}
 
@@ -110,7 +138,6 @@
 		<div>
 			<p class="text-xs font-semibold tracking-wide text-muted-foreground uppercase">Tools</p>
 			<h1 class="mt-2 text-3xl font-semibold tracking-normal text-foreground">Profiler Analyzer</h1>
-			<p class="mt-2 max-w-2xl text-sm text-muted-foreground">Drop in a FiveM profiler JSON export to rank expensive resources, hitch presence, worst spans, and script-time share.</p>
 		</div>
 		<div class="inline-flex items-center gap-2 rounded-sm border border-border bg-card px-3 py-2 text-xs text-muted-foreground">
 			<GaugeIcon class="size-3.5" />
@@ -118,68 +145,57 @@
 		</div>
 	</div>
 
-	<div class="grid gap-4 xl:grid-cols-12">
-		<Card.Root class="group relative overflow-hidden rounded-sm border-border bg-card shadow-sm transition-shadow duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] xl:col-span-7">
-			<div
-				class="pointer-events-none absolute inset-x-4 top-0 h-px bg-linear-to-r from-transparent via-primary/70 to-transparent opacity-0 transition-opacity duration-300 group-hover:opacity-100"
-			></div>
-			<Card.Header class="border-b border-border pb-4">
-				<div class="flex items-start gap-3">
-					<div class="flex size-9 shrink-0 items-center justify-center rounded-sm bg-muted text-muted-foreground ring-1 ring-border">
-						<TerminalIcon class="size-5" />
-					</div>
-					<div>
-						<Card.Title>Before You Upload</Card.Title>
-						<Card.Description>Record a clean sample from the FiveM console first.</Card.Description>
-					</div>
-				</div>
-			</Card.Header>
-			<Card.Content class="space-y-3">
-				<div class="grid min-w-0 gap-3 rounded-sm border border-border bg-background/60 p-3 sm:grid-cols-[2rem_minmax(0,1fr)]">
-					<div class="flex size-8 items-center justify-center rounded-sm bg-muted text-xs font-semibold text-muted-foreground ring-1 ring-border">1</div>
-					<div class="min-w-0">
-						<p class="text-sm font-medium text-foreground">Record a short profiler sample</p>
-						<p class="mt-1 text-xs text-muted-foreground">Run this in the FiveM console while the server is under normal load.</p>
-						<code class="mt-2 block max-w-full rounded-sm border border-border bg-black/50 px-3 py-2 font-mono text-xs whitespace-normal text-sky-100 shadow-inner wrap-break-word">
-							<span class="text-muted-foreground">$</span> profiler record 500
-						</code>
-					</div>
-				</div>
-				<div class="grid min-w-0 gap-3 rounded-sm border border-border bg-background/60 p-3 sm:grid-cols-[2rem_minmax(0,1fr)]">
-					<div class="flex size-8 items-center justify-center rounded-sm bg-muted text-xs font-semibold text-muted-foreground ring-1 ring-border">2</div>
-					<div class="min-w-0">
-						<p class="text-sm font-medium text-foreground">Save the finished capture</p>
-						<p class="mt-1 text-xs text-muted-foreground">After the recording finishes, export it as JSON.</p>
-						<code class="mt-2 block max-w-full rounded-sm border border-border bg-black/50 px-3 py-2 font-mono text-xs whitespace-normal text-sky-100 shadow-inner wrap-break-word">
-							<span class="text-muted-foreground">$</span> profiler saveJSON profiler.json
-						</code>
-					</div>
-				</div>
-				<div class="grid min-w-0 gap-3 rounded-sm border border-border bg-background/60 p-3 sm:grid-cols-[2rem_minmax(0,1fr)]">
-					<div class="flex size-8 items-center justify-center rounded-sm bg-muted text-xs font-semibold text-muted-foreground ring-1 ring-border">3</div>
-					<div class="min-w-0">
-						<p class="text-sm font-medium text-foreground">Upload the generated file</p>
-						<p class="mt-1 text-xs text-muted-foreground">FiveM usually writes the capture inside the citizen profiler folder.</p>
-						<code class="mt-2 block max-w-full rounded-sm border border-border bg-black/50 px-3 py-2 font-mono text-xs whitespace-normal text-emerald-100 shadow-inner wrap-break-word">
-							FiveM/FiveM.app/citizen/profiler.json
-						</code>
-					</div>
-				</div>
-			</Card.Content>
-		</Card.Root>
+	<ProfilerCaptureControls />
 
-		<Card.Root class="group relative overflow-hidden rounded-sm border-border bg-card shadow-sm transition-shadow duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] xl:col-span-5">
+	{#if profilerCaptureSession.captures.length}
+		<div class="flex flex-wrap items-end gap-3">
+			<div class="grid min-w-0 max-w-full flex-[0_1_32rem] gap-1 text-xs text-muted-foreground">
+				<label for={`${id}-capture`}>Capture</label>
+				<Select.Root type="single" value={profilerCaptureSession.selectedId} items={captureOptions} onValueChange={selectProfilerCapture}>
+					<Select.Trigger id={`${id}-capture`} aria-label="Capture" class="w-full min-w-0 text-foreground"><span class="min-w-0 truncate">{selectedCapture?.name}</span></Select.Trigger>
+					<Select.Content class="max-w-[calc(100vw-2rem)]">
+						{#each captureOptions as option}<Select.Item value={option.value} label={option.label}><span class="min-w-0 wrap-anywhere">{option.label}</span></Select.Item>{/each}
+					</Select.Content>
+				</Select.Root>
+			</div>
+			{#if selectedCapture}<span class="text-xs text-muted-foreground">{selectedCapture.source === "guided" ? "Guided capture" : "Imported trace"} / {selectedCapture.workspaceId}</span>{/if}
+		</div>
+	{/if}
+
+	{#if comparison}
+		<section class="space-y-3 border-b border-border pb-4" aria-label="Capture comparison">
+			<h2 class="text-base font-semibold">Capture Comparison</h2>
+			<p class="text-xs text-muted-foreground wrap-anywhere">{profilerCaptureSession.captures[0].name} (baseline) to {profilerCaptureSession.captures[1].name}</p>
+			<div class="grid gap-3 sm:grid-cols-3">
+				{#each [{ label: "Average frame change", value: comparison.averageFrameDeltaMs, unit: "ms" }, { label: "Worst frame change", value: comparison.worstFrameDeltaMs, unit: "ms" }, { label: "Heavy frame share change", value: comparison.heavyFrameDeltaPoints, unit: "pp" }] as metric}
+					<div><p class="text-xs text-muted-foreground">{metric.label}</p><p class={metric.value > 0 ? "text-amber-300" : "text-emerald-300"}>{metric.value > 0 ? "+" : ""}{metric.value.toFixed(2)} {metric.unit}</p></div>
+				{/each}
+			</div>
+			{#each comparison.warnings as warning}<p class="text-xs text-amber-300">{warning}</p>{/each}
+			{#if profilerCaptureSession.captures[0].workspaceId !== profilerCaptureSession.captures[1].workspaceId}<p class="text-xs text-amber-300">These captures belong to different workspaces.</p>{/if}
+			<p class="text-xs text-muted-foreground">Inclusive trace timings, not process CPU percentages. Load and player count may differ; nested entries must not be summed.</p>
+			<div class="overflow-x-auto">
+				<table class="w-full min-w-120 text-left text-xs">
+					<thead><tr class="border-b border-border text-muted-foreground"><th class="py-2 pr-3 font-medium">Entry</th><th class="py-2 pr-3 font-medium">Baseline ms/frame</th><th class="py-2 pr-3 font-medium">Latest ms/frame</th><th class="py-2 font-medium">Change</th></tr></thead>
+					<tbody>{#each comparison.entries.slice(0, 8) as entry}<tr class="border-b border-border/60"><td class="max-w-72 py-2 pr-3 wrap-anywhere">{entry.name}</td><td class="pr-3">{entry.beforeMsPerFrame.toFixed(2)}</td><td class="pr-3">{entry.afterMsPerFrame.toFixed(2)}</td><td class={entry.deltaMsPerFrame > 0 ? "text-amber-300" : "text-emerald-300"}>{entry.deltaMsPerFrame > 0 ? "+" : ""}{entry.deltaMsPerFrame.toFixed(2)}</td></tr>{/each}</tbody>
+				</table>
+			</div>
+		</section>
+	{/if}
+
+	<div>
+		<Card.Root class="rounded-sm border-border bg-card shadow-sm">
 			<div
 				class="pointer-events-none absolute inset-x-4 top-0 h-px bg-linear-to-r from-transparent via-primary/70 to-transparent opacity-0 transition-opacity duration-300 group-hover:opacity-100"
 			></div>
 			<Card.Header class="border-b border-border pb-4">
 				<Card.Title>Upload Profile</Card.Title>
-				<Card.Description>Use the `.json` file created by `profiler saveJSON`.</Card.Description>
+				<Card.Description>Existing Cfx profiler saveJSON export / 16 MiB maximum</Card.Description>
 			</Card.Header>
 			<Card.Content class="space-y-4">
 				<label
 					class={[
-						"flex min-h-48 cursor-pointer flex-col items-center justify-center gap-4 rounded-sm border border-dashed bg-background/60 px-6 text-center transition-colors",
+						"flex min-h-28 cursor-pointer flex-col items-center justify-center gap-3 rounded-sm border border-dashed bg-background/60 px-6 py-4 text-center transition-colors",
 						dragging ? "border-primary/60 bg-primary/10" : "border-border hover:border-primary/40",
 					]}
 					ondragover={(event) => {
@@ -194,14 +210,17 @@
 						<p class="text-sm font-medium text-foreground">Drop profiler.json here</p>
 						<p class="mt-1 text-xs text-muted-foreground">or click to browse</p>
 					</div>
-					<input type="file" accept=".json,application/json" class="sr-only" onchange={(event) => void handleFile(event.currentTarget.files?.[0])} />
+					<input type="file" accept=".json,application/json" class="sr-only" aria-label="Upload profiler JSON" disabled={profilerCaptureSession.busy || profilerCaptureSession.analyzing} onchange={(event) => { void handleFile(event.currentTarget.files?.[0]); event.currentTarget.value = ""; }} />
 				</label>
+				{#if importing}
+					<div class="flex items-center gap-2"><span role="status" class="text-xs text-muted-foreground">Analyzing imported capture...</span><Button variant="ghost" size="icon" title="Cancel profiler import" aria-label="Cancel profiler import" onclick={() => importAbort?.abort()}><XIcon /></Button></div>
+				{/if}
 
 				{#if fileName}
-					<p class="rounded-sm border border-border bg-background/70 px-3 py-2 text-xs text-muted-foreground">Loaded {fileName}</p>
+					<p class="text-xs text-muted-foreground wrap-anywhere">Loaded {fileName}</p>
 				{/if}
 				{#if error}
-					<div class="flex gap-2 rounded-sm border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+					<div role="alert" class="flex gap-2 rounded-sm border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
 						<AlertCircleIcon class="size-4 shrink-0" />
 						<span>{error}</span>
 					</div>
@@ -309,7 +328,7 @@
 							</div>
 							<div class="absolute inset-x-0 bottom-0 h-px bg-emerald-500/70"></div>
 							<div class="absolute inset-0 flex items-end gap-px pt-8">
-								{#each analysis.frameTimeline as frame}
+								{#each visibleFrames as frame}
 									<button
 										type="button"
 										class="group/frame flex h-full min-w-0 flex-1 cursor-pointer items-end rounded-t-[1px] outline-none transition-opacity hover:opacity-90 focus-visible:ring-2 focus-visible:ring-ring"
@@ -326,6 +345,9 @@
 							</div>
 						</div>
 
+						{#if analysis.frameTimeline.length > framePageSize}
+							<div class="flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground"><span>Frames {framePage * framePageSize + 1}-{Math.min((framePage + 1) * framePageSize, analysis.frameTimeline.length)} of {formatNumber(analysis.frameTimeline.length)}</span><div class="flex gap-2"><Button variant="outline" size="icon-sm" title="Previous frames" aria-label="Previous profiler frames" disabled={framePage === 0} onclick={() => { framePage--; hoveredFrame = null; }}><ChevronLeftIcon /></Button><Button variant="outline" size="icon-sm" title="Next frames" aria-label="Next profiler frames" disabled={(framePage + 1) * framePageSize >= analysis.frameTimeline.length} onclick={() => { framePage++; hoveredFrame = null; }}><ChevronRightIcon /></Button></div></div>
+						{/if}
 						{#if activeFrame}
 							<div class="rounded-sm bg-muted px-3 py-2 text-xs text-muted-foreground">
 								<div class="flex flex-wrap items-center gap-x-3 gap-y-1">
@@ -438,7 +460,7 @@
 							</tr>
 						</thead>
 						<tbody>
-							{#each analysis.resources as resource}
+							{#each visibleEntries as resource}
 								<tr class="border-b border-border/70 transition-colors hover:bg-muted/30">
 									<td class="max-w-96 py-3 pr-4">
 										<p class="truncate font-medium text-foreground">{resource.name}</p>
@@ -463,6 +485,9 @@
 						</tbody>
 					</table>
 				</div>
+				{#if analysis.resources.length > entryPageSize}
+					<div class="mt-3 flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground"><span>Entries {entryPage * entryPageSize + 1}-{Math.min((entryPage + 1) * entryPageSize, analysis.resources.length)} of {formatNumber(analysis.resources.length)}</span><div class="flex gap-2"><Button variant="outline" size="icon-sm" title="Previous entries" aria-label="Previous profiler entries" disabled={entryPage === 0} onclick={() => entryPage--}><ChevronLeftIcon /></Button><Button variant="outline" size="icon-sm" title="Next entries" aria-label="Next profiler entries" disabled={(entryPage + 1) * entryPageSize >= analysis.resources.length} onclick={() => entryPage++}><ChevronRightIcon /></Button></div></div>
+				{/if}
 			</Card.Content>
 		</Card.Root>
 	{:else}

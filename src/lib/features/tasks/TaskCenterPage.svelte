@@ -50,6 +50,7 @@
 				</div>
 				<div class="min-w-0 flex-1 space-y-1">
 					<p class="text-sm font-medium">{task.label}</p>
+					{#if task.command === "capture_fxserver_profile"}<Button size="sm" variant="link" onclick={() => onNavigate("profiler")}>Profiler capture</Button>{/if}
 					<p class="text-xs text-muted-foreground">{workspaceSession.items.find((item) => item.id === task.workspaceId)?.name ?? "Workspace"} · {new Date(task.startedAt).toLocaleTimeString()}</p>
 					{#if task.status === "running" && task.command.includes("mariadb") && mariadbActivity.busy}<p class="break-words text-xs text-muted-foreground">{mariadbActivity.stage}</p>{/if}
 					{#if task.status === "failed"}<p class="text-xs text-destructive">Failed. See Application Logs for details.</p>{/if}

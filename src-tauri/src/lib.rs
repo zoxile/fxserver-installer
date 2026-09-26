@@ -85,6 +85,7 @@ pub fn run() {
 
     tauri::Builder::default()
         .manage(commands::fxserver::FxserverManager::default())
+        .manage(commands::profiler_capture::ProfilerCaptureManager::default())
         .manage(commands::backup_manager::BackupManager::default())
         .manage(commands::health::HealthMonitor::default())
         .manage(commands::live_bridge::LiveBridge::default())
@@ -142,6 +143,10 @@ pub fn run() {
             commands::fxserver::get_fxserver_status,
             commands::config_validation::validate_config_change,
             commands::diagnostics::resource_dependencies::scan_resource_dependencies,
+            commands::profiler_capture::capture_fxserver_profile,
+            commands::profiler_capture::get_profiler_capture_status,
+            commands::profiler_capture::cancel_profiler_capture,
+            commands::managed_rcon::verify_managed_rcon_endpoint,
             commands::fxserver::get_fxserver_terminal,
             commands::fxserver::get_fxserver_rcon_password,
             commands::fxserver::list_txdata_profiles,

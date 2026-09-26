@@ -26,6 +26,7 @@
 	import SqlRunnerPage from "$lib/features/mariadb/SqlRunnerPage.svelte";
 	import PlaceholderPage from "$lib/features/placeholder/PlaceholderPage.svelte";
 	import ProfilerPage from "$lib/features/profiler/ProfilerPage.svelte";
+	import ProfilerCaptureTask from "$lib/features/profiler/ProfilerCaptureTask.svelte";
 	import ArrowDownIcon from "@lucide/svelte/icons/arrow-down";
 	import ArrowUpIcon from "@lucide/svelte/icons/arrow-up";
 	import type { PageId } from "$lib/navigation";
@@ -162,6 +163,7 @@
 <Titlebar />
 <BackgroundAlerts />
 <CommandPalette open={commandPaletteOpen} onClose={() => (commandPaletteOpen = false)} onNavigate={navigate} />
+<ProfilerCaptureTask onopen={() => navigate("profiler")} />
 
 <main class="dark h-screen overflow-hidden bg-background text-foreground">
 	<div class="flex h-screen">
