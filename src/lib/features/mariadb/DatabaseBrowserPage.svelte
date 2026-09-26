@@ -22,6 +22,10 @@
 	import DatabaseRowEditor from "./DatabaseRowEditor.svelte";
 	import TableListView from "./TableListView.svelte";
 	import DatabaseInspection from "./DatabaseInspection.svelte";
+	import DatabaseBookmarks from "./DatabaseBookmarks.svelte";
+	import { databaseLibraryScope, type DatabaseBookmark } from "./databaseLibrary";
+	import { currentLibrarySecrets } from "./databaseLibrarySession.svelte";
+	import { loadDatabaseBookmark } from "./databaseBookmarkNavigation";
 	import { inspectionTabs, type InspectionView } from "$lib/modules/databaseInspection";
 	import type { AdminResult } from "$lib/modules/databaseAdmin";
 	import { getWorkspaceId } from "$lib/core/workspaces.svelte";
@@ -55,7 +59,7 @@
 	const workspaceId = getWorkspaceId();
 	let active = true;
 	let cache: DatabaseBrowserCache | undefined;
-	let selectionLoaded = false;
+	let selectionLoaded = $state(false);
 	let contentRevision = $state(0);
 	const credentialsReady = $derived(isDatabaseSessionValidated(credentials));
 	const operators: { value: FilterOperator; label: string }[] = [
@@ -206,6 +210,34 @@
 	async function applyFilters() { await action(async () => { appliedFilters = filters.map((filter) => ({ ...filter })); offset = 0; await loadRows(); }); }
 	async function sort(name: string) { await action(async () => { descending = sortColumn === name ? !descending : false; sortColumn = name; offset = 0; await loadRows(); }); }
 	async function paginate(direction: number) { await action(async () => { offset = Math.max(0, offset + direction * Number(pageSize)); await loadRows(); }); }
+	async function restoreBookmark(bookmark: DatabaseBookmark) {
+		if (!credentialsReady || !cache) return;
+		await action(async () => {
+			rememberLocation();
+			const original = { ...credentials }; const signature = JSON.stringify(original);
+			const session = databaseSession.validated; const selectedCache = cache!;
+			const current = () => active && session === databaseSession.validated && credentialsReady && signature === JSON.stringify(credentials) && workspaceId === getWorkspaceId();
+			const scope = await databaseLibraryScope(workspaceId, original);
+			if (!current()) return;
+			const restored = await loadDatabaseBookmark(bookmark, {
+				scope, current, cache: selectedCache,
+				databases: () => listMariaDBDatabases({ ...original, database: null }),
+				tables: (selected) => listMariaDBTables({ ...original, database: null }, selected),
+				metadata: (selected, name) => getBrowserMetadata(original, selected, name),
+				rows: (query) => getBrowserRows(original, query),
+			}, currentLibrarySecrets());
+			if (!restored || !current()) return;
+			resetTable();
+			databases = restored.databases; tables = restored.tables;
+			database = restored.request.database; table = restored.request.table; view = restored.view;
+			filters = restored.request.filters.map((filter) => ({ ...filter }));
+			appliedFilters = restored.request.filters.map((filter) => ({ ...filter }));
+			sortColumn = restored.request.sortColumn; descending = restored.request.descending;
+			offset = restored.request.offset; pageSize = String(restored.request.pageSize);
+			metadata = restored.metadata; page = restored.page; selectionLoaded = true;
+			contentRevision++; message = "Bookmark restored in read-only mode.";
+		});
+	}
 	async function exportCsv() {
 		await action(async () => {
 			const query = request(); const original = { ...credentials };
@@ -230,6 +262,7 @@
 		<div class="grid min-w-0 gap-2"><label for="browser-table" class="text-xs font-medium">Table</label><Select.Root type="single" value={table} items={tableOptions} disabled={busy || !credentialsReady || !database} onValueChange={(value) => { table = value; void action(loadMetadata); }}><Select.Trigger id="browser-table" class="w-full min-w-0 font-mono text-xs"><span class="truncate">{table || "Choose table"}</span></Select.Trigger><Select.Content>{#each tableOptions as option}<Select.Item value={option.value} label={option.label}>{option.label}</Select.Item>{/each}</Select.Content></Select.Root></div>
 	</div>
 	{#if credentialsReady}
+		<DatabaseBookmarks {busy} canSave={selectionLoaded && rowView && !!table && !!metadata.columns.length} {request} {view} onRestore={restoreBookmark} />
 		<Tabs.Root value={view} onValueChange={changeView} class="space-y-5" loop>
 		<div class="flex flex-wrap items-center justify-between gap-3 border-b border-border">
 			<Tabs.List aria-label="Table views" class="min-w-0 flex-wrap gap-x-4 gap-y-0">

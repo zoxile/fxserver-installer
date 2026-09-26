@@ -2,6 +2,14 @@
 	import PlayIcon from "@lucide/svelte/icons/play";
 	import TerminalIcon from "@lucide/svelte/icons/terminal";
 	import WandSparklesIcon from "@lucide/svelte/icons/wand-sparkles";
+	import XIcon from "@lucide/svelte/icons/x";
+	import { onDestroy, tick, untrack } from "svelte";
+	import { databaseSession } from "$lib/core/databaseSession.svelte";
+	import { Notice } from "$lib/components/ui/notice/index.js";
+	import SavedQueries from "./SavedQueries.svelte";
+	import { containsLibrarySecret, type SavedQuery } from "./databaseLibrary";
+	import { currentLibrarySecrets } from "./databaseLibrarySession.svelte";
+	import { prepareQueryDraft, queryParameters } from "./savedQueryParameters";
 	import * as Card from "$lib/components/ui/card/index.js";
 	import { Button } from "$lib/components/ui/button/index.js";
 	import { Input } from "$lib/components/ui/input/index.js";
@@ -16,17 +24,76 @@
 		selectedDatabase: string;
 		query: string;
 		result: MariaDBQueryResult | null;
-		onExecute: () => void;
+		onExecute: () => void | Promise<void>;
 		children?: Snippet;
 	};
 
 	let { busy, canExecute, databases, selectedDatabase = $bindable(), query = $bindable(), result, onExecute, children }: Props = $props();
 	const globalQueryValue = "__global__";
+	const booleanOptions = [{ value: "true", label: "true" }, { value: "false", label: "false" }];
 	let selectedHelperId = $state("select-filtered");
 	let helperTable = $state("users");
 	let helperColumns = $state("*");
 	let helperFilter = $state("id = 1");
 	let helperLimit = $state("25");
+	let parameterValues = $state<Record<string, string>>({});
+	let review = $state<{ source: string; sql: string; database: string; session: typeof databaseSession.validated; revision: number } | null>(null);
+	let confirmation = $state("");
+	let queryNotice = $state("");
+	let executing = $state(false);
+	let active = true;
+	const parameters = $derived.by(() => {
+		try { return { items: queryParameters(query), error: "" }; }
+		catch (error) { return { items: [], error: error instanceof Error ? error.message : "Invalid parameter template." }; }
+	});
+	const reviewCurrent = $derived(!!review && review.source === query && review.database === selectedDatabase && review.session === databaseSession.validated && review.revision === databaseSession.revision && canExecute);
+	const blocked = $derived(busy || executing || !canExecute);
+	onDestroy(() => { active = false; });
+	$effect(() => {
+		query; selectedDatabase; databaseSession.validated; databaseSession.revision;
+		untrack(() => { if (!executing) { parameterValues = {}; review = null; confirmation = ""; } });
+	});
+
+	function loadSavedQuery(saved: SavedQuery) {
+		if (blocked) return;
+		if (saved.database !== globalQueryValue && !databases.includes(saved.database)) { queryNotice = "This saved query's database is not available on the current connection."; return; }
+		query = saved.sql; selectedDatabase = saved.database;
+		parameterValues = {}; review = null; confirmation = ""; queryNotice = "";
+	}
+	function reviewQuery() {
+		if (blocked || !query.trim()) return;
+		queryNotice = "";
+		try {
+			if (parameters.items.length && Object.values(parameterValues).some((value) => containsLibrarySecret(value, currentLibrarySecrets()))) throw new Error("Known credentials or secret-shaped parameter values are not allowed in drafts.");
+			const sql = prepareQueryDraft(query, parameterValues);
+			review = { source: query, sql, database: selectedDatabase, session: databaseSession.validated, revision: databaseSession.revision };
+			confirmation = "";
+		} catch (error) { queryNotice = error instanceof Error ? error.message : "Could not prepare the SQL draft."; }
+	}
+	function previewSql(sql: string) {
+		return containsLibrarySecret(sql, currentLibrarySecrets())
+			? "[Sensitive SQL preview withheld. Review the in-memory editor before confirming. This SQL cannot be saved.]"
+			: sql;
+	}
+	async function executeReviewed() {
+		if (blocked || !reviewCurrent || !review || confirmation !== "RUN") return;
+		const selected = review;
+		executing = true; review = null; confirmation = "";
+		try {
+			// Preserve the parent's execution/session/cache guards. Its callback reads the
+			// bound editor, so temporarily supply the reviewed draft and restore the template.
+			query = selected.sql;
+			await tick();
+			if (!active || !canExecute || selected.session !== databaseSession.validated || selected.revision !== databaseSession.revision || selected.database !== selectedDatabase || query !== selected.sql) return;
+			await onExecute();
+		} catch { if (active) queryNotice = "Query execution failed. Check the query result before retrying."; }
+		finally {
+			if (active) {
+				if (query === selected.sql) query = selected.source;
+				parameterValues = {}; executing = false;
+			}
+		}
+	}
 
 	const databaseOptions = $derived([
 		{ value: globalQueryValue, label: "Global query" },
@@ -175,6 +242,7 @@
 	const hiddenResultRows = $derived(result?.success && result.rows.length > resultDisplayLimit ? result.rows.length - resultDisplayLimit : 0);
 
 	function applyHelper(mode: "replace" | "append") {
+		if (blocked) return;
 		const sql = helperPreview.trim();
 		if (!sql) return;
 
@@ -224,9 +292,7 @@
 				.map((part) => quoteIdentifier(part.trim()))
 				.join(".");
 		}
-		if (/^`.*`$/.test(value)) return value;
-		if (/^[A-Za-z0-9_]+$/.test(value)) return `\`${value}\``;
-		return value;
+		return `\`${value.replaceAll("`", "``")}\``;
 	}
 </script>
 
@@ -242,17 +308,19 @@
 					<Card.Description>Run SQL against MariaDB using the connection above.</Card.Description>
 				</div>
 			</div>
-			<Button onclick={onExecute} disabled={busy || !canExecute} title={canExecute ? "Execute the SQL query and show returned rows" : "Apply valid admin credentials before running queries"}>
+			<Button onclick={reviewQuery} disabled={blocked || !query.trim() || !!parameters.error} title={canExecute ? "Review SQL before execution" : "Apply valid admin credentials before running queries"}>
 				<PlayIcon />
-				Execute
+				Review
 			</Button>
 		</div>
 	</Card.Header>
 
 	<Card.Content class="space-y-4">
+		{#if queryNotice}<Notice tone="error" message={queryNotice} onDismiss={() => queryNotice = ""} />{/if}
+		<SavedQueries {query} database={selectedDatabase} busy={blocked} onLoad={loadSavedQuery} />
 		<div class="grid gap-2">
 			<span class="text-xs font-medium text-muted-foreground">Query Scope</span>
-			<Select.Root bind:value={selectedDatabase} type="single" items={databaseOptions} disabled={!canExecute}>
+			<Select.Root bind:value={selectedDatabase} type="single" items={databaseOptions} disabled={blocked}>
 				<Select.Trigger title="Choose whether the query runs globally or inside one database" class="w-full rounded-sm font-mono text-xs">
 					{selectedDatabase === globalQueryValue ? "Global query" : selectedDatabase || "Choose database"}
 				</Select.Trigger>
@@ -324,9 +392,38 @@
 			spellcheck="false"
 			placeholder="SELECT * FROM users LIMIT 25;"
 			title="SQL query to execute against MariaDB."
-			disabled={!canExecute}
+			disabled={blocked}
+			autocomplete="off"
+			aria-label="SQL query"
 			class="min-h-40 w-full resize-y rounded-sm border border-input bg-background px-3 py-3 font-mono text-sm shadow-xs outline-none transition-[color,box-shadow] placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
 		></textarea>
+		{#if parameters.error}<Notice tone="error" message={parameters.error} />{/if}
+		<details class="text-xs text-muted-foreground"><summary class="cursor-pointer">Parameter format</summary><p class="mt-2">Value placeholders: {"{{player_id:number}}"}, {"{{name:text}}"}, {"{{active:boolean}}"}, {"{{optional:null}}"}. Drafts use SQL literals, not server parameter binding. Identifiers cannot be parameters. Values stay in memory and are cleared after execution.</p></details>
+		{#if parameters.items.length}
+			<div class="grid gap-3 sm:grid-cols-2">
+				{#each parameters.items as parameter (parameter.name)}
+					<label class="grid min-w-0 gap-1 text-xs">{parameter.name} ({parameter.type})
+						{#if parameter.type === "null"}<span class="font-mono">NULL</span>
+						{:else if parameter.type === "boolean"}
+							<Select.Root type="single" value={parameterValues[parameter.name] ?? ""} items={booleanOptions} disabled={blocked} onValueChange={(value) => { parameterValues[parameter.name] = value; review = null; }}>
+								<Select.Trigger class="w-full min-w-0" aria-label={`${parameter.name} (boolean)`}>{parameterValues[parameter.name] || "Choose value"}</Select.Trigger>
+								<Select.Content>{#each booleanOptions as option}<Select.Item value={option.value} label={option.label}>{option.label}</Select.Item>{/each}</Select.Content>
+							</Select.Root>
+						{:else}<Input value={parameterValues[parameter.name] ?? ""} oninput={(event) => { parameterValues[parameter.name] = event.currentTarget.value; review = null; }} maxlength={4096} autocomplete="off" spellcheck={false} disabled={blocked} />{/if}
+					</label>
+				{/each}
+			</div>
+		{/if}
+		{#if review && reviewCurrent}
+			<section class="space-y-3 border-y border-amber-500/50 py-4" aria-label="SQL execution confirmation">
+				<h3 class="text-sm font-semibold">Confirm SQL execution</h3>
+				<p class="break-all text-xs font-mono">{databaseSession.validated?.credentials.host}:{databaseSession.validated?.credentials.port} / {selectedDatabase === globalQueryValue ? "Global query" : selectedDatabase}</p>
+				<p class="text-xs text-amber-400">SQL may change or permanently delete data, including from saved queries. Multi-statement failures can leave partial changes. No automatic retry.</p>
+				{#if parameters.items.length}<p class="text-xs text-muted-foreground">Review-only parameter draft. Values are encoded as literals; the server does not bind them.</p>{/if}
+				<pre class="max-h-60 overflow-auto whitespace-pre-wrap break-all bg-muted/30 p-3 font-mono text-xs">{previewSql(review.sql)}</pre>
+				<div class="flex flex-wrap items-end gap-2"><label class="grid min-w-0 flex-1 gap-1 text-xs">Type RUN<Input bind:value={confirmation} autocomplete="off" maxlength={3} disabled={blocked} /></label><Button variant="destructive" disabled={blocked || confirmation !== "RUN"} onclick={executeReviewed}><PlayIcon />Execute</Button><Button variant="outline" size="icon" title="Cancel execution" aria-label="Cancel execution" disabled={blocked} onclick={() => { review = null; confirmation = ""; }}><XIcon /></Button></div>
+			</section>
+		{/if}
 
 		{#if result}
 			{#if result.success && result.columns.length}

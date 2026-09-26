@@ -18,6 +18,7 @@ async (page) => {
           case "fetch_latest_app_release": return { version: "0.3.2", tagName: "v0.3.2", htmlUrl: "https://github.com/zoxile/fxserver-installer/releases/tag/v0.3.2" };
           case "plugin:window|title": return "FXServer Installer";
           case "plugin:app|version": return "0.4.1";
+          case "plugin:path|resolve_directory": return "C:/fixture/backups";
           case "plugin:event|listen": return args.handler;
           case "plugin:event|unlisten":
           case "append_app_log":
@@ -39,6 +40,7 @@ async (page) => {
           case "list_mariadb_releases": return (args.series === "12.3" ? ["12.3.3", "12.3.2"] : args.series === "10.11" ? ["10.11.14"] : ["11.4.13", "11.4.12"]).map((version) => ({ version, date: "2026-08-22" }));
           case "list_mariadb_users": return [];
           case "list_mariadb_databases": return ["mysql", "game"];
+          case "execute_mariadb_query": return { success: true, columns: ["result"], rows: [["reviewed-query-fixture"]], stdout: "", stderr: "" };
           case "validate_mariadb_credentials":
             if (sessionStorage.getItem("reject-saved-login")) throw new Error("Saved fixture login rejected");
             return new Promise((resolve) => { state.pending.validate = resolve; });
@@ -112,6 +114,34 @@ async (page) => {
   await page.evaluate(() => window.testMariaDB.pending.restart.resolve());
   await page.getByText("MariaDB service restarted.", { exact: true }).waitFor();
 
+  // Installation invalidates login trust. Revalidate once before testing query reuse.
+  const beforeRevalidation = await validations();
+  await page.getByRole("button", { name: "Change Credentials", exact: true }).click();
+  await page.waitForFunction((count) => window.testMariaDB.calls.filter((call) => call.command === "validate_mariadb_credentials").length === count + 1, beforeRevalidation);
+  await page.evaluate(() => window.testMariaDB.pending.validate());
+  await page.getByText("Credentials validated.", { exact: true }).waitFor();
+  const queryCount = () => page.evaluate(() => window.testMariaDB.calls.filter((call) => call.command === "execute_mariadb_query").length);
+  const beforeQueryValidation = await validations();
+  await page.getByRole("navigation", { name: "Workspace navigation" }).getByTitle("Queries & Files", { exact: true }).click();
+  await page.getByRole("heading", { name: "Queries & Files", exact: true }).waitFor();
+  await page.getByRole("textbox", { name: "SQL query", exact: true }).fill("SELECT VERSION();");
+  await page.getByRole("button", { name: "Review", exact: true }).click();
+  const queryReview = page.getByRole("region", { name: "SQL execution confirmation", exact: true });
+  if (!await queryReview.getByRole("button", { name: "Execute", exact: true }).isDisabled()) throw new Error("Query execution skipped confirmation");
+  await queryReview.getByLabel("Type RUN", { exact: true }).fill("NO");
+  if (!await queryReview.getByRole("button", { name: "Execute", exact: true }).isDisabled()) throw new Error("Incorrect query confirmation enabled execution");
+  await queryReview.getByRole("button", { name: "Cancel execution", exact: true }).click();
+  if (await queryCount() !== 0) throw new Error("Cancelled query reached the backend");
+  await page.getByRole("button", { name: "Review", exact: true }).click();
+  await queryReview.getByLabel("Type RUN", { exact: true }).fill("RUN");
+  await queryReview.getByRole("button", { name: "Execute", exact: true }).click();
+  await page.getByRole("cell", { name: "reviewed-query-fixture", exact: true }).waitFor();
+  if (await queryCount() !== 1 || await validations() !== beforeQueryValidation) throw new Error("Reviewed query duplicated execution or session validation");
+  const reviewedSql = await page.evaluate(() => window.testMariaDB.calls.find((call) => call.command === "execute_mariadb_query").args.query);
+  if (reviewedSql !== "SELECT VERSION();") throw new Error("Query confirmation changed the SQL payload");
+  const queryUnknown = await page.evaluate(() => window.testMariaDB.unknown);
+  if (queryUnknown.length) throw new Error(queryUnknown.join("\n"));
+
   await page.evaluate(() => sessionStorage.setItem("reject-saved-login", "true"));
   await page.reload({ waitUntil: "domcontentloaded" });
   await openDatabase();
@@ -120,5 +150,5 @@ async (page) => {
   if (await validations() !== 1) throw new Error("Rejected saved login entered a retry loop");
   const unknown = await page.evaluate(() => window.testMariaDB.unknown);
   if (unknown.length || errors.length) throw new Error([...unknown, ...errors].join("\n"));
-  console.log("PASS: exact install selection, duplicate action guards, restart failure without start fallback, and one-time saved-login validation success/failure; no real database operations.");
+  console.log("PASS: exact install selection, duplicate action guards, restart failure without start fallback, one-time saved-login validation success/failure, and reviewed/cancelled SQL without retries; no real database operations.");
 }

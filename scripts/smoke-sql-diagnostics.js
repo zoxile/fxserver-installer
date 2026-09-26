@@ -80,6 +80,15 @@ async (page) => {
   const table = diagnostics.getByRole("textbox", { name: "Table name (optional)", exact: true });
   const shown = (text) => diagnostics.getByText(text, { exact: true }).waitFor();
   const idle = "Not inspected yet. Inspect schema to see the current table definitions for this selection.";
+  const executeReviewed = async () => {
+    const before = await page.evaluate(() => window.sqlDiagnosticTest.executions.length);
+    await page.getByRole("button", { name: "Review", exact: true }).click();
+    const review = page.getByRole("region", { name: "SQL execution confirmation", exact: true });
+    if (!await review.getByRole("button", { name: "Execute", exact: true }).isDisabled()) throw new Error("SQL execution bypassed typed confirmation");
+    if (await page.evaluate(() => window.sqlDiagnosticTest.executions.length) !== before) throw new Error("Review executed SQL before confirmation");
+    await review.getByLabel("Type RUN", { exact: true }).fill("RUN");
+    await review.getByRole("button", { name: "Execute", exact: true }).click();
+  };
   await ensureOpen();
   await shown("No SQL error to explain. You can still inspect the selected database without running a query or file.");
   await shown(idle);
@@ -90,7 +99,7 @@ async (page) => {
   if (!await diagnostics.getByRole("button", { name: "Inspect schema", exact: true }).isDisabled()) throw new Error("Global inspection was enabled");
   await chooseScope("fixture");
   await page.getByTitle("SQL query to execute against MariaDB.", { exact: true }).fill("SELECT VERSION();");
-  await page.getByRole("button", { name: "Execute", exact: true }).click();
+  await executeReviewed();
   await shown("Last SQL error");
   await shown("1267: Incompatible text collations");
   await shown("The statement compares or combines text with comparison rules the server cannot use together.");
@@ -206,13 +215,13 @@ async (page) => {
   if (!await fileDiagnostics.evaluate((element) => element.open)) await fileDiagnostics.locator(":scope > summary").click();
   await fileDiagnostics.getByText("No SQL error to explain. You can still inspect the selected database without running a query or file.", { exact: true }).waitFor();
   await page.getByTitle("SQL query to execute against MariaDB.", { exact: true }).fill("SELECT 'query-rejection-fixture';");
-  await page.getByRole("button", { name: "Execute", exact: true }).click();
+  await executeReviewed();
   await shown("Last SQL error");
   await shown("2013: Connection failed or was lost");
   await shown("After a lost connection, the result of a write may be unknown. Check the database before retrying.");
   if (await diagnostics.getByText("1267: Incompatible text collations", { exact: true }).count()) throw new Error("Rejected query kept the previous query diagnosis");
   if (await fileDiagnostics.getByText("Last SQL error", { exact: true }).count()) throw new Error("Rejected query leaked into SQL file diagnostics");
-  if (!await page.getByRole("button", { name: "Execute", exact: true }).isDisabled()) throw new Error("Lost connection did not require explicit validation");
+  if (!await page.getByRole("button", { name: "Review", exact: true }).isDisabled()) throw new Error("Lost connection did not require explicit validation");
   if (await page.evaluate(() => window.sqlDiagnosticTest.executions.length) !== 2) throw new Error("Rejected query was automatically retried");
 
   await page.getByRole("button", { name: "Change Credentials", exact: true }).click();
