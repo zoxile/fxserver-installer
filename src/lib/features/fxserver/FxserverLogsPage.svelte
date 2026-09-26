@@ -12,10 +12,12 @@
 	import { Button } from "$lib/components/ui/button/index.js";
 	import { Input } from "$lib/components/ui/input/index.js";
 	import * as Select from "$lib/components/ui/select/index.js";
+	import * as Tabs from "$lib/components/ui/tabs/index.js";
 	import { log } from "$lib/core/logger.svelte";
 	import { chooseFolder } from "$lib/core/selectFolder";
 	import { readTxDataLog, type TxDataLogResult } from "$lib/modules/fxserver";
 	import { fxserverSettings, loadFxserverSettings, refreshTxDataProfiles, setServerProfile, setTxDataPath } from "./fxserverSettings.svelte";
+	import GroupedConsoleIssues from "./GroupedConsoleIssues.svelte";
 
 	type LogName = "fxserver.log" | "admin.log" | "server.log";
 	type LogLevel = "all" | "info" | "success" | "warn" | "error";
@@ -40,6 +42,7 @@
 	let maxLines = $state("500");
 	let query = $state("");
 	let level = $state<LogLevel>("all");
+	let view = $state("logs");
 	let result = $state<TxDataLogResult | null>(null);
 	let busy = $state(false);
 	let notice = $state("");
@@ -209,12 +212,19 @@
 			<h1 class="mt-2 text-3xl font-semibold tracking-normal text-foreground">Server Logs</h1>
 			<p class="mt-2 max-w-2xl text-sm text-muted-foreground">Inspect txData logs for FXServer, txAdmin admin actions, and txAdmin server output.</p>
 		</div>
-		<div class="inline-flex items-center gap-2 rounded-sm border border-border bg-card px-3 py-2 text-xs text-muted-foreground">
+		{#if view === "logs"}<div class="inline-flex items-center gap-2 rounded-sm border border-border bg-card px-3 py-2 text-xs text-muted-foreground">
 			<ScrollTextIcon class="size-3.5" />
 			{visibleEntries.length}{filteredEntries.length > visibleEntries.length ? ` of ${filteredEntries.length}` : ""} visible entries
-		</div>
+		</div>{/if}
 	</div>
 
+	<Tabs.Root bind:value={view}>
+		<Tabs.List aria-label="Server log views">
+			<Tabs.Trigger value="logs">txData Logs</Tabs.Trigger>
+			<Tabs.Trigger value="issues">Console Issues</Tabs.Trigger>
+		</Tabs.List>
+		<Tabs.Content value="issues">{#if view === "issues"}<GroupedConsoleIssues />{/if}</Tabs.Content>
+		<Tabs.Content value="logs">
 	<Card.Root class="group relative overflow-hidden rounded-sm border-border bg-card shadow-sm transition-shadow duration-500 ease-[cubic-bezier(0.22,1,0.36,1)]">
 		<div
 			class="pointer-events-none absolute inset-x-4 top-0 h-px bg-linear-to-r from-transparent via-primary/70 to-transparent opacity-0 transition-opacity duration-300 group-hover:opacity-100"
@@ -337,4 +347,6 @@
 			</div>
 		</Card.Content>
 	</Card.Root>
+		</Tabs.Content>
+	</Tabs.Root>
 </section>
