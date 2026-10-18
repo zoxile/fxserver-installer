@@ -95,12 +95,13 @@
 	});
 
 	function navigate(page: PageId) {
-		if (page === activePage) return;
-		log(`Navigating to ${getPageLabel(page)}.`, { scope: "navigation", detail: `${activePage} -> ${page}` });
-
 		if (navigationFrame) {
 			cancelAnimationFrame(navigationFrame);
+			navigationFrame = 0;
 		}
+
+		if (page === activePage) return;
+		log(`Navigating to ${getPageLabel(page)}.`, { scope: "navigation", detail: `${activePage} -> ${page}` });
 
 		navigationFrame = requestAnimationFrame(() => {
 			activePage = page;

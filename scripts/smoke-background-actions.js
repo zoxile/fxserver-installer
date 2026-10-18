@@ -66,20 +66,32 @@ async (page) => {
   });
   await page.reload({ waitUntil: "domcontentloaded", timeout: 120000 });
   const nav = page.getByRole("navigation", { name: "Workspace navigation" });
+  // Wait for sidebar layout transitions, not just the child button's bounds.
+  const settleNavigation = () => page.waitForFunction(() => {
+    const element = document.querySelector('nav[aria-label="Workspace navigation"]');
+    return element && element.getAnimations({ subtree: true }).every((animation) => animation.playState === "finished");
+  });
+  const selectPage = async (label, section) => {
+    await settleNavigation();
+    if (section) {
+      const parent = nav.getByTitle(section, { exact: true });
+      if (await parent.getAttribute("aria-expanded") !== "true") await parent.click();
+      await settleNavigation();
+    }
+    const target = nav.getByTitle(label, { exact: true });
+    await target.click();
+    await target.and(nav.locator('[aria-current="page"]')).waitFor();
+  };
   const manage = async () => {
-    const parent = nav.getByTitle("FXServer", { exact: true });
-    if (await parent.getAttribute("aria-expanded") !== "true") await parent.click();
-    await nav.getByTitle("Manage Server", { exact: true }).click();
+    await selectPage("Manage Server", "FXServer");
     await page.getByText("Performance", { exact: true }).waitFor();
   };
   const home = async () => {
-    await nav.getByTitle("Home", { exact: true }).click();
+    await selectPage("Home");
     await page.getByText("Project", { exact: true }).waitFor();
   };
   const db = async () => {
-    const parent = nav.getByTitle("MariaDB", { exact: true });
-    if (await parent.getAttribute("aria-expanded") !== "true") await parent.click();
-    await nav.getByTitle("Manage MariaDB", { exact: true }).click();
+    await selectPage("Manage MariaDB", "MariaDB");
     await page.getByText("Install Configuration", { exact: true }).waitFor();
   };
   const waitPending = (command) => page.waitForFunction((name) => !!window.testDesktop.pending[name], command);
@@ -88,6 +100,17 @@ async (page) => {
     if (!await page.getByRole("button", { name, exact: true }).isDisabled()) throw new Error(`${name} was not disabled during the pending action`);
   };
 
+  await home();
+  await nav.evaluate(async (element) => {
+    const home = element.querySelector('[title="Home"]');
+    element.querySelector('[title="Workspaces"]').click();
+    home.click();
+    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    if (home.getAttribute("aria-current") !== "page") throw new Error("Latest navigation intent did not cancel the queued page change");
+    const hiddenChild = element.querySelector('[title="Manage Server"]');
+    hiddenChild.focus();
+    if (document.activeElement === hiddenChild) throw new Error("Closed navigation children can receive focus");
+  });
   await manage();
   await page.evaluate(() => {
     window.uiLongTasks = [];

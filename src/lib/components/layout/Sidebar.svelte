@@ -138,6 +138,7 @@
 
 				{#if item.children}
 					<div
+						inert={!sectionOpen}
 						class={[
 							"grid overflow-hidden will-change-[grid-template-rows,opacity] transition-[grid-template-rows,opacity] duration-200 ease-out",
 							sectionOpen ? "grid-rows-[1fr] opacity-100" : "grid-rows-[0fr] opacity-0",
