@@ -7,7 +7,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(any(not(target_os = "linux"), test))]
 use std::fs::OpenOptions;
 
 #[cfg(not(target_os = "linux"))]
