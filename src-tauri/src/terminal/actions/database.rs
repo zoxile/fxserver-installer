@@ -566,6 +566,8 @@ async fn execute_validated(context: &Context, submission: &Submission) -> Result
             let report_password = root_password.clone();
             text(
                 commands::run_blocking(move || {
+                    #[cfg(target_os = "linux")]
+                    let _terminal_input = crate::services::mariadb::linux::reserve_terminal_input();
                     let _lease = access::maintenance_access()?;
                     let report =
                         |message: &str| report_context.report(message, &[&report_password]);

@@ -1,5 +1,6 @@
 use super::plans::Plan;
 use std::{
+    cell::Cell,
     io::{IsTerminal, Read},
     os::unix::{fs::MetadataExt, process::CommandExt},
     path::{Path, PathBuf},
@@ -7,6 +8,42 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
+#[cfg(any(feature = "terminal", test))]
+use std::{marker::PhantomData, rc::Rc};
+
+thread_local! {
+    static TERMINAL_INPUT_RESERVATIONS: Cell<usize> = const { Cell::new(0) };
+}
+
+fn terminal_input_reserved() -> bool {
+    TERMINAL_INPUT_RESERVATIONS.with(|depth| depth.get() != 0)
+}
+
+#[cfg(any(feature = "terminal", test))]
+pub(crate) struct TerminalInputReservation(PhantomData<Rc<()>>);
+
+#[cfg(any(feature = "terminal", test))]
+impl Drop for TerminalInputReservation {
+    fn drop(&mut self) {
+        TERMINAL_INPUT_RESERVATIONS.with(|depth| depth.set(depth.get() - 1));
+    }
+}
+
+/// Reserve stdin on this blocking worker while the TUI owns terminal input.
+#[cfg(any(feature = "terminal", test))]
+#[must_use]
+pub(crate) fn reserve_terminal_input() -> TerminalInputReservation {
+    TERMINAL_INPUT_RESERVATIONS.with(|depth| {
+        depth.set(
+            depth
+                .get()
+                .checked_add(1)
+                .expect("Terminal input reservation overflow"),
+        );
+    });
+    // A reservation must be dropped on the same thread, including during unwinding.
+    TerminalInputReservation(PhantomData)
+}
 
 pub struct Output {
     pub success: bool,
@@ -155,6 +192,23 @@ pub fn checked_read(plan: &Plan) -> Result<String, String> {
     }
 }
 
+fn sudo_command(sudo: &Path, program: &Path, args: &[String], reserved: bool) -> Command {
+    let mut command = Command::new(sudo);
+    if reserved {
+        command.arg("-n");
+    }
+    command
+        .arg("--")
+        .arg(program)
+        .args(args)
+        .stdin(if reserved {
+            Stdio::null()
+        } else {
+            Stdio::inherit()
+        });
+    command
+}
+
 pub fn administer(plan: &Plan) -> Result<(), String> {
     if unsafe { libc::geteuid() } == 0 {
         return Err("Run the app as your normal user. Only the requested package or service action may be elevated.".into());
@@ -163,14 +217,10 @@ pub fn administer(plan: &Plan) -> Result<(), String> {
         return Err("Unsupported privileged program.".into());
     }
     let program = system_program(plan.program)?;
+    let reserved = terminal_input_reserved();
     let terminal = std::io::stdin().is_terminal() && std::io::stderr().is_terminal();
-    let mut command = if terminal {
-        let mut cmd = Command::new(system_program("sudo")?);
-        cmd.arg("--")
-            .arg(program)
-            .args(&plan.args)
-            .stdin(Stdio::inherit());
-        cmd
+    let mut command = if reserved || terminal {
+        sudo_command(&system_program("sudo")?, &program, &plan.args, reserved)
     } else if std::env::var_os("DISPLAY").is_some() || std::env::var_os("WAYLAND_DISPLAY").is_some()
     {
         let mut cmd = Command::new(system_program("pkexec")?);
@@ -187,14 +237,20 @@ pub fn administer(plan: &Plan) -> Result<(), String> {
     if output.success {
         Ok(())
     } else {
+        let guidance = if reserved {
+            " The terminal UI cannot prompt for administrator credentials. If sudo authentication is required, quit the TUI, run `sudo -v` in the same terminal, then reopen it as your normal user. Inspect the package or service error before retrying. Do not run the app as root."
+        } else {
+            ""
+        };
         Err(format!(
-            "{} action failed or administrator approval was declined: {}",
+            "{} action failed or administrator approval was declined: {}{}",
             plan.program,
             if output.stderr.is_empty() {
                 output.stdout
             } else {
                 output.stderr
-            }
+            },
+            guidance
         ))
     }
 }
@@ -202,6 +258,71 @@ pub fn administer(plan: &Plan) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sudo_builder_preserves_noninteractive_flag_and_argument_boundary() {
+        let args = vec!["restart".into(), "mariadb.service".into()];
+        for reserved in [false, true] {
+            let command = sudo_command(
+                Path::new("/usr/bin/sudo"),
+                Path::new("/usr/bin/systemctl"),
+                &args,
+                reserved,
+            );
+            assert_eq!(command.get_program(), "/usr/bin/sudo");
+            let actual: Vec<_> = command
+                .get_args()
+                .map(|arg| arg.to_str().unwrap())
+                .collect();
+            let mut expected = vec!["--", "/usr/bin/systemctl", "restart", "mariadb.service"];
+            if reserved {
+                expected.insert(0, "-n");
+            }
+            assert_eq!(actual, expected);
+        }
+    }
+
+    #[test]
+    fn terminal_input_reservations_are_nested_and_thread_local() {
+        assert!(!terminal_input_reserved());
+        let outer = reserve_terminal_input();
+        assert!(terminal_input_reserved());
+        {
+            let _inner = reserve_terminal_input();
+            assert!(terminal_input_reserved());
+        }
+        assert!(terminal_input_reserved());
+        thread::spawn(|| {
+            assert!(!terminal_input_reserved());
+            let _other = reserve_terminal_input();
+            assert!(terminal_input_reserved());
+        })
+        .join()
+        .unwrap();
+        assert!(terminal_input_reserved());
+        drop(outer);
+        assert!(!terminal_input_reserved());
+    }
+
+    #[test]
+    fn terminal_input_reservation_resets_after_panics() {
+        assert!(!terminal_input_reserved());
+        let outer = reserve_terminal_input();
+        let result = std::panic::catch_unwind(|| {
+            let _inner = reserve_terminal_input();
+            panic!("fixture panic while input is reserved");
+        });
+        assert!(result.is_err());
+        assert!(terminal_input_reserved());
+        drop(outer);
+        assert!(!terminal_input_reserved());
+        let result = std::panic::catch_unwind(|| {
+            let _reservation = reserve_terminal_input();
+            panic!("fixture panic without an outer reservation");
+        });
+        assert!(result.is_err());
+        assert!(!terminal_input_reserved());
+    }
 
     #[test]
     fn timeout_reaps_the_leader_and_closes_descendant_pipes() {
