@@ -373,7 +373,8 @@ impl Scan<'_> {
             reference.to_string()
         };
         if normalized.contains('\0')
-            || cfg!(windows) && normalized.contains(':')
+            || normalized.contains(':')
+            || !cfg!(windows) && normalized.contains('\\')
             || normalized.starts_with('/')
             || normalized.split('/').any(|part| {
                 part == ".." || cfg!(windows) && part.ends_with([' ', '.']) && part != "."

@@ -1,11 +1,14 @@
 use std::{
-    fs::{self, OpenOptions},
+    fs,
     io::Read,
     path::{Path, PathBuf},
     process::{Command, Stdio},
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
+
+#[cfg(not(target_os = "linux"))]
+use std::fs::OpenOptions;
 
 #[cfg(not(target_os = "linux"))]
 use super::{detect::get_install_path, query::find_mariadb_client};

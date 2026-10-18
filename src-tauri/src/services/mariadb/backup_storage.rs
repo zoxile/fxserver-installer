@@ -1,10 +1,13 @@
 use std::{
-    fs::{self, File, OpenOptions},
-    io::{Read, Seek, SeekFrom, Write},
+    fs::{self, File},
+    io::{Read, Seek, SeekFrom},
     path::{Component, Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
     time::{SystemTime, UNIX_EPOCH},
 };
+
+#[cfg(not(target_os = "linux"))]
+use std::{fs::OpenOptions, io::Write};
 
 use serde::Serialize;
 use sha2::{Digest, Sha256};

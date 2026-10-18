@@ -600,12 +600,23 @@ fn linked_log_parents_and_export_directories_are_rejected() {
     fs::remove_file(link).unwrap();
 }
 
+#[cfg(windows)]
 #[test]
 fn archive_targets_cannot_use_alternate_data_streams() {
     let fixture = Fixture::new();
     let path = fixture.root.join("host.txt:export.zip");
     assert!(write_archive(&path, &[]).is_err());
     assert!(!path.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn archive_targets_allow_unix_colons_without_special_stream_semantics() {
+    let fixture = Fixture::new();
+    let path = fixture.root.join("host:export.zip");
+    write_archive(&path, &[]).unwrap();
+    assert!(path.is_file());
+    assert!(!fixture.root.join("host").exists());
 }
 
 #[test]
