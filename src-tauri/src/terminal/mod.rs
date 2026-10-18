@@ -1,5 +1,6 @@
 mod database;
 mod settings;
+mod shutdown;
 mod ui;
 
 use crate::{
@@ -321,7 +322,11 @@ async fn preflight(
 }
 
 async fn run_server(config: Settings, force: bool) -> Result<(), String> {
+    let shutdown = shutdown::Shutdown::listen(&tokio::runtime::Handle::current())?;
     let report = preflight(&config, true).await?;
+    if shutdown.requested() {
+        return Ok(());
+    }
     if report.blocking && !force {
         print_json(&report)?;
         return Err(
@@ -339,17 +344,18 @@ async fn run_server(config: Settings, force: bool) -> Result<(), String> {
     let mut timer = tokio::time::interval(Duration::from_millis(100));
     let outcome = async {
         loop {
-            tokio::select! {
-                signal = tokio::signal::ctrl_c() => { break signal.map_err(|e| e.to_string()); },
-                _ = timer.tick() => {
-                    let snapshot = manager.terminal(Some(1000), cursor)?;
-                    for entry in snapshot.entries {
-                        cursor = Some(entry.id);
-                        writeln!(io::stdout().lock(), "{}", safe_text(&entry.plain_line))
-                            .map_err(|error| error.to_string())?;
-                    }
-                    if !manager.status()?.running { break Ok(()); }
-                }
+            timer.tick().await;
+            if shutdown.requested() {
+                break Ok(());
+            }
+            let snapshot = manager.terminal(Some(1000), cursor)?;
+            for entry in snapshot.entries {
+                cursor = Some(entry.id);
+                writeln!(io::stdout().lock(), "{}", safe_text(&entry.plain_line))
+                    .map_err(|error| error.to_string())?;
+            }
+            if !manager.status()?.running {
+                break Ok(());
             }
         }
     }

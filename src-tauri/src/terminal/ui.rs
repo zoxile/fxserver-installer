@@ -537,16 +537,21 @@ fn parse_port(value: &str) -> Result<u16, String> {
         .ok_or_else(|| "Port must be between 1 and 65535.".into())
 }
 
-fn worker(runtime: Runtime, jobs: Receiver<Job>, updates: SyncSender<Update>) {
-    let manager = FxserverManager::default();
+fn worker(
+    manager: FxserverManager,
+    runtime: Runtime,
+    jobs: Receiver<Job>,
+    updates: SyncSender<Update>,
+) -> Result<(), String> {
     let mut cursor = None;
     let mut last_status = Instant::now() - Duration::from_secs(2);
     loop {
         match jobs.recv_timeout(Duration::from_millis(100)) {
             Ok(Job::Quit) | Err(mpsc::RecvTimeoutError::Disconnected) => {
                 manager.begin_shutdown();
-                let _ = updates.send(Update::Stopped(manager.stop_running_process()));
-                return;
+                let result = manager.stop_running_process();
+                let _ = updates.send(Update::Stopped(result.clone()));
+                return result;
             }
             Ok(job) => {
                 let event = match job {
@@ -584,8 +589,7 @@ fn worker(runtime: Runtime, jobs: Receiver<Job>, updates: SyncSender<Update>) {
                 };
                 if updates.send(event).is_err() {
                     manager.begin_shutdown();
-                    let _ = manager.stop_running_process();
-                    return;
+                    return manager.stop_running_process();
                 }
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
@@ -649,16 +653,22 @@ pub(super) fn run(config: Settings, path: PathBuf, runtime: Runtime) -> Result<(
     if std::env::var("TERM").as_deref() == Ok("dumb") {
         return Err("Use a terminal with cursor support, or choose a CLI subcommand.".into());
     }
+    let shutdown = super::shutdown::Shutdown::listen(runtime.handle())?;
+    let manager = FxserverManager::default();
     let mut terminal = ratatui::try_init().map_err(|e| e.to_string())?;
     let guard = TerminalGuard;
     crossterm::execute!(io::stdout(), EnableBracketedPaste).map_err(|e| e.to_string())?;
     let (send, jobs) = mpsc::sync_channel(1);
     let (updates, receive) = mpsc::sync_channel(16);
-    let worker = thread::spawn(move || worker(runtime, jobs, updates));
+    let worker_manager = manager.clone();
+    let worker = thread::spawn(move || worker(worker_manager, runtime, jobs, updates));
     let mut app = App::new(config, path);
     let mut dirty = true;
     let mut last_draw = Instant::now();
     let result = (|| loop {
+        if shutdown.requested() {
+            return Ok(());
+        }
         for update in receive.try_iter().take(32) {
             dirty = true;
             if let Some(result) = app.update(update) {
@@ -690,13 +700,14 @@ pub(super) fn run(config: Settings, path: PathBuf, runtime: Runtime) -> Result<(
             return finished_worker_result(&mut app, &receive);
         }
     })();
+    manager.begin_shutdown();
     drop(send);
     drop(receive);
     drop(guard);
-    worker
+    let stopped = worker
         .join()
         .map_err(|_| "The terminal worker failed during shutdown.")?;
-    result
+    result.and(stopped)
 }
 
 fn tab_titles(width: u16, selected: usize) -> Vec<&'static str> {
