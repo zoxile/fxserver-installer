@@ -2,10 +2,11 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     layout::Rect,
     style::{Color, Style},
-    text::Line,
+    text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph},
     Frame,
 };
+use std::ops::Range;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 #[derive(Default)]
@@ -218,6 +219,31 @@ impl ConfirmationPreview {
         })
     }
 
+    pub(super) fn displayed_text(&self) -> &str {
+        &self.text
+    }
+
+    fn highlighted_rows(&self, active: Range<usize>) -> impl Iterator<Item = Line<'_>> {
+        self.visible_rows().enumerate().map(move |(index, text)| {
+            let offset = self.rows[self.scroll + index];
+            let start = active.start.max(offset);
+            let end = active.end.min(offset + text.len());
+            if start >= end {
+                return Line::raw(text);
+            }
+            let start = start - offset;
+            let end = end - offset;
+            Line::from(vec![
+                Span::raw(&text[..start]),
+                Span::styled(
+                    &text[start..end],
+                    Style::new().fg(Color::Black).bg(Color::Yellow),
+                ),
+                Span::raw(&text[end..]),
+            ])
+        })
+    }
+
     pub(super) fn draw(&mut self, frame: &mut Frame, area: Rect) {
         let title = if self.escaped {
             "Confirm Y | N/Esc | Escaped preview"
@@ -228,9 +254,48 @@ impl ConfirmationPreview {
     }
 
     pub(super) fn draw_panel(&mut self, frame: &mut Frame, area: Rect, title: &str) {
+        self.draw_panel_with_match(frame, area, title, None, false);
+    }
+
+    pub(super) fn draw_result(
+        &mut self,
+        frame: &mut Frame,
+        area: Rect,
+        active: Option<&Range<usize>>,
+        reveal: bool,
+    ) {
+        let title = if self.escaped {
+            "Result (escaped) | Ctrl+F: find | Esc: back"
+        } else {
+            "Result | Ctrl+F: find | Esc: back"
+        };
+        self.draw_panel_with_match(frame, area, title, active, reveal);
+    }
+
+    fn draw_panel_with_match(
+        &mut self,
+        frame: &mut Frame,
+        area: Rect,
+        title: &str,
+        active: Option<&Range<usize>>,
+        reveal: bool,
+    ) {
         let block = Block::default().borders(Borders::ALL);
         let inner = block.inner(area);
         self.resize(inner.width as usize, inner.height as usize);
+        let active = active.filter(|range| {
+            range.start < range.end
+                && range.end <= self.text.len()
+                && self.text.is_char_boundary(range.start)
+                && self.text.is_char_boundary(range.end)
+        });
+        if let Some(active) = active.filter(|_| reveal) {
+            self.scroll = self
+                .rows
+                .partition_point(|offset| *offset <= active.start)
+                .saturating_sub(1)
+                .min(self.max_scroll());
+        }
         let end = self.scroll.saturating_add(self.height).min(self.rows.len());
         let range = format!("{}-{}/{}", self.scroll + 1, end, self.rows.len());
         let position = if range.len() + " | PgUp/PgDn Home/End".len() <= inner.width as usize {
@@ -247,7 +312,10 @@ impl ConfirmationPreview {
             area,
         );
         // Already wrapped; never ask Paragraph to walk text above the viewport.
-        let lines: Vec<_> = self.visible_rows().map(Line::raw).collect();
+        let lines: Vec<_> = match active {
+            Some(active) => self.highlighted_rows(active.clone()).collect(),
+            None => self.visible_rows().map(Line::raw).collect(),
+        };
         frame.render_widget(Paragraph::new(lines), inner);
     }
 }
@@ -256,6 +324,83 @@ impl ConfirmationPreview {
 mod tests {
     use super::*;
     use ratatui::{backend::TestBackend, Terminal};
+
+    #[test]
+    fn result_highlighting_spans_wrapped_unicode_without_changing_confirmation() {
+        let mut preview = ConfirmationPreview::new("aaaaa\u{754c}XYZ tail".into());
+        let active = 4..9;
+        let mut terminal = Terminal::new(TestBackend::new(8, 6)).unwrap();
+        terminal
+            .draw(|frame| preview.draw_result(frame, frame.area(), Some(&active), true))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer[(5, 1)].bg, Color::Yellow);
+        assert_eq!(buffer[(1, 2)].bg, Color::Yellow);
+        assert_eq!(buffer[(3, 2)].bg, Color::Yellow);
+        let lines: Vec<_> = preview.highlighted_rows(active).collect();
+        assert_eq!(
+            lines.iter().map(Line::to_string).collect::<String>(),
+            "aaaaa\u{754c}XYZ tail"
+        );
+        assert!(lines.len() <= 4 && lines.iter().all(|line| line.width() <= 6));
+        terminal
+            .draw(|frame| preview.draw(frame, frame.area()))
+            .unwrap();
+        assert!(terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .all(|cell| cell.bg != Color::Yellow));
+    }
+
+    #[test]
+    fn result_match_reveal_and_repeated_highlighting_reuse_cached_layout() {
+        let text = format!("{}MATCH", "row\n".repeat(100_000));
+        let active = text.len() - 5..text.len();
+        let mut preview = ConfirmationPreview::new(text);
+        let mut terminal = Terminal::new(TestBackend::new(50, 14)).unwrap();
+        terminal
+            .draw(|frame| preview.draw_result(frame, frame.area(), Some(&active), true))
+            .unwrap();
+        for _ in 0..50 {
+            terminal
+                .draw(|frame| preview.draw_result(frame, frame.area(), Some(&active), false))
+                .unwrap();
+        }
+        assert_eq!(preview.layouts, 1);
+        assert!(preview.scroll > u16::MAX as usize);
+        assert!(preview
+            .visible_rows()
+            .collect::<String>()
+            .ends_with("MATCH"));
+        let lines: Vec<_> = preview.highlighted_rows(active).collect();
+        assert!(lines.len() <= 12);
+        assert!(
+            lines
+                .iter()
+                .map(|line| line.to_string().len())
+                .sum::<usize>()
+                <= 48 * 12
+        );
+    }
+
+    #[test]
+    fn invalid_match_boundaries_are_ignored_without_panics() {
+        let mut preview = ConfirmationPreview::new("\u{754c}x".into());
+        let mut terminal = Terminal::new(TestBackend::new(50, 14)).unwrap();
+        for active in [1..2, 0..100, Range { start: 3, end: 2 }, 0..0] {
+            terminal
+                .draw(|frame| preview.draw_result(frame, frame.area(), Some(&active), true))
+                .unwrap();
+            assert!(terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .all(|cell| cell.bg != Color::Yellow));
+        }
+    }
 
     #[test]
     fn large_preview_is_complete_and_only_submits_viewport_rows() {

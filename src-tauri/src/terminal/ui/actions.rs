@@ -1,4 +1,4 @@
-use super::render::{ConfirmationPreview, Input};
+use super::render::Input;
 use crate::terminal::{
     actions::{Action, FieldKind, Submission},
     safe_text,
@@ -12,13 +12,21 @@ use ratatui::{
     Frame,
 };
 
+mod result;
+use result::ResultView;
+
 pub(super) struct Panel {
     actions: Vec<Action>,
+    searchable: Vec<String>,
+    matches: Vec<usize>,
+    filtered_query: String,
     search: Input,
     selected: usize,
     form: Option<Form>,
-    output: Option<ConfirmationPreview>,
+    output: Option<ResultView>,
     show_output: bool,
+    #[cfg(test)]
+    filter_runs: usize,
 }
 
 struct Form {
@@ -33,17 +41,25 @@ struct Form {
 impl Panel {
     pub(super) fn new(actions: Vec<Action>) -> Self {
         Self {
+            searchable: Self::searchable(&actions),
+            matches: (0..actions.len()).collect(),
             actions,
+            filtered_query: String::new(),
             search: Input::default(),
             selected: 0,
             form: None,
             output: None,
             show_output: false,
+            #[cfg(test)]
+            filter_runs: 0,
         }
     }
 
     pub(super) fn refresh(&mut self, actions: Vec<Action>) {
+        self.searchable = Self::searchable(&actions);
+        self.matches = (0..actions.len()).collect();
         self.actions = actions;
+        self.filtered_query.clear();
         self.form = None;
         self.show_output = false;
         self.search = Input::default();
@@ -54,7 +70,7 @@ impl Panel {
         if self.form.as_ref().is_some_and(|form| form.submitted) {
             self.form = None;
         }
-        self.output = Some(ConfirmationPreview::new(text));
+        self.output = Some(ResultView::new(text));
         self.show_output = self.form.is_none();
     }
 
@@ -64,23 +80,44 @@ impl Panel {
         }
     }
 
-    fn matches(&self) -> Vec<usize> {
-        let query = self.search.value.to_lowercase();
-        self.actions
+    fn searchable(actions: &[Action]) -> Vec<String> {
+        actions
             .iter()
-            .enumerate()
-            .filter_map(|(index, action)| {
-                let text = format!("{} {}", action.group, action.title).to_lowercase();
-                query
-                    .split_whitespace()
-                    .all(|word| text.contains(word))
-                    .then_some(index)
-            })
+            .map(|action| format!("{} {}", action.group, action.title).to_lowercase())
             .collect()
+    }
+
+    fn filter_changed_query(&mut self) {
+        if self.filtered_query == self.search.value {
+            return;
+        }
+        self.filtered_query.clone_from(&self.search.value);
+        let query = self.search.value.to_lowercase();
+        let words: Vec<_> = query.split_whitespace().collect();
+        self.matches.clear();
+        self.matches.extend(
+            self.searchable
+                .iter()
+                .enumerate()
+                .filter_map(|(index, text)| {
+                    words
+                        .iter()
+                        .all(|word| text.contains(*word))
+                        .then_some(index)
+                }),
+        );
+        self.selected = 0;
+        #[cfg(test)]
+        {
+            self.filter_runs += 1;
+        }
     }
 
     pub(super) fn paste(&mut self, value: &str) {
         if self.show_output {
+            if let Some(output) = &mut self.output {
+                output.paste(value);
+            }
             return;
         }
         if let Some(form) = &mut self.form {
@@ -92,7 +129,7 @@ impl Panel {
                 form.error = error.into();
             }
         } else if self.search.paste(value).is_ok() {
-            self.selected = 0;
+            self.filter_changed_query();
         }
     }
 
@@ -101,24 +138,27 @@ impl Panel {
             self.show_output = self.output.is_some();
             return None;
         }
-        if key.code == KeyCode::Esc {
-            if self.show_output {
-                self.show_output = false;
-            } else {
-                self.form = None;
+        if key.code == KeyCode::Char('f') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            if let Some(output) = &mut self.output {
+                self.show_output = true;
+                output.begin_search();
             }
             return None;
         }
         if self.show_output {
             if let Some(output) = &mut self.output {
-                output.key(key.code);
+                self.show_output = output.key(key);
             }
+            return None;
+        }
+        if key.code == KeyCode::Esc {
+            self.form = None;
             return None;
         }
         if let Some(form) = &mut self.form {
             return form.key(key);
         }
-        let matches = self.matches();
+        let matches = &self.matches;
         match key.code {
             KeyCode::Down => self.selected = (self.selected + 1) % matches.len().max(1),
             KeyCode::Up => {
@@ -128,10 +168,11 @@ impl Panel {
                 if let Some(index) = matches.get(self.selected) {
                     let action = self.actions[*index].clone();
                     if action.fields.is_empty() {
+                        let id = action.id.into();
                         return Some((
-                            action.clone(),
+                            action,
                             Submission {
-                                id: action.id.into(),
+                                id,
                                 values: Default::default(),
                             },
                         ));
@@ -153,7 +194,7 @@ impl Panel {
             }
             _ => {
                 self.search.key(key);
-                self.selected = 0;
+                self.filter_changed_query();
             }
         }
         None
@@ -162,7 +203,7 @@ impl Panel {
     pub(super) fn draw(&mut self, frame: &mut Frame, area: Rect) {
         if self.show_output {
             if let Some(output) = &mut self.output {
-                output.draw_panel(frame, area, "Result | Esc: back");
+                output.draw(frame, area);
                 return;
             }
         }
@@ -183,20 +224,17 @@ impl Panel {
         frame.render_widget(block, search);
         let (text, cursor) = self.search.visible(inner.width as usize, false);
         frame.render_widget(Paragraph::new(text), inner);
-        if inner.width > 0 {
+        if inner.width > 0 && inner.height > 0 {
             frame.set_cursor_position((inner.x + cursor, inner.y));
         }
-        let matches = self.matches();
-        self.selected = self.selected.min(matches.len().saturating_sub(1));
+        let matches = &self.matches;
         let items: Vec<_> = matches
             .iter()
             .map(|index| {
                 let action = &self.actions[*index];
                 ListItem::new(Line::from(vec![
-                    Span::styled(
-                        format!("{}  ", action.group),
-                        Style::new().fg(Color::DarkGray),
-                    ),
+                    Span::styled(action.group, Style::new().fg(Color::DarkGray)),
+                    Span::raw("  "),
                     Span::raw(action.title),
                 ]))
             })
@@ -407,6 +445,103 @@ mod tests {
             ],
             confirmation: Some("Confirm creation"),
         }
+    }
+
+    #[test]
+    fn filter_cache_invalidates_on_query_and_catalog_changes_only() {
+        let mut server = action();
+        server.id = "server";
+        server.group = "Server";
+        server.title = "Restart server";
+        let mut panel = Panel::new(vec![action(), server.clone()]);
+        panel.key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(panel.selected, 1);
+        panel.key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        panel.paste("");
+        assert_eq!(panel.selected, 1);
+        assert_eq!(panel.filter_runs, 0);
+        panel.paste("USER dataBASE");
+        assert_eq!(panel.matches, [0]);
+        assert_eq!(panel.selected, 0);
+        assert_eq!(panel.filter_runs, 1);
+        panel.key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        assert_eq!(panel.matches, [0, 1]);
+        assert_eq!(panel.filter_runs, 2);
+        panel.paste("unmatched");
+        assert!(panel.matches.is_empty());
+        panel.key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(panel.selected, 0);
+        assert!(panel
+            .key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .is_none());
+        panel.refresh(vec![server]);
+        assert_eq!(panel.matches, [0]);
+        assert_eq!(panel.searchable, ["server restart server"]);
+        assert!(panel.search.value.is_empty());
+        panel.paste("database");
+        assert!(panel.matches.is_empty());
+    }
+
+    #[test]
+    fn repeated_draws_and_navigation_reuse_filter_cache() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let mut panel = Panel::new(vec![action(); 84]);
+        panel.paste("create");
+        let allocation = panel.matches.as_ptr();
+        let searchable = panel.searchable.as_ptr();
+        let mut terminal = Terminal::new(TestBackend::new(50, 14)).unwrap();
+        for _ in 0..50 {
+            panel.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+            terminal
+                .draw(|frame| panel.draw(frame, frame.area()))
+                .unwrap();
+        }
+        assert_eq!(panel.filter_runs, 1);
+        assert_eq!(panel.matches.as_ptr(), allocation);
+        assert_eq!(panel.searchable.as_ptr(), searchable);
+        assert_eq!(panel.selected, 50);
+    }
+
+    #[test]
+    fn filtering_normalizes_unicode_without_changing_actions() {
+        let mut item = action();
+        item.title = "\u{c5}terst\u{e4}ll database";
+        let mut panel = Panel::new(vec![item]);
+        panel.paste("\u{e5}TERST\u{c4}LL");
+        assert_eq!(panel.matches, [0]);
+        assert_eq!(panel.actions[0].title, "\u{c5}terst\u{e4}ll database");
+    }
+
+    #[test]
+    fn result_search_preserves_a_masked_draft_and_escape_restores_it() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let mut panel = Panel::new(vec![action()]);
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        panel.key(key(KeyCode::Enter));
+        panel.paste("draft");
+        panel.show_result("First match and another match.".into());
+        panel.key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL));
+        panel.paste("match");
+        panel.key(key(KeyCode::Enter));
+        let mut terminal = Terminal::new(TestBackend::new(50, 14)).unwrap();
+        terminal
+            .draw(|frame| panel.draw(frame, frame.area()))
+            .unwrap();
+        assert!(panel.show_output);
+        assert_eq!(panel.form.as_ref().unwrap().inputs[0].value, "draft");
+        assert!(!terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>()
+            .contains("secret-fixture"));
+        panel.key(key(KeyCode::Esc));
+        assert!(!panel.show_output);
+        assert_eq!(panel.form.as_ref().unwrap().inputs[0].value, "draft");
+        panel.key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
+        assert!(panel.show_output);
     }
     #[test]
     fn forms_validate_and_keep_passwords_out_of_previews() {
