@@ -1,4 +1,4 @@
-import { mkdir, readFile, readdir } from "node:fs/promises";
+import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { runInThisContext } from "node:vm";
 import { chromium } from "playwright";
 import { preview } from "vite";
@@ -28,6 +28,13 @@ try {
       return route.continue();
     });
     const page = await context.newPage();
+    const diagnostics = [];
+    page.on("pageerror", (error) => diagnostics.push(error.stack ?? error.message));
+    page.on("console", (message) => {
+      if (["error", "warning"].includes(message.type()) && diagnostics.length < 100) {
+        diagnostics.push(`${message.type()}: ${message.text()}`);
+      }
+    });
     page.setDefaultTimeout(15_000);
     await page.addInitScript(() => {
       window.confirm = () => true;
@@ -41,6 +48,8 @@ try {
       if (result) console.log(result);
     } catch (error) {
       await page.screenshot({ path: `output/playwright/${name}-failure.png`, fullPage: true }).catch(() => {});
+      const state = await page.locator("body").innerText().catch(() => "Page unavailable");
+      await writeFile(`output/playwright/${name}-failure.txt`, [String(error), ...diagnostics, state].join("\n\n"));
       throw error;
     } finally { await context.close(); }
   }
