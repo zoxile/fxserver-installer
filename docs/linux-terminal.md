@@ -56,6 +56,8 @@ Press Ctrl+K or F8 to open Actions. Type to filter by group/title, use Up/Down t
 
 Mutations require explicit confirmation. Some higher-risk operations also require a fresh backend preview and its exact token/target. Read the result, return to Actions with Esc, then choose the corresponding Apply action and enter the displayed values. Stale or mismatched previews fail instead of silently regenerating an approval. Ctrl+O reopens the last result without discarding another form; Esc returns to that form. Result pages support arrows, PgUp/PgDn, Home, and End. Forms accept single-line input up to 8 KiB; use the SQL-file runner or Config editor for multiline content.
 
+In an action result, Ctrl+F opens exact-text search. Enter finds the next occurrence; Shift+Enter or Ctrl+P finds the previous one, and Ctrl+N also moves forward. Matches wrap and scroll into view. Esc cancels an open search prompt; otherwise it returns from the result. Search only reads the displayed result; it never repeats the action.
+
 | Area | Available in the TUI |
 | --- | --- |
 | MariaDB | Detect installation/service, inspect package versions, install/update/uninstall, service start/stop/restart, validate/change connection, securely remember/load/forget login. Installer messages appear during the operation. |
@@ -63,16 +65,22 @@ Mutations require explicit confirmation. Some higher-risk operations also requir
 | Administration | Create accounts, change passwords, delete exact accounts, add database-scoped privileges, inspect grants, preview/apply database or table creation and table maintenance. |
 | SQL and diagnostics | F4 Enter opens SQL input; `f` reads a SQL file for review. Actions includes server/database inspection and SQL compatibility checks. SQL runs in the selected database, or global scope if it is empty. |
 | Backups | Database or table dumps, schema/data/full modes, optional routines/triggers/events, and isolated restore-test preview/apply/owned-database cleanup. Back up independently before installer or destructive SQL actions. |
-| Resources | Manifest scanning and RCON start/stop/restart/ensure, version checks, staged update previews, protected files, snapshots, rollback previews and apply. Resource update and rollback operations require the selected server to be stopped. |
+| Resources | Filterable manifest list and RCON start/stop/restart/ensure, version checks, staged update previews, protected files, snapshots, rollback previews and apply. Resource update and rollback operations require the selected server to be stopped. |
 | Artifacts | Host-platform Legacy and Enhanced catalogs and exact-version installation. Enhanced remains early access; health warnings are not a stability guarantee. |
 | Live Bridge | Inspect installation, preview/apply installation or removal, fetch live resources/players, send validated resource actions to a reviewed bridge instance. |
 | Profiler | Capture a bounded recording from the managed running server, retain its result, export to a new file, discard the retained capture. |
-| Configuration | Multiline colored editor, common-value and permission-rule previews, validation, encrypted history and revision-checked restoration. |
+| Configuration | Multiline colored editor with find and go-to-line, common-value and permission-rule previews, validation, encrypted history and revision-checked restoration. |
 | Logs and utilities | Bounded application/server/client log tails, JSON validation/formatting, and lookups in an already installed offline JOOAT resolver database. Client logs remain Windows-only. |
+
+### Finding Resources
+
+On F3, press `r` to scan the selected profile, then `/` or Ctrl+F to filter by resource name, version, or repository. Search is case-insensitive and accepts multiple words. Enter keeps the filter and returns to list navigation. Esc leaves the search field; another Esc clears the filter. Arrows, PgUp/PgDn, Home, and End move through matches. Start/stop/restart/ensure and context-sensitive Actions use the selected matching resource. Changing profiles clears the old list and ignores any old scan still in flight.
 
 ### Editing Configuration
 
 Press F9, then `r` to load the selected profile's cfg files. Select a file and press Enter. The editor uses line numbers, syntax colors, horizontal scrolling, and Unicode-aware cursor handling. Ctrl+S saves, Ctrl+Z undoes, and Ctrl+Y redoes. Esc returns to the file list when the draft is unchanged; with unsaved edits it shows a warning. Ctrl+W explicitly discards the draft. Switching views retains the draft. Files are bounded to 512 KiB and fewer than 65,535 lines.
+
+Ctrl+F opens literal text search. Enter or Down finds the next match; Up or Shift+Enter finds the previous one. Search wraps through the file and highlights the active match without editing it. Ctrl+G opens a one-based line-number prompt. Esc closes either prompt and returns to editing; navigation does not change the draft or its undo history.
 
 Saving checks that the original file still matches and retains encrypted history before replacing it. If another tool changed the file, reload and reconcile the changes; the TUI does not overwrite it blindly. On Linux, saving with encrypted history needs the unlocked keyring described above. File contents and explicitly requested log/history views can contain secrets: avoid screen sharing or terminal recording while viewing them.
 
@@ -189,6 +197,14 @@ npm run build
 cargo check --manifest-path src-tauri/Cargo.toml --locked --no-default-features --features desktop --all-targets
 cargo test --manifest-path src-tauri/Cargo.toml --locked --no-default-features --features desktop --lib
 ```
+
+For the synthetic resource-list benchmark, run:
+
+```sh
+cargo test --manifest-path src-tauri/Cargo.toml --locked --no-default-features --features terminal --lib benchmark_large_resource_list -- --ignored --nocapture
+```
+
+It renders 200 frames with 20,000 inert resource records. Compare the same build profile and terminal dimensions; this measures list rendering, not whole-app throughput. The ordinary tests verify that only visible rows are formatted and hidden log updates do not request unrelated redraws.
 
 `.github/workflows/linux-checks.yml` runs on pull requests, manual dispatch, and pushes to `codex/linux-terminal-support`. All jobs use Ubuntu 24.04 x86_64 runners with stable Rust:
 
