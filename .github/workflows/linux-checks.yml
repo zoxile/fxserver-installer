@@ -98,20 +98,24 @@ jobs:
           python3 scripts/test-linux-keyring.py "$test_binary"
 
       - name: Smoke test native terminal
+        id: terminal
         run: |
           cargo build --manifest-path src-tauri/Cargo.toml --locked --no-default-features --features terminal --bin fxserver-manager
           python3 scripts/test-terminal-pty.py src-tauri/target/debug/fxserver-manager
 
       - name: Build frontend
+        id: frontend
         run: npm run build
 
       - name: Check desktop
+        id: desktop
         run: cargo check --manifest-path src-tauri/Cargo.toml --locked --no-default-features --features desktop --all-targets
 
       - name: Check Rust quality
         run: cargo clippy --manifest-path src-tauri/Cargo.toml --locked --features terminal --all-targets -- -D warnings
 
       - name: Test desktop backend safeguards
+        id: desktop-tests
         timeout-minutes: 25
         # These command-module tests are excluded from the terminal feature set.
         run: cargo test --manifest-path src-tauri/Cargo.toml --locked --no-default-features --features desktop --lib
@@ -123,6 +127,7 @@ jobs:
           npm run test:ui
 
       - name: Test MariaDB against disposable Ubuntu packages
+        if: ${{ !cancelled() && steps.terminal.outcome == 'success' && steps.desktop-tests.outcome == 'success' }}
         timeout-minutes: 15
         run: |
           set -euo pipefail
@@ -140,6 +145,8 @@ jobs:
             fxi-mariadb-ubuntu:ci python3 /test.py /fxserver-manager --packages --restore-test-binary /restore-tests
 
       - name: Build Linux release packages
+        id: packages
+        if: ${{ !cancelled() && steps.frontend.outcome == 'success' && steps.desktop.outcome == 'success' }}
         timeout-minutes: 35
         env:
           CARGO_BUILD_JOBS: "2"
@@ -147,15 +154,18 @@ jobs:
         run: npm run tauri -- build --bundles deb,rpm,appimage --config src-tauri/tauri.linux.conf.json
 
       - name: Check Linux package contents
+        if: ${{ !cancelled() && steps.packages.outcome == 'success' }}
         run: python3 scripts/test-linux-packages.py src-tauri/target/release/bundle
 
       - name: Test optimized GLib iteration
+        if: ${{ !cancelled() && steps.packages.outcome == 'success' }}
         timeout-minutes: 15
         env:
           CARGO_BUILD_JOBS: "2"
         run: cargo test --manifest-path src-tauri/Cargo.toml --release --locked --lib platform::glib_regression -- --nocapture
 
       - name: Test native Linux desktop
+        if: ${{ !cancelled() && steps.packages.outcome == 'success' }}
         timeout-minutes: 5
         run: dbus-run-session -- xvfb-run -a python3 scripts/test-linux-desktop.py src-tauri/target/release/app
 
