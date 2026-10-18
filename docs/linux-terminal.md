@@ -148,3 +148,11 @@ For a mocked desktop regression check, start Vite with `npm run dev -- --host 12
 ## Windows Boundaries
 
 Windows installer publishing remains in the existing Windows workflow. The Windows app keeps its MSI configuration and client-log features. Windows-native process handling, service installation, DPAPI storage, NSIS packaging, and WebView2 behavior still need Windows verification after shared-backend changes; Linux CI cannot validate them.
+
+## GLib Security Backport
+
+Tauri's compatible GTK3 stack uses GLib 0.18.5, which predates the released fix for [RUSTSEC-2024-0429](https://rustsec.org/advisories/RUSTSEC-2024-0429.html). The string iterator passed an immutable pointer reference to a C function that writes through it. Optimized Rust builds can consequently dereference null and crash. This is an upstream memory-safety bug, not evidence that this application was exploited.
+
+The desktop build uses the exact original crate with the upstream two-line fix applied. [Backport provenance and verification](../src-tauri/vendor/glib/BACKPORT.md) records its source, checksum, license and patch. Headless terminal builds do not depend on GLib. CI compares all original source files against the checksummed archive and runs optimized iterator regressions.
+
+Cargo audit skips local path dependencies. `scripts/audit-glib-backport.py` separately audits the original registry version without suppressing scanner findings, accepts only the exact independently verified backport advisory, and fails on additional advisories. Maintenance warnings elsewhere in the Tauri dependency tree remain visible. Recheck this override when upgrading Tauri; remove it only when the compatible dependency chain includes an upstream fixed version and the native tests pass. A local backport adds maintenance responsibility and is not a certification of the whole dependency stack.

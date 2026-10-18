@@ -76,7 +76,9 @@ jobs:
         run: cargo audit --file src-tauri/Cargo.lock
 
       - name: Verify pinned GLib security backport
-        run: python3 src-tauri/vendor/glib/verify_backport.py
+        run: |
+          python3 src-tauri/vendor/glib/verify_backport.py
+          python3 scripts/audit-glib-backport.py
 
       - name: Check Rust formatting
         run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
