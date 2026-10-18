@@ -1,4 +1,5 @@
 async (page) => {
+  await page.clock.install();
   const errors = [];
   page.on("pageerror", (error) => errors.push(error.message));
   await page.setViewportSize({ width: 1440, height: 1000 });
@@ -57,6 +58,27 @@ async (page) => {
   await page.getByRole("button", { name: "Inspect dependencies for core", exact: true }).waitFor();
   await page.getByRole("button", { name: "Dependencies", exact: true }).click();
   const inspector = page.getByRole("dialog", { name: "Resource Dependency Inspector", exact: true });
+  const resourcePicker = inspector.getByLabel("Inspect resource", { exact: true });
+  await resourcePicker.waitFor();
+  // Closing before the first animation frame must not leave the portal behind its dialog.
+  await page.clock.pauseAt(await page.evaluate(() => Date.now() + 1000));
+  try {
+    for (let cycle = 0; cycle < 3; cycle++) {
+      await resourcePicker.press("Enter");
+      const menu = page.getByRole("listbox");
+      await menu.waitFor({ state: "attached" });
+      const layers = await menu.evaluate((element) => ({
+        content: Number(getComputedStyle(element).zIndex),
+        wrapper: Number(getComputedStyle(element.parentElement).zIndex),
+        dialog: Number(getComputedStyle(document.querySelector('[role="dialog"]')).zIndex),
+      }));
+      if (!Number.isFinite(layers.wrapper) || layers.wrapper !== layers.content || layers.wrapper <= layers.dialog) {
+        throw new Error(`Select wrapper is behind its dialog before animation-frame sync: ${JSON.stringify(layers)}`);
+      }
+      await resourcePicker.press("Escape");
+      if (await resourcePicker.getAttribute("aria-expanded") !== "false") throw new Error("Escape did not close the resource selector");
+    }
+  } finally { await page.clock.resume(); }
   await inspector.getByLabel("Inspect resource", { exact: true }).click();
   await page.getByRole("option", { name: "core / data", exact: true }).click();
   await inspector.getByRole("heading", { name: "Direct Dependents (1)", exact: true }).waitFor();

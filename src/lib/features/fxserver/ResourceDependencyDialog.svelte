@@ -87,7 +87,7 @@
 							<Input bind:value={resourceSearch} aria-label="Search dependency resources" placeholder="Search resources" />
 							<Select.Root type="single" bind:value={selected} items={options} disabled={!options.length}>
 								<Select.Trigger aria-label="Inspect resource" class="w-full min-w-0"><span class="truncate">{selectedResource ? `${selectedResource.name} / ${selectedResource.origin}` : "Choose resource"}</span></Select.Trigger>
-								<Select.Content class="z-[140] max-h-72 w-(--bits-select-anchor-width) max-w-[calc(100vw-2rem)]">
+								<Select.Content zIndex={140} class="max-h-72 w-(--bits-select-anchor-width) max-w-[calc(100vw-2rem)]">
 									{#each options as option (option.value)}<Select.Item value={option.value} label={option.label}><span class="min-w-0 break-all">{option.label}</span></Select.Item>{/each}
 								</Select.Content>
 							</Select.Root>
