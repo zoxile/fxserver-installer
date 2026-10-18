@@ -13,7 +13,7 @@ Quick note: The main purpose of this app was for me to learn how to build with T
 > FXServer Installer is a new project in active development. Issues, bugs, UI changes, and breaking changes may happen between releases, so back up important server data before using app features that install, update, uninstall, or rewrite files.
 
 > [!WARNING]
-> **Version 0.5.1 is a beta, not a fully tested production release.** Automated checks do not replace live Windows Server, MariaDB upgrade/restore, or FXServer load testing. Test on a disposable server and keep independent backups. See the [0.5.1 beta release notes](docs/releases/v0.5.1.md) for changes and validation limits.
+> **Version 0.5.2 is a beta, not a fully tested production release.** Automated checks do not replace live Windows Server, MariaDB upgrade/restore, or FXServer load testing. Test on a disposable server and keep independent backups. See the [0.5.2 beta release notes](docs/releases/v0.5.2.md) and [Linux validation limits](docs/linux-terminal.md#checks) before deploying this development branch.
 
 > [!NOTE]
 > Windows SmartScreen may warn because this project is new and currently unsigned. If you downloaded it from the official GitHub Releases page, click "More info" and then "Run anyway".
