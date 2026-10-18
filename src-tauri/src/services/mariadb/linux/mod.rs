@@ -1,5 +1,7 @@
 #[cfg(target_os = "linux")]
 pub(crate) mod filesystem;
+#[cfg(all(test, target_os = "linux", feature = "desktop"))]
+mod integration;
 pub(super) mod plans;
 #[cfg(target_os = "linux")]
 pub(super) mod runtime;

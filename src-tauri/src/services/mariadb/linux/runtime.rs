@@ -76,8 +76,12 @@ pub fn run(command: &mut Command, timeout: Option<Duration>) -> Result<Output, S
     let stderr = drain(child.stderr.take().unwrap());
     let start = Instant::now();
     let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) if stdout.is_finished() && stderr.is_finished() => break status,
+        match exited_without_reaping(child.id()) {
+            Ok(true) if stdout.is_finished() && stderr.is_finished() => {
+                break child
+                    .wait()
+                    .map_err(|e| format!("Cannot reap system command: {e}"))?;
+            }
             Ok(_) => {}
             Err(error) => {
                 if timeout.is_some() {
@@ -99,6 +103,27 @@ pub fn run(command: &mut Command, timeout: Option<Duration>) -> Result<Output, S
             .map_err(|_| "System output worker failed.")??,
         stderr: stderr.join().map_err(|_| "System error worker failed.")??,
     })
+}
+
+fn exited_without_reaping(pid: u32) -> std::io::Result<bool> {
+    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+    // Keep the process-group leader reserved until pipe readers finish or timeout cleanup runs.
+    let result = unsafe {
+        libc::waitid(
+            libc::P_PID,
+            pid,
+            &mut info,
+            libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+        )
+    };
+    if result != 0 {
+        let error = std::io::Error::last_os_error();
+        if error.kind() == std::io::ErrorKind::Interrupted {
+            return Ok(false);
+        }
+        return Err(error);
+    }
+    Ok(unsafe { info.si_pid() } != 0)
 }
 
 pub fn terminate_group(child: &mut std::process::Child) {
@@ -171,5 +196,33 @@ pub fn administer(plan: &Plan) -> Result<(), String> {
                 output.stderr
             }
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn timeout_reaps_the_leader_and_closes_descendant_pipes() {
+        let started = Instant::now();
+        let result = run(
+            Command::new("/bin/sh").args(["-c", "sleep 30 & exit 0"]),
+            Some(Duration::from_millis(150)),
+        );
+        assert!(result.err().unwrap().contains("timed out"));
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn completed_readers_keep_exit_status_and_output() {
+        let output = run(
+            Command::new("/bin/sh").args(["-c", "printf fixture; printf diagnostic >&2; exit 7"]),
+            Some(Duration::from_secs(2)),
+        )
+        .unwrap();
+        assert!(!output.success);
+        assert_eq!(output.stdout, "fixture");
+        assert_eq!(output.stderr, "diagnostic");
     }
 }

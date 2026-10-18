@@ -181,8 +181,12 @@ pub fn package_plan(
     match (distro, action) {
         (Distro::Debian, Action::Remove) => {
             plan.args.retain(|a| a != "--no-remove");
-            plan.args
-                .extend(["remove".into(), "--".into(), "mariadb-server".into()]);
+            plan.args.extend([
+                "remove".into(),
+                "--".into(),
+                "mariadb-server".into(),
+                "mariadb-server-core".into(),
+            ]);
         }
         (Distro::Debian, _) => {
             if action == Action::Update {
@@ -326,6 +330,17 @@ mod tests {
             ["--system", "--no-pager", "restart", "--", "mariadb.service"]
         );
         assert!(service_plan("enable", "mariadb").is_err());
+    }
+    #[test]
+    fn debian_removal_includes_daemon_but_keeps_clients_and_data() {
+        let plan = package_plan(Distro::Debian, Action::Remove, None, &[]).unwrap();
+        let packages = plan.args.split(|arg| arg == "--").next_back().unwrap();
+        assert_eq!(packages, ["mariadb-server", "mariadb-server-core"]);
+        assert!(plan.args.iter().any(|arg| arg == "APT::Get::Purge=false"));
+        assert!(plan
+            .args
+            .iter()
+            .any(|arg| arg == "APT::Get::AutomaticRemove=false"));
     }
     #[test]
     fn parses_distro_versions_and_rejects_unrelated_repos() {

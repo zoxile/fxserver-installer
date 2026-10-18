@@ -246,12 +246,8 @@ fn arch_catalog() -> Result<Catalog, String> {
             );
         }
     }
-    let source = runtime::checked_read(&Plan::new("pacman", &["-Sl", "extra"]))?;
-    let versions = unique(source.lines().filter_map(|line| {
-        let fields: Vec<_> = line.split_whitespace().collect();
-        (fields.len() >= 3 && fields[0] == "extra" && fields[1] == "mariadb")
-            .then(|| fields[2].to_string())
-    }));
+    let source = runtime::checked_read(&Plan::new("pacman", &["-Si", "extra/mariadb"]))?;
+    let versions = parse_arch_versions(&source);
     Ok(Catalog {
         distro: Distro::Arch,
         installed: installed_version(Distro::Arch)?,
@@ -259,6 +255,18 @@ fn arch_catalog() -> Result<Catalog, String> {
         versions,
         repos: vec!["extra".into()],
     })
+}
+
+fn parse_arch_versions(source: &str) -> Vec<String> {
+    let fields: std::collections::HashMap<_, _> = source
+        .lines()
+        .filter_map(|line| line.split_once(':'))
+        .map(|(key, value)| (key.trim(), value.trim()))
+        .collect();
+    if fields.get("Repository") != Some(&"extra") || fields.get("Name") != Some(&"mariadb") {
+        return Vec::new();
+    }
+    unique(fields.get("Version").map(|v| (*v).to_string()).into_iter())
 }
 
 fn arch_signatures_required(source: &str) -> bool {
@@ -435,5 +443,23 @@ mod tests {
         assert_eq!(catalog.select(Some("10.11")).unwrap(), "1:10.11.6-1");
         assert!(catalog.select(Some("11.4")).is_err());
         assert!(catalog.select(Some("--allow-unauthenticated")).is_err());
+    }
+    #[test]
+    fn arch_queries_only_the_requested_signed_repository_package() {
+        assert_eq!(
+            parse_arch_versions("Repository : extra\nName : mariadb\nVersion : 11.8.3-1\nDescription : MariaDB server"),
+            ["11.8.3-1"]
+        );
+        assert_eq!(
+            parse_arch_versions("Repository : extra\nName : mariadb\nVersion : 1:11.8.3-1"),
+            ["1:11.8.3-1"]
+        );
+        for source in [
+            "Repository : custom\nName : mariadb\nVersion : 11.8.3-1",
+            "Repository : extra\nName : mysql\nVersion : 8.4.0-1",
+            "Repository : extra\nName : mariadb\nVersion : --evil",
+        ] {
+            assert!(parse_arch_versions(source).is_empty());
+        }
     }
 }
