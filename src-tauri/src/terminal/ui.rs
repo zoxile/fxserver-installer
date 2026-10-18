@@ -1,21 +1,14 @@
-use super::{
-    preflight, safe_text,
-    settings::{self, Settings},
-};
+use super::{actions as operations, safe_text, settings::Settings};
 use crate::{
-    commands::{
-        artifact,
-        fxserver::{self, FxserverManager},
-    },
+    commands::fxserver::FxserverManager,
     models::{
         artifact::ArtifactBuild,
         fxserver::{
             FxserverCommandRequest, FxserverRconConfig, FxserverResourceInfo, FxserverStatus,
-            FxserverTerminalEntry, ResourceScanRequest,
+            FxserverTerminalEntry, SaveServerConfigRequest, ServerConfigFile, TxDataProfilesResult,
         },
         mariadb::MariaDBCredentials,
     },
-    services::mariadb,
 };
 use crossterm::event::{
     self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyEventKind,
@@ -32,16 +25,25 @@ use std::{
     collections::VecDeque,
     io::{self, IsTerminal},
     path::PathBuf,
-    sync::mpsc::{self, Receiver, SyncSender},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc::{self, Receiver, SyncSender},
+        Arc,
+    },
     thread,
     time::{Duration, Instant},
 };
 use tokio::runtime::Runtime;
 
+mod actions;
+mod config;
+mod performance;
 mod render;
+mod worker;
 use render::{ConfirmationPreview, Input};
+use worker::{monitor, worker};
 
-const TABS: [&str; 7] = [
+const TABS: [&str; 9] = [
     "Server",
     "Console",
     "Resources",
@@ -49,6 +51,8 @@ const TABS: [&str; 7] = [
     "Artifacts",
     "Checks",
     "Settings",
+    "Actions",
+    "Config",
 ];
 const FIELDS: [&str; 11] = [
     "Artifact folder",
@@ -66,6 +70,12 @@ const FIELDS: [&str; 11] = [
 const MAX_LINES: usize = 2000;
 
 enum Job {
+    LoadCredentials(Box<operations::Context>),
+    Profiles(Settings),
+    LoadConfig(Settings),
+    SaveConfig(Settings, SaveServerConfigRequest, String),
+    SaveSettings(PathBuf, Settings),
+    Action(Box<(operations::Context, operations::Submission)>),
     Start(Settings, bool),
     Stop,
     Restart(Settings),
@@ -81,6 +91,16 @@ enum Job {
 }
 
 enum Update {
+    Credentials(
+        Box<operations::Context>,
+        Result<Option<MariaDBCredentials>, String>,
+        Result<Option<String>, String>,
+    ),
+    Databases(Result<Vec<String>, String>),
+    Profiles(Result<TxDataProfilesResult, String>),
+    Config(Settings, Result<Vec<ServerConfigFile>, String>),
+    SavedConfig(Result<ServerConfigFile, String>),
+    Action(Result<operations::Outcome, String>),
     Complete(Result<String, String>),
     Rcon(Result<String, String>),
     Resources(Result<Vec<FxserverResourceInfo>, String>),
@@ -97,21 +117,47 @@ enum Edit {
     SqlFile,
 }
 
+enum Selection {
+    Database,
+    Profile(String),
+}
+
+struct Picker {
+    kind: Selection,
+    values: Vec<String>,
+    selected: usize,
+}
+
+#[derive(Clone, Copy, Default)]
+struct CredentialRevision {
+    database: u64,
+    rcon: u64,
+}
+
 struct App {
+    manager: FxserverManager,
+    progress: Option<SyncSender<String>>,
+    actions: actions::Panel,
+    config: config::Panel,
+    performance: performance::History,
+    picker: Option<Picker>,
     settings: Settings,
     config_path: PathBuf,
     rcon_password: String,
     database_password: String,
+    credential_revision: CredentialRevision,
+    pending_credential_revision: Option<CredentialRevision>,
     tab: usize,
     selected: usize,
     input: Input,
     edit: Option<Edit>,
     confirm: Option<(ConfirmationPreview, Job)>,
     busy: bool,
+    server_transition: bool,
     quitting: bool,
     notice: String,
     error: bool,
-    logs: VecDeque<String>,
+    logs: VecDeque<Line<'static>>,
     output: Vec<String>,
     resources: Vec<FxserverResourceInfo>,
     builds: Vec<ArtifactBuild>,
@@ -122,17 +168,26 @@ struct App {
 
 impl App {
     fn new(settings: Settings, config_path: PathBuf) -> Self {
-        Self {
+        let mut app = Self {
+            manager: FxserverManager::default(),
+            progress: None,
+            actions: actions::Panel::new(Vec::new()),
+            config: config::Panel::default(),
+            performance: performance::History::default(),
+            picker: None,
             settings,
             config_path,
             rcon_password: String::new(),
             database_password: String::new(),
+            credential_revision: CredentialRevision::default(),
+            pending_credential_revision: None,
             tab: 0,
             selected: 0,
             input: Input::default(),
             edit: None,
             confirm: None,
             busy: false,
+            server_transition: false,
             quitting: false,
             notice: "Ready".into(),
             error: false,
@@ -143,9 +198,19 @@ impl App {
             status: None,
             scroll: 0,
             started: Instant::now(),
-        }
+        };
+        app.actions.refresh(operations::list(&app.context()));
+        app
     }
     fn paste(&mut self, value: &str) {
+        if self.tab == 8 && self.confirm.is_none() && !self.quitting {
+            self.config.paste(value);
+            return;
+        }
+        if self.tab == 7 && self.confirm.is_none() && !self.quitting {
+            self.actions.paste(value);
+            return;
+        }
         if self.edit.is_none() || self.confirm.is_some() || self.quitting {
             return;
         }
@@ -164,6 +229,36 @@ impl App {
             database: (!self.settings.database.is_empty()).then(|| self.settings.database.clone()),
         }
     }
+    fn context(&self) -> operations::Context {
+        operations::Context {
+            settings: self.settings.clone(),
+            credentials: self.credentials(),
+            rcon: self.rcon(String::new()).rcon,
+            manager: self.manager.clone(),
+            progress: self.progress.clone(),
+        }
+    }
+
+    fn open_actions(&mut self) {
+        let mut actions = operations::list(&self.context());
+        if self.tab == 2 {
+            if let Some(resource) = self.resources.get(self.selected) {
+                for action in &mut actions {
+                    for field in &mut action.fields {
+                        if field.key == "resource_path"
+                            || (action.group == "Resources" && field.key == "resource")
+                        {
+                            field.value.clone_from(&resource.path);
+                        }
+                    }
+                }
+            }
+        }
+        self.actions.refresh(actions);
+        self.tab = 7;
+        self.edit = None;
+        self.input = Input::default();
+    }
     fn rcon(&self, command: String) -> FxserverCommandRequest {
         FxserverCommandRequest {
             command,
@@ -179,8 +274,16 @@ impl App {
             self.notice = "An operation is already running. You can continue browsing.".into();
             return;
         }
+        let quitting = matches!(job, Job::Quit);
+        let server_transition = matches!(job, Job::Start(..) | Job::Stop | Job::Restart(..));
+        // The worker is serial: this stamp belongs to its sole in-flight job.
+        let credential_revision = matches!(job, Job::LoadCredentials(_) | Job::Action(_))
+            .then_some(self.credential_revision);
         match sender.try_send(job) {
             Ok(()) => {
+                self.pending_credential_revision = credential_revision;
+                self.quitting = quitting;
+                self.server_transition = server_transition;
                 self.busy = true;
                 self.error = false;
                 self.notice = "Working".into();
@@ -201,6 +304,7 @@ impl App {
     }
     fn set_result(&mut self, result: Result<String, String>) {
         self.busy = false;
+        self.server_transition = false;
         self.error = result.is_err();
         match result {
             Ok(text) => {
@@ -219,6 +323,165 @@ impl App {
     }
     fn update(&mut self, update: Update) -> Option<Result<(), String>> {
         match update {
+            Update::Credentials(context, database, rcon) => {
+                self.busy = false;
+                let pending = self.pending_credential_revision.take();
+                let mut failures = Vec::new();
+                if pending
+                    .is_some_and(|revision| revision.database == self.credential_revision.database)
+                    && operations::database::saved_login_id(&context.settings)
+                        == operations::database::saved_login_id(&self.settings)
+                    && self.database_password.is_empty()
+                {
+                    match database {
+                        Ok(Some(credentials)) => {
+                            self.database_password = credentials.password;
+                            self.credential_revision.database =
+                                self.credential_revision.database.wrapping_add(1);
+                        }
+                        Err(error) => {
+                            failures.push(format!("Database login: {}", safe_text(&error)))
+                        }
+                        _ => {}
+                    }
+                }
+                if pending.is_some_and(|revision| revision.rcon == self.credential_revision.rcon)
+                    && context.settings.tx_data_path == self.settings.tx_data_path
+                    && context.settings.profile == self.settings.profile
+                    && context.rcon.host == self.settings.rcon_host
+                    && context.rcon.port == self.settings.rcon_port
+                    && self.rcon_password.is_empty()
+                {
+                    match rcon {
+                        Ok(Some(password)) => {
+                            self.rcon_password = password;
+                            self.credential_revision.rcon =
+                                self.credential_revision.rcon.wrapping_add(1);
+                        }
+                        Err(error) => {
+                            failures.push(format!("RCON password: {}", safe_text(&error)))
+                        }
+                        _ => {}
+                    }
+                }
+                self.error = !failures.is_empty();
+                self.notice = if self.error {
+                    failures.join("; ")
+                } else {
+                    "Ready. Saved credentials loaded where available.".into()
+                };
+            }
+            Update::Databases(result) => {
+                self.busy = false;
+                match result {
+                    Ok(values) => {
+                        self.notice =
+                            format!("{} databases. Choose one for this session.", values.len());
+                        self.picker = Some(Picker {
+                            kind: Selection::Database,
+                            values,
+                            selected: 0,
+                        });
+                    }
+                    Err(error) => self.set_result(Err(error)),
+                }
+            }
+            Update::Profiles(result) => {
+                self.busy = false;
+                match result {
+                    Ok(result) => {
+                        self.notice = format!("{} profiles found.", result.profiles.len());
+                        self.picker = Some(Picker {
+                            kind: Selection::Profile(result.data_path),
+                            values: result.profiles,
+                            selected: 0,
+                        });
+                    }
+                    Err(error) => self.set_result(Err(error)),
+                }
+            }
+            Update::Config(settings, result) => {
+                self.busy = false;
+                if settings.artifact_path != self.settings.artifact_path
+                    || settings.tx_data_path != self.settings.tx_data_path
+                    || settings.profile != self.settings.profile
+                {
+                    self.error = false;
+                    self.notice = "Configuration scope changed; stale reload ignored.".into();
+                    return None;
+                }
+                match result {
+                    Ok(files) => {
+                        self.notice = if self.config.loaded(settings, files) {
+                            "Configuration files loaded."
+                        } else {
+                            "Reload skipped: close the open editor first."
+                        }
+                        .into();
+                        self.error = false;
+                    }
+                    Err(error) => self.set_result(Err(error)),
+                }
+            }
+            Update::SavedConfig(result) => {
+                self.busy = false;
+                match result {
+                    Ok(file) => {
+                        self.config.saved(file);
+                        self.notice = "Config saved.".into();
+                        self.error = false;
+                    }
+                    Err(error) => self.set_result(Err(error)),
+                }
+            }
+            Update::Action(result) => {
+                self.busy = false;
+                self.error = result.is_err();
+                self.notice = if self.error {
+                    "Action failed. Actions > Ctrl+O shows the result."
+                } else {
+                    "Complete. Actions > Ctrl+O shows the result."
+                }
+                .into();
+                let pending = self.pending_credential_revision.take();
+                let text = match result {
+                    Ok(operations::Outcome::Login(_))
+                        if !pending.is_some_and(|revision| {
+                            revision.database == self.credential_revision.database
+                        }) =>
+                    {
+                        self.notice = "Session changed; database login ignored. Actions > Ctrl+O shows the result.".into();
+                        "The operation completed, but its returned database login was ignored because connection settings or credentials were edited while it ran.".into()
+                    }
+                    Ok(operations::Outcome::Login(credentials)) => {
+                        self.settings.database_host = credentials.host;
+                        self.settings.database_port = credentials.port;
+                        self.settings.database_user = credentials.username;
+                        self.settings.database = credentials.database.unwrap_or_default();
+                        self.database_password = credentials.password;
+                        self.credential_revision.database =
+                            self.credential_revision.database.wrapping_add(1);
+                        "Protected database login loaded. Password is not displayed.".into()
+                    }
+                    Ok(operations::Outcome::RconPassword(_))
+                        if !pending.is_some_and(|revision| {
+                            revision.rcon == self.credential_revision.rcon
+                        }) =>
+                    {
+                        self.notice = "Session changed; RCON password ignored. Actions > Ctrl+O shows the result.".into();
+                        "The operation completed, but its returned RCON password was ignored because the endpoint, profile or password was edited while it ran.".into()
+                    }
+                    Ok(operations::Outcome::RconPassword(password)) => {
+                        self.rcon_password = password;
+                        self.credential_revision.rcon =
+                            self.credential_revision.rcon.wrapping_add(1);
+                        "Protected RCON password loaded. Password is not displayed.".into()
+                    }
+                    Ok(operations::Outcome::Text(text)) => text,
+                    Err(error) => error,
+                };
+                self.actions.show_result(safe_text(&text));
+            }
             Update::Complete(result) => self.set_result(result),
             Update::Rcon(result) => {
                 self.busy = false;
@@ -235,10 +498,11 @@ impl App {
                 }
                 .into();
                 if text.trim().is_empty() {
-                    self.logs.push_back(format!("[{label}] No response text."));
+                    self.logs
+                        .push_back(Line::raw(format!("[{label}] No response text.")));
                 } else {
                     for line in text.lines() {
-                        self.logs.push_back(format!("[{label}] {line}"));
+                        self.logs.push_back(Line::raw(format!("[{label}] {line}")));
                         while self.logs.len() > MAX_LINES {
                             self.logs.pop_front();
                         }
@@ -268,11 +532,38 @@ impl App {
                 Err(error) => self.set_result(Err(error)),
             },
             Update::Sample(status, entries) => {
+                if let Some(status) = &status {
+                    self.performance.sample(status);
+                }
                 if status.is_some() {
                     self.status = status;
                 }
+                if self.tab == 1 && self.scroll > 0 {
+                    self.scroll = self.scroll.saturating_add(entries.len()).min(MAX_LINES);
+                }
                 for entry in entries {
-                    self.logs.push_back(safe_text(&entry.plain_line));
+                    let line = if entry.segments.is_empty() {
+                        Line::raw(safe_text(&entry.plain_line))
+                    } else {
+                        Line::from(
+                            entry
+                                .segments
+                                .into_iter()
+                                .map(|segment| {
+                                    let color = segment
+                                        .color
+                                        .and_then(|color| color.parse::<Color>().ok())
+                                        .unwrap_or(Color::Reset);
+                                    let mut style = Style::new().fg(color);
+                                    if segment.emphasis == Some(true) {
+                                        style = style.bold();
+                                    }
+                                    Span::styled(safe_text(&segment.text), style)
+                                })
+                                .collect::<Vec<_>>(),
+                        )
+                    };
+                    self.logs.push_back(line);
                 }
                 while self.logs.len() > MAX_LINES {
                     self.logs.pop_front();
@@ -318,6 +609,22 @@ impl App {
         }
     }
     fn set_field(&mut self, index: usize, value: String) -> Result<(), String> {
+        let previous = self.field(index);
+        let scope_changed = index <= 2 && value != previous;
+        if scope_changed && self.server_transition {
+            return Err(
+                "Wait for server start, stop or restart before changing its paths or profile."
+                    .into(),
+            );
+        }
+        if scope_changed && self.config.dirty() {
+            return Err("Save or discard unsaved config changes before changing the artifact folder or profile.".into());
+        }
+        if scope_changed && self.status.as_ref().is_some_and(|status| status.running) {
+            return Err(
+                "Stop the managed server before changing its artifact folder or profile.".into(),
+            );
+        }
         match index {
             0 => self.settings.artifact_path = value,
             1 => self.settings.tx_data_path = value,
@@ -332,6 +639,21 @@ impl App {
             10 => self.database_password = value,
             _ => {}
         }
+        self.invalidate_credential_result(index);
+        if self.field(index) != previous {
+            match index {
+                0..=2 => {
+                    self.database_password.clear();
+                    self.rcon_password.clear();
+                }
+                3 | 4 => self.rcon_password.clear(),
+                5..=7 => self.database_password.clear(),
+                _ => {}
+            }
+        }
+        if scope_changed {
+            self.config = config::Panel::default();
+        }
         self.notice = if index >= 9 {
             "Credential updated for this session only."
         } else {
@@ -340,7 +662,18 @@ impl App {
         .into();
         Ok(())
     }
+
+    fn invalidate_credential_result(&mut self, field: usize) {
+        if matches!(field, 0..=2 | 5..=8 | 10) {
+            self.credential_revision.database = self.credential_revision.database.wrapping_add(1);
+        }
+        if matches!(field, 0..=4 | 9) {
+            self.credential_revision.rcon = self.credential_revision.rcon.wrapping_add(1);
+        }
+    }
     fn key(&mut self, key: KeyEvent, sender: &SyncSender<Job>) {
+        #[cfg(windows)]
+        let key = normalize_windows_altgr(key);
         if self.quitting {
             return;
         }
@@ -360,6 +693,84 @@ impl App {
                     if let Some((preview, _)) = &mut self.confirm {
                         preview.key(key.code);
                     }
+                }
+            }
+            return;
+        }
+        if key.code == KeyCode::Char('k') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            self.picker = None;
+            self.open_actions();
+            return;
+        }
+        if let Some(picker) = &mut self.picker {
+            match key.code {
+                KeyCode::Esc => self.picker = None,
+                KeyCode::Down => {
+                    picker.selected =
+                        (picker.selected + 1).min(picker.values.len().saturating_sub(1))
+                }
+                KeyCode::Up => picker.selected = picker.selected.saturating_sub(1),
+                KeyCode::Enter => {
+                    let picker = self.picker.take().expect("picker is open");
+                    if let Some(value) = picker.values.get(picker.selected) {
+                        match picker.kind {
+                            Selection::Database => {
+                                self.settings.database.clone_from(value);
+                                self.invalidate_credential_result(8);
+                                self.notice =
+                                    "Database selected. Save Settings to remember the scope."
+                                        .into();
+                            }
+                            Selection::Profile(path) => match self
+                                .set_field(2, value.clone())
+                                .and_then(|()| self.set_field(1, path))
+                            {
+                                Ok(()) => {}
+                                Err(error) => {
+                                    self.error = true;
+                                    self.notice = error;
+                                }
+                            },
+                        }
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
+        if self.tab == 8 && !matches!(key.code, KeyCode::F(1..=9)) {
+            match self.config.key(key) {
+                config::Event::Load => self.submit(sender, Job::LoadConfig(self.settings.clone())),
+                config::Event::Save {
+                    settings,
+                    path,
+                    original,
+                    content,
+                } => self.submit(
+                    sender,
+                    Job::SaveConfig(
+                        *settings,
+                        SaveServerConfigRequest { path, content },
+                        original,
+                    ),
+                ),
+                config::Event::None => {}
+            }
+            return;
+        }
+        if self.tab == 7 && !matches!(key.code, KeyCode::F(1..=9)) {
+            if let Some((action, submission)) = self.actions.key(key) {
+                if self.busy {
+                    self.actions.submission_rejected();
+                    self.notice = "Wait for the current operation before starting another.".into();
+                    return;
+                }
+                let title = actions::confirmation(&action, &submission);
+                let job = Job::Action(Box::new((self.context(), submission)));
+                if action.confirmation.is_some() {
+                    self.require_confirmation(title, job);
+                } else {
+                    self.submit(sender, job);
                 }
             }
             return;
@@ -407,16 +818,34 @@ impl App {
             return;
         }
         match key.code {
+            KeyCode::Char('p') if self.tab == 6 => {
+                self.submit(sender, Job::Profiles(self.settings.clone()))
+            }
+            KeyCode::Char(value @ '1'..='5') if self.tab == 0 => {
+                self.performance.range = (value as u8 - b'1') as usize
+            }
             KeyCode::Char('q') => self.request_quit(sender),
             KeyCode::Tab => {
                 self.tab = (self.tab + 1) % TABS.len();
                 self.selected = 0;
                 self.scroll = 0;
+                if self.tab == 7 {
+                    self.open_actions();
+                }
             }
             KeyCode::BackTab => {
                 self.tab = (self.tab + TABS.len() - 1) % TABS.len();
                 self.selected = 0;
                 self.scroll = 0;
+                if self.tab == 7 {
+                    self.open_actions();
+                }
+            }
+            KeyCode::F(8) => self.open_actions(),
+            KeyCode::F(9) => {
+                self.tab = 8;
+                self.edit = None;
+                self.input = Input::default();
             }
             KeyCode::F(n) if (1..=7).contains(&n) => {
                 self.tab = n as usize - 1;
@@ -460,13 +889,10 @@ impl App {
                 self.input = Input::default();
             }
             KeyCode::Char('s') | KeyCode::Char('S') if self.tab == 6 => {
-                match settings::save(&self.config_path, &self.settings) {
-                    Ok(()) => self.notice = "Settings saved. Passwords remain session-only.".into(),
-                    Err(error) => {
-                        self.error = true;
-                        self.notice = error;
-                    }
-                }
+                self.submit(
+                    sender,
+                    Job::SaveSettings(self.config_path.clone(), self.settings.clone()),
+                );
             }
             KeyCode::Enter if self.tab == 1 => {
                 self.edit = Some(Edit::Console);
@@ -477,6 +903,8 @@ impl App {
                 self.input = Input::default();
             }
             KeyCode::Enter if self.tab == 6 => {
+                // Starting an edit expresses newer intent, even if it is later cleared or cancelled.
+                self.invalidate_credential_result(self.selected);
                 self.input = Input::new(self.field(self.selected));
                 self.edit = Some(Edit::Setting(self.selected));
             }
@@ -523,10 +951,32 @@ impl App {
             self.notice = "Wait for the current operation to finish before quitting safely.".into();
             return;
         }
+        if self.config.dirty() {
+            self.require_confirmation(
+                "Quit and discard unsaved config changes? The managed server will stop.".into(),
+                Job::Quit,
+            );
+            return;
+        }
         self.submit(sender, Job::Quit);
-        self.quitting = true;
-        self.notice = "Stopping the managed server and closing".into();
+        if self.quitting {
+            self.notice = "Stopping the managed server and closing".into();
+        }
     }
+}
+
+#[cfg(windows)]
+fn normalize_windows_altgr(mut key: KeyEvent) -> KeyEvent {
+    // Windows reports AltGr text as Ctrl+Alt; normalize before any shortcut handler.
+    if matches!(key.code, KeyCode::Char(character) if !character.is_control())
+        && key
+            .modifiers
+            .contains(KeyModifiers::CONTROL | KeyModifiers::ALT)
+    {
+        key.modifiers
+            .remove(KeyModifiers::CONTROL | KeyModifiers::ALT);
+    }
+    key
 }
 
 fn parse_port(value: &str) -> Result<u16, String> {
@@ -535,82 +985,6 @@ fn parse_port(value: &str) -> Result<u16, String> {
         .ok()
         .filter(|p| *p > 0)
         .ok_or_else(|| "Port must be between 1 and 65535.".into())
-}
-
-fn worker(
-    manager: FxserverManager,
-    runtime: Runtime,
-    jobs: Receiver<Job>,
-    updates: SyncSender<Update>,
-) -> Result<(), String> {
-    let mut cursor = None;
-    let mut last_status = Instant::now() - Duration::from_secs(2);
-    loop {
-        match jobs.recv_timeout(Duration::from_millis(100)) {
-            Ok(Job::Quit) | Err(mpsc::RecvTimeoutError::Disconnected) => {
-                manager.begin_shutdown();
-                let result = manager.stop_running_process();
-                let _ = updates.send(Update::Stopped(result.clone()));
-                return result;
-            }
-            Ok(job) => {
-                let event = match job {
-                    Job::Start(settings, force) => Update::Complete(runtime.block_on(async {
-                        let report = preflight(&settings, true).await?;
-                        if report.blocking && !force { return Err(format!("Preflight blocked start: {} errors. Run Checks to review, or explicitly force start.", report.error_count)); }
-                        manager.start(settings.launch()?).map(|result| format!("Started process {}", result.pid))
-                    })),
-                    Job::Stop => Update::Complete(manager.stop_running_process().map(|_| "Server stopped.".into())),
-                    Job::Restart(settings) => Update::Complete(settings.launch().and_then(|request| manager.restart(request)).map(|result| format!("Restarted process {}", result.pid))),
-                    Job::Rcon(request) => {
-                        let password = request.rcon.password.clone();
-                        let result = runtime.block_on(fxserver::send_fxserver_rcon_command(request));
-                        Update::Rcon(redact_rcon_password(result, &password))
-                    },
-                    Job::Resources(settings) => Update::Resources(runtime.block_on(fxserver::scan_fxserver_resources(ResourceScanRequest { tx_data_path: settings.tx_data_path, profile: settings.profile })).map(|r| r.resources)),
-                    Job::Catalog => Update::Catalog(runtime.block_on(artifact::get_windows_artifact_catalog(true)).map(|r| r.builds)),
-                    Job::Install(build, destination) => Update::Complete(artifact::install_legacy_for_manager(&manager, crate::models::artifact::ArtifactInstallRequest { version: build.version, url: build.download_url, destination, acknowledge_risk: true }).map(|r| format!("Installed {} in {}", r.version, r.destination))),
-                    Job::Query(credentials, sql) => Update::Complete((|| {
-                        let _lease = mariadb::access::database_access()?;
-                        let result = mariadb::query::execute_query(credentials, sql)?;
-                        if result.success {
-                            Ok(format!("{}\n{}", result.stdout, result.stderr))
-                        } else {
-                            Err(result.stderr)
-                        }
-                    })()),
-                    Job::Databases(credentials) => Update::Complete((|| {
-                        let _lease = mariadb::access::database_access()?;
-                        mariadb::query::list_databases(credentials).map(|names| names.join("\n"))
-                    })()),
-                    Job::Check(settings) => Update::Complete(runtime.block_on(preflight(&settings, true)).map(|r| r.checks.iter().map(|c| format!("{:?} | {}\n{}", c.severity, c.title, c.detail)).collect::<Vec<_>>().join("\n\n"))),
-                    Job::ReadSql(path) => Update::SqlFile(super::read_sql(&path)),
-                    Job::Quit => unreachable!(),
-                };
-                if updates.send(event).is_err() {
-                    manager.begin_shutdown();
-                    return manager.stop_running_process();
-                }
-            }
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
-        }
-        let entries = manager
-            .terminal(Some(500), cursor)
-            .map(|r| r.entries)
-            .unwrap_or_default();
-        let status = if last_status.elapsed() >= Duration::from_secs(1) {
-            last_status = Instant::now();
-            manager.status().ok()
-        } else {
-            None
-        };
-        let next = entries.last().map(|e| e.id).or(cursor);
-        if (status.is_some() || !entries.is_empty())
-            && updates.try_send(Update::Sample(status, entries)).is_ok()
-        {
-            cursor = next;
-        }
-    }
 }
 
 struct TerminalGuard;
@@ -660,14 +1034,30 @@ pub(super) fn run(config: Settings, path: PathBuf, runtime: Runtime) -> Result<(
     crossterm::execute!(io::stdout(), EnableBracketedPaste).map_err(|e| e.to_string())?;
     let (send, jobs) = mpsc::sync_channel(1);
     let (updates, receive) = mpsc::sync_channel(16);
+    let (progress, progress_events) = mpsc::sync_channel(32);
+    let monitor_stop = Arc::new(AtomicBool::new(false));
+    let monitor_manager = manager.clone();
+    let monitor_updates = updates.clone();
+    let monitor_stopping = monitor_stop.clone();
+    let monitoring =
+        thread::spawn(move || monitor(monitor_manager, monitor_updates, monitor_stopping));
     let worker_manager = manager.clone();
     let worker = thread::spawn(move || worker(worker_manager, runtime, jobs, updates));
     let mut app = App::new(config, path);
+    app.manager = manager.clone();
+    app.progress = Some(progress);
+    app.submit(&send, Job::LoadCredentials(Box::new(app.context())));
     let mut dirty = true;
     let mut last_draw = Instant::now();
     let result = (|| loop {
         if shutdown.requested() {
             return Ok(());
+        }
+        for message in progress_events.try_iter().take(32) {
+            if app.busy {
+                app.notice = message;
+                dirty = true;
+            }
         }
         for update in receive.try_iter().take(32) {
             dirty = true;
@@ -701,25 +1091,37 @@ pub(super) fn run(config: Settings, path: PathBuf, runtime: Runtime) -> Result<(
         }
     })();
     manager.begin_shutdown();
+    monitor_stop.store(true, Ordering::Relaxed);
     drop(send);
     drop(receive);
     drop(guard);
     let stopped = worker
         .join()
         .map_err(|_| "The terminal worker failed during shutdown.")?;
+    monitoring
+        .join()
+        .map_err(|_| "The terminal monitor failed during shutdown.")?;
     result.and(stopped)
 }
 
 fn tab_titles(width: u16, selected: usize) -> Vec<&'static str> {
-    const SHORT: [&str; 7] = ["Srv", "Log", "Res", "DB", "Build", "Check", "Set"];
+    const SHORT: [&str; 9] = [
+        "Srv", "Log", "Res", "DB", "Build", "Check", "Set", "Act", "Cfg",
+    ];
+    const TINY: [&str; 9] = ["1", "2", "3", "4", "5", "6", "7", "8", "9"];
     let full_width = TABS.iter().map(|title| title.len()).sum::<usize>() + 3 * (TABS.len() - 1);
+    let short_width = SHORT.iter().map(|title| title.len()).sum::<usize>() + 3 * (TABS.len() - 1)
+        - SHORT[selected].len()
+        + TABS[selected].len();
     TABS.iter()
         .enumerate()
         .map(|(index, title)| {
             if width as usize >= full_width || index == selected {
                 *title
-            } else {
+            } else if width as usize >= short_width {
                 SHORT[index]
+            } else {
+                TINY[index]
             }
         })
         .collect()
@@ -732,10 +1134,12 @@ fn footer_lines(tab: usize, width: u16) -> Vec<Line<'static>> {
         3 => "Enter: SQL  D: databases  F: SQL file",
         4 => "R: refresh  Enter: install",
         5 => "R: run preflight",
-        6 => "Enter: edit  S: save",
-        _ => "S: start  X: stop  R: restart",
+        6 => "Enter: edit  S: save  P: choose profile",
+        7 => "Type: search  Arrows: select  Enter: open",
+        8 => "R: load  Enter: edit  Ctrl+S: save  Ctrl+Z: undo",
+        _ => "S: start  X: stop  R: restart  1-5: time range",
     };
-    const GLOBAL: &str = "Tab/F1-F7: view  Q: quit";
+    const GLOBAL: &str = "F1-F9: view  Ctrl+K: actions  Ctrl+C: quit";
     let combined = format!("{GLOBAL}  {actions}");
     if combined.len() <= width as usize {
         vec![Line::raw(combined)]
@@ -760,7 +1164,7 @@ fn draw(frame: &mut Frame, app: &mut App) {
         Constraint::Length(1),
         Constraint::Length(2),
         Constraint::Min(5),
-        Constraint::Length(3),
+        Constraint::Length(if app.tab >= 7 { 1 } else { 3 }),
         Constraint::Length(footer.len() as u16),
     ])
     .split(area);
@@ -792,39 +1196,24 @@ fn draw(frame: &mut Frame, app: &mut App) {
     let body = block.inner(layout[2]);
     frame.render_widget(block, layout[2]);
     match app.tab {
-        0 => {
-            let mut lines = vec![
-                Line::from(format!(
-                    "Artifact: {}",
-                    safe_text(&app.settings.artifact_path)
-                )),
-                Line::from(format!(
-                    "txData:   {}",
-                    safe_text(&app.settings.tx_data_path)
-                )),
-                Line::from(""),
-            ];
-            if let Some(status) = &app.status {
-                if let Some(pid) = status.pid {
-                    lines.push(Line::from(format!("PID {pid}")));
-                }
-                if let Some(resources) = &status.resources {
-                    lines.push(Line::from(format!(
-                        "CPU {:.1}%    RAM {:.0} MiB    Threads {}    Handles/FDs {}",
-                        resources.cpu_percent,
-                        resources.memory_bytes as f64 / 1048576.,
-                        resources.thread_count,
-                        resources.handle_count
-                    )));
-                }
-            }
-            lines.push(Line::from(""));
-            lines.push(Line::from(
-                "Start [S]    Stop [X]    Restart [R]    Force start [F]",
-            ));
-            frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), body);
+        0 => app
+            .performance
+            .draw(frame, body, app.status.as_ref(), &app.settings),
+        1 => {
+            let end = app
+                .logs
+                .len()
+                .saturating_sub(app.scroll.min(app.logs.len().saturating_sub(1)));
+            let start = end.saturating_sub(body.height as usize);
+            let lines: Vec<_> = app
+                .logs
+                .iter()
+                .skip(start)
+                .take(end - start)
+                .cloned()
+                .collect();
+            frame.render_widget(Paragraph::new(lines), body);
         }
-        1 => render_output(frame, body, app.logs.iter(), app.scroll),
         2 => {
             let items: Vec<_> = app
                 .resources
@@ -892,6 +1281,8 @@ fn draw(frame: &mut Frame, app: &mut App) {
                 .collect();
             render_list(frame, body, items, app.selected, "");
         }
+        7 => app.actions.draw(frame, body),
+        8 => app.config.draw(frame, body),
         _ => render_output(frame, body, app.output.iter(), app.scroll),
     }
     if let Some(edit) = &app.edit {
@@ -935,6 +1326,36 @@ fn draw(frame: &mut Frame, app: &mut App) {
         );
     }
     frame.render_widget(Paragraph::new(footer).fg(Color::DarkGray), layout[4]);
+    if let Some(picker) = &app.picker {
+        let modal = Rect::new(
+            3,
+            3,
+            area.width.saturating_sub(6),
+            area.height.saturating_sub(6),
+        );
+        let title = match picker.kind {
+            Selection::Database => "Choose database",
+            Selection::Profile(_) => "Choose profile",
+        };
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(title)
+            .title_bottom("Arrows: select  Enter: choose  Esc: cancel");
+        let inner = block.inner(modal);
+        frame.render_widget(ratatui::widgets::Clear, modal);
+        frame.render_widget(block, modal);
+        render_list(
+            frame,
+            inner,
+            picker
+                .values
+                .iter()
+                .map(|value| ListItem::new(safe_text(value)))
+                .collect(),
+            picker.selected,
+            "No matches found.",
+        );
+    }
     if let Some((preview, _)) = &mut app.confirm {
         let width = area.width.saturating_sub(6);
         let height = area.height.saturating_sub(6);
@@ -994,6 +1415,421 @@ fn render_output<'a>(
 mod tests {
     use super::*;
     use ratatui::{backend::TestBackend, Terminal};
+
+    fn queue_job(app: &mut App, job: Job) {
+        let (send, jobs) = mpsc::sync_channel(1);
+        app.submit(&send, job);
+        assert!(jobs.try_recv().is_ok());
+    }
+
+    fn queue_restore(app: &mut App) -> Box<operations::Context> {
+        let context = Box::new(app.context());
+        queue_job(app, Job::LoadCredentials(context.clone()));
+        context
+    }
+
+    fn queue_login(app: &mut App) {
+        let context = app.context();
+        queue_job(
+            app,
+            Job::Action(Box::new((
+                context,
+                operations::Submission {
+                    id: "database.load-login".into(),
+                    values: Default::default(),
+                },
+            ))),
+        );
+    }
+
+    #[test]
+    fn endpoint_and_profile_edits_clear_only_affected_session_secrets() {
+        for (field, value, clear_database, clear_rcon) in [
+            (0, "other-artifacts", true, true),
+            (1, "other-txdata", true, true),
+            (2, "other-profile", true, true),
+            (3, "other-rcon", false, true),
+            (4, "30121", false, true),
+            (5, "other-db", true, false),
+            (6, "3307", true, false),
+            (7, "other-user", true, false),
+            (8, "other-schema", false, false),
+        ] {
+            let mut app = App::new(Settings::default(), PathBuf::new());
+            app.database_password = "database-secret".into();
+            app.rcon_password = "rcon-secret".into();
+            app.set_field(field, app.field(field)).unwrap();
+            assert_eq!(app.database_password, "database-secret");
+            assert_eq!(app.rcon_password, "rcon-secret");
+            app.set_field(field, value.into()).unwrap();
+            assert_eq!(
+                app.database_password.is_empty(),
+                clear_database,
+                "field {field}"
+            );
+            assert_eq!(app.rcon_password.is_empty(), clear_rcon, "field {field}");
+        }
+    }
+
+    #[test]
+    fn invalid_ports_do_not_change_session_credentials() {
+        let mut app = App::new(Settings::default(), PathBuf::new());
+        app.database_password = "database-secret".into();
+        app.rcon_password = "rcon-secret".into();
+        for field in [4, 6] {
+            let original = app.field(field);
+            for value in ["0", "65536", "not-a-port"] {
+                assert!(app.set_field(field, value.into()).is_err());
+                assert_eq!(app.field(field), original);
+                assert_eq!(app.database_password, "database-secret");
+                assert_eq!(app.rcon_password, "rcon-secret");
+            }
+        }
+    }
+
+    #[test]
+    fn queued_start_keeps_its_profile_until_the_operation_finishes() {
+        let mut app = App::new(Settings::default(), PathBuf::new());
+        let (send, receive) = mpsc::sync_channel(1);
+        app.submit(&send, Job::Start(app.settings.clone(), false));
+        assert!(matches!(receive.try_recv(), Ok(Job::Start(..))));
+        assert!(app.set_field(2, "different-profile".into()).is_err());
+        assert_ne!(app.settings.profile, "different-profile");
+        app.update(Update::Complete(Err("fixture start failed".into())));
+        assert!(app.set_field(2, "different-profile".into()).is_ok());
+    }
+
+    #[test]
+    fn profile_picker_clears_credentials_when_only_txdata_path_changes() {
+        let mut app = App::new(Settings::default(), PathBuf::new());
+        app.database_password = "database-secret".into();
+        app.rcon_password = "rcon-secret".into();
+        app.picker = Some(Picker {
+            kind: Selection::Profile("other-txdata".into()),
+            values: vec![app.settings.profile.clone()],
+            selected: 0,
+        });
+        let (send, jobs) = mpsc::sync_channel(1);
+        app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &send);
+        assert_eq!(app.settings.tx_data_path, "other-txdata");
+        assert!(app.database_password.is_empty() && app.rcon_password.is_empty());
+        assert!(jobs.try_recv().is_err());
+    }
+
+    #[test]
+    fn startup_restore_rejects_change_and_revert_and_explicit_password_clear() {
+        for (field, value) in [
+            (0, "other-artifacts"),
+            (1, "other-txdata"),
+            (2, "other-profile"),
+            (3, "other-rcon"),
+            (4, "30121"),
+            (5, "other-db"),
+            (6, "3307"),
+            (7, "other-user"),
+            (8, "other-schema"),
+            (9, ""),
+            (10, ""),
+        ] {
+            let mut app = App::new(Settings::default(), PathBuf::new());
+            let context = queue_restore(&mut app);
+            let original = app.field(field);
+            app.set_field(field, value.into()).unwrap();
+            app.set_field(field, original).unwrap();
+            let mut credentials = context.credentials.clone();
+            credentials.password = "stored-database".into();
+            app.update(Update::Credentials(
+                context,
+                Ok(Some(credentials)),
+                Ok(Some("stored-rcon".into())),
+            ));
+            assert_eq!(
+                app.database_password.is_empty(),
+                matches!(field, 0..=2 | 5..=8 | 10),
+                "field {field}"
+            );
+            assert_eq!(
+                app.rcon_password.is_empty(),
+                matches!(field, 0..=4 | 9),
+                "field {field}"
+            );
+        }
+    }
+
+    #[test]
+    fn starting_password_edit_prevents_startup_restore_even_before_commit() {
+        for field in [9, 10] {
+            let mut app = App::new(Settings::default(), PathBuf::new());
+            let context = queue_restore(&mut app);
+            app.tab = 6;
+            app.selected = field;
+            let (send, _) = mpsc::sync_channel(1);
+            app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &send);
+            let mut credentials = context.credentials.clone();
+            credentials.password = "stored-database".into();
+            app.update(Update::Credentials(
+                context,
+                Ok(Some(credentials)),
+                Ok(Some("stored-rcon".into())),
+            ));
+            assert_eq!(app.database_password.is_empty(), field == 10);
+            assert_eq!(app.rcon_password.is_empty(), field == 9);
+            assert!(app.input.value.is_empty());
+        }
+    }
+
+    #[test]
+    fn late_login_actions_do_not_overwrite_newer_connection_or_password_edits() {
+        for (field, value) in [
+            (0, "other-artifacts"),
+            (1, "other-txdata"),
+            (2, "other-profile"),
+            (5, "other-db"),
+            (6, "3307"),
+            (7, "other-user"),
+            (8, "other-schema"),
+            (10, "new-password"),
+        ] {
+            let mut app = App::new(Settings::default(), PathBuf::new());
+            let mut credentials = app.credentials();
+            credentials.password = "stale-password".into();
+            queue_login(&mut app);
+            app.set_field(field, value.into()).unwrap();
+            app.update(Update::Action(Ok(operations::Outcome::Login(credentials))));
+            assert_eq!(app.field(field), value);
+            assert_ne!(app.database_password, "stale-password");
+            assert!(app.notice.contains("ignored"));
+        }
+        for (field, value) in [
+            (0, "other-artifacts"),
+            (1, "other-txdata"),
+            (2, "other-profile"),
+            (3, "other-rcon"),
+            (4, "30121"),
+            (9, "new-password"),
+        ] {
+            let mut app = App::new(Settings::default(), PathBuf::new());
+            queue_login(&mut app);
+            app.set_field(field, value.into()).unwrap();
+            app.update(Update::Action(Ok(operations::Outcome::RconPassword(
+                "stale-password".into(),
+            ))));
+            assert_eq!(app.field(field), value);
+            assert_ne!(app.rcon_password, "stale-password");
+            assert!(app.notice.contains("ignored"));
+        }
+    }
+
+    #[test]
+    fn credential_results_remain_masked_and_do_not_replace_later_user_input() {
+        let mut app = App::new(Settings::default(), PathBuf::new());
+        let context = queue_restore(&mut app);
+        app.set_field(10, "entered-during-load".into()).unwrap();
+        let mut credentials = app.credentials();
+        credentials.password = "older-stored-secret".into();
+        app.update(Update::Credentials(
+            context,
+            Ok(Some(credentials.clone())),
+            Ok(Some("stored-rcon".into())),
+        ));
+        assert_eq!(app.database_password, "entered-during-load");
+        assert_eq!(app.rcon_password, "stored-rcon");
+        queue_login(&mut app);
+        app.update(Update::Action(Ok(operations::Outcome::Login(credentials))));
+        assert_eq!(app.database_password, "older-stored-secret");
+        assert_eq!(app.notice, "Complete. Actions > Ctrl+O shows the result.");
+        queue_login(&mut app);
+        app.set_field(8, "other-schema".into()).unwrap();
+        app.update(Update::Action(Ok(operations::Outcome::RconPassword(
+            "new-rcon-secret".into(),
+        ))));
+        assert_eq!(app.rcon_password, "new-rcon-secret");
+        app.tab = 7;
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(!text.contains("older-stored-secret") && !text.contains("new-rcon-secret"));
+        app.update(Update::Action(Err("fixture failure".into())));
+        assert_eq!(
+            app.notice,
+            "Action failed. Actions > Ctrl+O shows the result."
+        );
+    }
+
+    fn open_config_fixture(app: &mut App) {
+        let file = ServerConfigFile {
+            name: "server.cfg".into(),
+            path: "fixture.cfg".into(),
+            content: "ensure fixture\n".into(),
+            size: 15,
+            modified: None,
+            has_rcon_password: false,
+            has_rconlog: false,
+        };
+        assert!(app.config.loaded(app.settings.clone(), vec![file]));
+        app.config
+            .key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    }
+
+    #[test]
+    fn config_scope_changes_reject_dirty_editor_and_preserve_unchanged_scope() {
+        for field in 0..=2 {
+            let mut app = App::new(Settings::default(), PathBuf::new());
+            open_config_fixture(&mut app);
+            app.config.paste("# unsaved\n");
+            app.database_password = "database-secret".into();
+            app.rcon_password = "rcon-secret".into();
+            let original = app.field(field);
+            assert!(app.set_field(field, "other-scope".into()).is_err());
+            assert_eq!(app.field(field), original);
+            assert!(app.config.dirty());
+            assert_eq!(app.database_password, "database-secret");
+            assert_eq!(app.rcon_password, "rcon-secret");
+            app.set_field(field, original).unwrap();
+            assert!(app.config.dirty());
+        }
+    }
+
+    #[test]
+    fn config_scope_changes_clear_cached_files_and_reject_old_load_responses() {
+        for field in 0..=2 {
+            let mut app = App::new(Settings::default(), PathBuf::new());
+            open_config_fixture(&mut app);
+            let old_settings = app.settings.clone();
+            app.set_field(field, "other-scope".into()).unwrap();
+            app.config
+                .key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+            app.config.paste("would dirty an old editor");
+            assert!(!app.config.dirty());
+            app.update(Update::Config(old_settings, Ok(Vec::new())));
+            assert!(app.notice.contains("stale reload ignored"));
+            assert!(!app.busy);
+        }
+    }
+
+    #[test]
+    fn config_reload_reports_skipped_when_editor_is_already_open() {
+        for dirty in [false, true] {
+            let mut app = App::new(Settings::default(), PathBuf::new());
+            open_config_fixture(&mut app);
+            if dirty {
+                app.config.paste("# unsaved\n");
+            }
+            app.update(Update::Config(app.settings.clone(), Ok(Vec::new())));
+            assert_eq!(app.notice, "Reload skipped: close the open editor first.");
+            assert_eq!(app.config.dirty(), dirty);
+            let config::Event::Save { content, .. } = app
+                .config
+                .key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))
+            else {
+                panic!("Reload removed the existing editor");
+            };
+            assert!(content.contains("ensure fixture"));
+            assert_eq!(content.contains("# unsaved"), dirty);
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_altgr_inserts_text_without_triggering_control_shortcuts() {
+        let mut app = App::new(Settings::default(), PathBuf::new());
+        app.tab = 6;
+        app.selected = 10;
+        let (send, jobs) = mpsc::sync_channel(1);
+        app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &send);
+        for character in "@{}cuk".chars() {
+            app.key(
+                KeyEvent::new(
+                    KeyCode::Char(character),
+                    KeyModifiers::CONTROL | KeyModifiers::ALT,
+                ),
+                &send,
+            );
+        }
+        assert_eq!(app.input.value, "@{}cuk");
+        assert!(!app.quitting);
+        assert_eq!(app.tab, 6);
+        assert!(jobs.try_recv().is_err());
+        let shifted = normalize_windows_altgr(KeyEvent::new(
+            KeyCode::Char('{'),
+            KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SHIFT,
+        ));
+        assert_eq!(shifted.modifiers, KeyModifiers::SHIFT);
+
+        app.key(
+            KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL),
+            &send,
+        );
+        assert!(app.input.value.is_empty());
+        app.key(
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+            &send,
+        );
+        assert!(matches!(jobs.try_recv(), Ok(Job::Quit)));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_altgr_preserves_config_editor_text_and_ctrl_save() {
+        let mut app = App::new(Settings::default(), PathBuf::new());
+        open_config_fixture(&mut app);
+        app.tab = 8;
+        let (send, jobs) = mpsc::sync_channel(1);
+        for character in "@{}".chars() {
+            app.key(
+                KeyEvent::new(
+                    KeyCode::Char(character),
+                    KeyModifiers::CONTROL | KeyModifiers::ALT,
+                ),
+                &send,
+            );
+        }
+        assert!(app.config.dirty());
+        app.key(
+            KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL),
+            &send,
+        );
+        let Ok(Job::SaveConfig(_, request, _)) = jobs.try_recv() else {
+            panic!("Ctrl+S did not request config save");
+        };
+        assert!(request.content.contains("@{}"));
+        assert!(jobs.try_recv().is_err());
+    }
+
+    #[test]
+    fn database_picker_selects_scope_without_another_connection_or_query() {
+        let mut app = App::new(Settings::default(), PathBuf::new());
+        let (send, jobs) = mpsc::sync_channel(1);
+        app.update(Update::Databases(Ok(vec!["first".into(), "second".into()])));
+        app.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &send);
+        app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &send);
+        assert_eq!(app.settings.database, "second");
+        assert!(jobs.try_recv().is_err());
+    }
+
+    #[test]
+    fn action_navigation_stays_available_while_a_job_is_running() {
+        let mut app = App::new(Settings::default(), PathBuf::new());
+        let (send, jobs) = mpsc::sync_channel(1);
+        app.submit(&send, Job::Catalog);
+        app.key(
+            KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL),
+            &send,
+        );
+        assert_eq!(app.tab, 7);
+        app.paste("profile");
+        app.key(KeyEvent::new(KeyCode::F(9), KeyModifiers::NONE), &send);
+        assert_eq!(app.tab, 8);
+        assert!(app.busy);
+        assert!(matches!(jobs.try_recv(), Ok(Job::Catalog)));
+        assert!(jobs.try_recv().is_err());
+    }
 
     #[test]
     fn paste_never_submits_commands_or_accepts_a_confirmation() {
@@ -1193,7 +2029,10 @@ mod tests {
             .collect();
         assert!(content.contains("[RCON] online: 3"));
         assert!(!content.contains("session-secret") && !content.contains("command-secret"));
-        assert!(!app.logs.iter().any(|line| line.contains('\x1b')));
+        assert!(!app
+            .logs
+            .iter()
+            .any(|line| line.to_string().contains('\x1b')));
         app.update(Update::Rcon(Ok("line\n".repeat(MAX_LINES + 10))));
         assert_eq!(app.logs.len(), MAX_LINES);
         app.update(Update::Rcon(redact_rcon_password(
@@ -1201,7 +2040,10 @@ mod tests {
             &request.rcon.password,
         )));
         assert!(app.error);
-        assert_eq!(app.logs.back().unwrap(), "[RCON error] denied [redacted]");
+        assert_eq!(
+            app.logs.back().unwrap().to_string(),
+            "[RCON error] denied [redacted]"
+        );
         assert_eq!(app.logs.len(), MAX_LINES);
     }
 }

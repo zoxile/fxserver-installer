@@ -219,6 +219,15 @@ impl ConfirmationPreview {
     }
 
     pub(super) fn draw(&mut self, frame: &mut Frame, area: Rect) {
+        let title = if self.escaped {
+            "Confirm Y | N/Esc | Escaped preview"
+        } else {
+            "Confirm Y | Cancel N/Esc"
+        };
+        self.draw_panel(frame, area, title);
+    }
+
+    pub(super) fn draw_panel(&mut self, frame: &mut Frame, area: Rect, title: &str) {
         let block = Block::default().borders(Borders::ALL);
         let inner = block.inner(area);
         self.resize(inner.width as usize, inner.height as usize);
@@ -228,11 +237,6 @@ impl ConfirmationPreview {
             format!("{range} | PgUp/PgDn Home/End")
         } else {
             format!("{range} | PgUp/PgDn")
-        };
-        let title = if self.escaped {
-            "Confirm Y | N/Esc | Escaped preview"
-        } else {
-            "Confirm Y | Cancel N/Esc"
         };
         frame.render_widget(Clear, area);
         frame.render_widget(

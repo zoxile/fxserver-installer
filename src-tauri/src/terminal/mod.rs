@@ -1,3 +1,4 @@
+mod actions;
 mod database;
 mod settings;
 mod shutdown;
@@ -25,7 +26,7 @@ use std::{
 
 #[derive(Parser)]
 #[command(
-    name = "fxserver-manager",
+    name = "fxins",
     version,
     about = "FXServer desktop services, from your terminal"
 )]

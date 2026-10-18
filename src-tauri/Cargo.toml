@@ -11,12 +11,17 @@ default-run = "app"
 [features]
 default = ["desktop"]
 desktop = ["dep:tauri", "dep:tauri-build", "dep:tauri-plugin-log", "dep:tauri-plugin-dialog", "dep:tauri-plugin-single-instance", "dep:glib"]
-terminal = ["dep:clap", "dep:crossterm", "dep:ratatui", "dep:rpassword", "dep:unicode-width"]
+terminal = ["dep:clap", "dep:crossterm", "dep:ratatui", "dep:ratatui-textarea", "dep:rpassword", "dep:unicode-width"]
 
 [[bin]]
 name = "app"
 path = "src/main.rs"
 required-features = ["desktop"]
+
+[[bin]]
+name = "fxins"
+path = "src/bin/fxins.rs"
+required-features = ["terminal"]
 
 [[bin]]
 name = "fxserver-manager"
@@ -46,6 +51,7 @@ fs2 = "0.4"
 clap = { version = "4.5", features = ["derive"], optional = true }
 crossterm = { version = "0.29", optional = true }
 ratatui = { version = "0.30.2", default-features = false, features = ["crossterm"], optional = true }
+ratatui-textarea = { version = "0.9.3", features = ["search"], optional = true }
 rpassword = { version = "7", optional = true }
 unicode-width = { version = "0.2", optional = true }
 tauri = { version = "2.11.0", features = ["tray-icon"], optional = true }
