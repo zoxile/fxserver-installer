@@ -4,6 +4,7 @@ import configparser
 import os
 from pathlib import Path
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -45,10 +46,17 @@ for kind, package in (("deb", deb), ("rpm", rpm), ("appimage", appimage)):
         assert binaries, f"No application binary in {kind} package"
         assert all(path.stat().st_mode & 0o111 for path in binaries), f"Application is not executable in {kind}"
         assert list(destination.rglob("*.png")), f"No icon in {kind} package"
-        terminals = [path for path in destination.rglob("fxserver-manager") if path.is_file() and "bin" in path.parts]
-        assert len(terminals) == 1, f"Expected one terminal executable in {kind}, found {terminals}"
-        assert terminals[0].stat().st_mode & 0o111, f"Terminal is not executable in {kind}"
+        package_root = destination / "squashfs-root" if kind == "appimage" else destination
+        terminal_dir = package_root / "usr/bin"
+        terminals = [terminal_dir / name for name in ("fxins", "fxserver-manager")]
+        for terminal in terminals:
+            assert terminal.is_file(), f"Missing {terminal.name} in {kind} /usr/bin"
+            assert terminal.stat().st_mode & 0o111, f"{terminal.name} is not executable in {kind}"
         environment = {key: value for key, value in os.environ.items() if key not in ("DISPLAY", "WAYLAND_DISPLAY", "DBUS_SESSION_BUS_ADDRESS")}
-        result = subprocess.run([str(terminals[0]), "--help"], env=environment, capture_output=True, text=True, check=True, timeout=20)
-        assert "database" in result.stdout and "--help" in result.stdout, f"Missing terminal commands in {kind}"
+        environment["PATH"] = str(terminal_dir) + os.pathsep + environment.get("PATH", "")
+        for terminal in terminals:
+            assert Path(shutil.which(terminal.name, path=environment["PATH"])).resolve() == terminal.resolve()
+            result = subprocess.run([terminal.name, "--help"], env=environment, capture_output=True, text=True, check=True, timeout=20)
+            assert "database" in result.stdout and "--help" in result.stdout, f"Missing terminal commands in {kind}"
+        subprocess.run(["node", str(Path(__file__).with_name("smoke-cli.mjs").resolve()), *(str(path) for path in terminals)], env=environment, check=True, timeout=120)
 print("DEB, RPM, and AppImage metadata, desktop contents, and terminal startup passed.")

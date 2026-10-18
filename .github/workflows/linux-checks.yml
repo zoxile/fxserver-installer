@@ -87,6 +87,9 @@ jobs:
       - name: Check headless terminal
         run: cargo check --manifest-path src-tauri/Cargo.toml --locked --no-default-features --features terminal --all-targets
 
+      - name: Check headless Rust quality
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --locked --no-default-features --features terminal --all-targets -- -D warnings
+
       - name: Test headless safeguards
         run: cargo test --manifest-path src-tauri/Cargo.toml --locked --no-default-features --features terminal
 
@@ -100,7 +103,9 @@ jobs:
       - name: Smoke test native terminal
         id: terminal
         run: |
-          cargo build --manifest-path src-tauri/Cargo.toml --locked --no-default-features --features terminal --bin fxserver-manager
+          cargo build --manifest-path src-tauri/Cargo.toml --locked --no-default-features --features terminal --bin fxins --bin fxserver-manager
+          node scripts/smoke-cli.mjs src-tauri/target/debug/fxins src-tauri/target/debug/fxserver-manager
+          python3 scripts/test-terminal-pty.py src-tauri/target/debug/fxins
           python3 scripts/test-terminal-pty.py src-tauri/target/debug/fxserver-manager
 
       - name: Build frontend

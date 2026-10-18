@@ -81,6 +81,23 @@ jobs:
       - name: Test native safeguards
         run: cargo test --manifest-path src-tauri/Cargo.toml --locked
 
+      - name: Smoke test both terminal commands without installing
+        run: |
+          cargo build --manifest-path src-tauri/Cargo.toml --locked --no-default-features --features terminal --bin fxins --bin fxserver-manager
+          if ($LASTEXITCODE -ne 0) { throw "Terminal build failed." }
+          node scripts/smoke-cli.mjs src-tauri/target/debug/fxins.exe src-tauri/target/debug/fxserver-manager.exe
+          if ($LASTEXITCODE -ne 0) { throw "Terminal smoke test failed." }
+
+      - name: Test native terminal interaction in ConPTY
+        timeout-minutes: 5
+        run: |
+          python -m unittest discover -s scripts/tests -p test_terminal_screen.py -v
+          if ($LASTEXITCODE -ne 0) { throw "Terminal screen tests failed." }
+          python scripts/test-terminal-conpty.py src-tauri/target/debug/fxins.exe
+          if ($LASTEXITCODE -ne 0) { throw "fxins ConPTY smoke test failed." }
+          python scripts/test-terminal-conpty.py src-tauri/target/debug/fxserver-manager.exe
+          if ($LASTEXITCODE -ne 0) { throw "Compatibility command ConPTY smoke test failed." }
+
       - name: Build frontend for browser checks
         run: npm run build
 

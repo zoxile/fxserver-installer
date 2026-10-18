@@ -1,4 +1,4 @@
-"""Smoke-test the real Linux terminal without starting a server or connecting to SQL."""
+"""Linux terminal smoke using disposable config and inert server fixtures only."""
 
 import errno
 import fcntl
@@ -14,6 +14,10 @@ import tempfile
 import termios
 import time
 from pathlib import Path
+
+from terminal_smoke import (
+    Probe, actions_and_config, assert_unchanged, config_fixture, isolated_environment,
+)
 
 
 def server_signal_smoke(binary: Path, root: Path, shutdown_signal: signal.Signals) -> None:
@@ -41,7 +45,7 @@ def server_signal_smoke(binary: Path, root: Path, shutdown_signal: signal.Signal
         str(binary), "--config", str(root / "terminal.json"),
         "--artifact-path", str(artifact), "--tx-data-path", str(txdata), "run", "--force",
     ]
-    with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE) as process:
+    with subprocess.Popen(command, env=isolated_environment(root), stdout=subprocess.PIPE, stderr=subprocess.PIPE) as process:
         try:
             deadline = time.monotonic() + 15
             while not (txdata / "fixture.pid").exists():
@@ -60,10 +64,12 @@ def server_signal_smoke(binary: Path, root: Path, shutdown_signal: signal.Signal
                 process.communicate(timeout=5)
 
 
-def smoke(binary: Path, config: Path, shutdown_signal: signal.Signals | None) -> None:
-    command = [str(binary), "--config", str(config)]
+def smoke(binary: Path, root: Path, shutdown_signal: signal.Signals | None) -> None:
+    arguments, files = config_fixture(root)
+    command = [str(binary), *arguments]
+    environment = isolated_environment(root)
     preview = subprocess.run(
-        [*command, "query", "SELECT 1;"], check=True, capture_output=True, timeout=10
+        [*command, "query", "SELECT 1;"], env=environment, check=True, capture_output=True, timeout=10
     )
     assert b"Preview only" in preview.stdout
     ready_read, ready_write = os.pipe()
@@ -73,41 +79,38 @@ def smoke(binary: Path, config: Path, shutdown_signal: signal.Signals | None) ->
         os.read(ready_read, 1)
         os.close(ready_read)
         fcntl.ioctl(0, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
-        os.execvpe(str(binary), [*command, "tui"], {**os.environ, "TERM": "xterm-256color"})
+        action = [] if shutdown_signal is None else ["tui"]
+        try:
+            os.execvpe(str(binary), [*command, *action], environment)
+        except BaseException:
+            os._exit(127)
 
     os.close(ready_read)
     before = termios.tcgetattr(master)
     os.write(ready_write, b"1")
     os.close(ready_write)
-    output = bytearray()
     exited = False
 
-    def wait_for(marker: bytes) -> None:
-        deadline = time.monotonic() + 15
-        while marker not in output:
-            if time.monotonic() >= deadline:
-                raise AssertionError(f"TUI did not render {marker!r}; output: {output[-3000:]!r}")
-            if not select.select([master], [], [], 0.1)[0]:
-                continue
-            try:
-                chunk = os.read(master, 65536)
-            except OSError as error:
-                if error.errno == errno.EIO:
-                    raise AssertionError("TUI exited before rendering the expected view") from error
-                raise
-            if not chunk:
-                raise AssertionError("TUI closed its output unexpectedly")
-            output.extend(chunk)
-            if len(output) > 256 * 1024:
-                raise AssertionError("Idle TUI produced excessive output")
+    def read(timeout):
+        if not select.select([master], [], [], timeout)[0]:
+            return None
+        try:
+            return os.read(master, 65536)
+        except OSError as error:
+            if error.errno == errno.EIO:
+                return b""
+            raise
 
+    probe = Probe(lambda data: os.write(master, data), read)
     try:
-        wait_for(b"FXServer Installer")
-        assert b"\x1b[?2004h" in output, "Bracketed paste was not enabled"
+        probe.contains("FXServer Installer")
+        assert probe.screen.bracketed_paste, "Bracketed paste was not enabled"
         os.write(master, b"\x1b[200~q\x1b[201~")
         os.write(master, b"\t" * 6)
-        wait_for(b"password")
+        probe.expect(lambda text: "password" in text.lower(), "Settings password fields")
         if shutdown_signal is None:
+            actions_and_config(probe)
+            assert_unchanged(files)
             os.write(master, b"q")
         else:
             os.kill(pid, shutdown_signal)
@@ -123,6 +126,7 @@ def smoke(binary: Path, config: Path, shutdown_signal: signal.Signals | None) ->
         restored = termios.tcgetattr(master)
         flags = termios.ECHO | termios.ICANON | termios.ISIG
         assert restored[3] & flags == before[3] & flags, "Terminal settings were not restored"
+        assert_unchanged(files)
     finally:
         if not exited:
             os.kill(pid, signal.SIGKILL)
@@ -134,7 +138,7 @@ if __name__ == "__main__":
     executable = Path(sys.argv[1]).resolve(strict=True)
     with tempfile.TemporaryDirectory(prefix="fxi-terminal-smoke-") as directory:
         for shutdown in (None, signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
-            smoke(executable, Path(directory) / "terminal.json", shutdown)
+            smoke(executable, Path(directory) / f"tui-{shutdown or 'quit'}", shutdown)
             if shutdown is not None:
                 server_signal_smoke(executable, Path(directory) / shutdown.name, shutdown)
-    print("Terminal navigation, paste safety, SQL preview, signal shutdown, and mode restoration passed.")
+    print("Terminal actions/forms, cfg edit/undo/discard, paste safety, SQL preview, signal shutdown, and mode restoration passed.")
