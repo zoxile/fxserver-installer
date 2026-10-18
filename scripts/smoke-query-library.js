@@ -21,6 +21,7 @@ async (page) => {
           throw new Error("Fixture command was called without validation");
         }
         switch (command) {
+          case "get_platform_info": return { os: "windows", arch: "x86_64", artifactPlatform: "windows", clientLogsSupported: true, secureStorageSupported: true };
           case "fetch_latest_app_release": return null;
           case "plugin:window|title": return "FXServer Installer";
           case "plugin:app|version": return "0.5.1";

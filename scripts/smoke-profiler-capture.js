@@ -46,6 +46,7 @@ async (page) => {
       invoke: async (command, args = {}) => {
         state.calls.push({ command, args });
         switch (command) {
+          case "get_platform_info": return { os: "windows", arch: "x86_64", artifactPlatform: "windows", clientLogsSupported: true, secureStorageSupported: true };
           case "capture_fxserver_profile": {
             const request = args.request;
             if (Object.keys(request).sort().join(",") !== "frames,rcon") throw new Error("Unexpected capture arguments");

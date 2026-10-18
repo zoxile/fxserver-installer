@@ -17,6 +17,7 @@ async (page) => {
       transformCallback: () => ++sequence,
       invoke: async (command, args = {}) => {
         switch (command) {
+          case "get_platform_info": return { os: "windows", arch: "x86_64", artifactPlatform: "windows", clientLogsSupported: true, secureStorageSupported: true };
           case "plugin:app|version": return "0.5.1";
           case "plugin:window|title": return "FXServer Installer";
           case "plugin:event|listen": return ++sequence;

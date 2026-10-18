@@ -16,6 +16,7 @@ async (page) => {
       invoke: async (command, args = {}) => {
         state.calls.push(command);
         switch (command) {
+          case "get_platform_info": return { os: "windows", arch: "x86_64", artifactPlatform: "windows", clientLogsSupported: true, secureStorageSupported: true };
           case "plugin:window|title": return "FXServer Installer";
           case "plugin:app|version": return "0.5.1";
           case "plugin:event|listen": return ++callback;

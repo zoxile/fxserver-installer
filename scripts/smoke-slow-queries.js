@@ -16,6 +16,7 @@ async (page) => {
       invoke: async (command, args = {}) => {
         state.calls.push({ command, args });
         switch (command) {
+          case "get_platform_info": return { os: "windows", arch: "x86_64", artifactPlatform: "windows", clientLogsSupported: true, secureStorageSupported: true };
           case "load_database_login": return { host: "localhost", port: 3306, username: "fixture", password: "fixture", database: "fixture" };
           case "save_database_login": case "clear_database_login": case "initialize_health_workspace": case "append_app_log": case "plugin:event|unlisten": case "validate_mariadb_credentials": return;
           case "plugin:event|listen": return args.handler;

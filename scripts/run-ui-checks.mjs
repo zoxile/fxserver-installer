@@ -29,7 +29,11 @@ try {
     });
     const page = await context.newPage();
     page.setDefaultTimeout(15_000);
-    await page.addInitScript(() => { window.confirm = () => true; });
+    await page.addInitScript(() => {
+      window.confirm = () => true;
+      // These fixtures model Windows; linux-ui-smoke.mjs covers native platform authority separately.
+      Object.defineProperty(navigator, "platform", { value: "Win32" });
+    });
     try {
       await page.goto(url);
       const run = runInThisContext(await readFile(`scripts/${name}`, "utf8"), { filename: name });

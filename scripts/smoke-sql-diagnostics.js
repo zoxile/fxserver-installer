@@ -24,6 +24,7 @@ async (page) => {
       invoke: async (command, args = {}) => {
         state.calls.push(command);
         switch (command) {
+          case "get_platform_info": return { os: "windows", arch: "x86_64", artifactPlatform: "windows", clientLogsSupported: true, secureStorageSupported: true };
           case "load_database_login": return { host: "localhost", port: 3306, username: "fixture", password: "private-fixture", database: "fixture" };
           case "save_database_login":
           case "clear_database_login":

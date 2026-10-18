@@ -18,6 +18,7 @@ async (page) => {
       invoke: async (command, args = {}) => {
         state.calls.push({ command, args: structuredClone(args) });
         switch (command) {
+          case "get_platform_info": return { os: "windows", arch: "x86_64", artifactPlatform: "windows", clientLogsSupported: true, secureStorageSupported: true };
           case "fetch_latest_app_release": return { version: "0.4.1", tagName: "v0.4.1", htmlUrl: "https://github.com/zoxile/fxserver-installer/releases/tag/v0.4.1", installerUrl: "https://github.com/zoxile/fxserver-installer/releases/download/v0.4.1/FXServer.Installer_0.4.1_windows_x64-setup.exe" };
           case "plugin:window|title": return "FXServer Installer";
           case "plugin:app|version": return "0.4.1";
