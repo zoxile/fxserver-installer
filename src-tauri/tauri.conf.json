@@ -4,6 +4,7 @@
   "version": "0.5.2",
   "identifier": "com.fxserver.installer",
   "build": {
+    "features": ["desktop"],
     "frontendDist": "../dist",
     "devUrl": "http://localhost:5173",
     "beforeDevCommand": "npm run dev",

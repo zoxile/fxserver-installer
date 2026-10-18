@@ -2,11 +2,28 @@ use super::tests::{link_directory, Fixture};
 use super::*;
 
 #[test]
+fn artifact_resource_root_matches_the_host_archive_layout() {
+    let fixture = Fixture::new();
+    let relative = if cfg!(target_os = "linux") {
+        "artifacts/alpine/opt/cfx-server/citizen/system_resources"
+    } else {
+        "artifacts/citizen/system_resources"
+    };
+    assert_eq!(fixture.artifact_resources(), fixture.root.join(relative));
+}
+
+#[test]
 fn enhanced_artifacts_resolve_resources_and_mixed_editions_block() {
     let fixture = Fixture::new();
     fs::rename(
-        fixture.root.join("artifacts/FXServer.exe"),
-        fixture.root.join("artifacts/cfx-server.exe"),
+        fixture
+            .root
+            .join("artifacts")
+            .join(super::super::server_exe::LEGACY_EXECUTABLE),
+        fixture
+            .root
+            .join("artifacts")
+            .join(super::super::server_exe::ENHANCED_EXECUTABLE),
     )
     .unwrap();
     fixture.artifact_resource("chat", "fx_version 'cerulean'");
@@ -14,7 +31,14 @@ fn enhanced_artifacts_resolve_resources_and_mixed_editions_block() {
     let result = report(&inspect(&fixture.request()));
     assert!(!result.blocking);
     assert_eq!(result.resource_count, 1);
-    fs::write(fixture.root.join("artifacts/FXServer.exe"), "fixture").unwrap();
+    fs::write(
+        fixture
+            .root
+            .join("artifacts")
+            .join(super::super::server_exe::LEGACY_EXECUTABLE),
+        "fixture",
+    )
+    .unwrap();
     let result = report(&inspect(&fixture.request()));
     assert!(result.blocking);
     assert!(result
@@ -29,14 +53,10 @@ fn artifact_manifests_resolve_startup_groups_dependencies_providers_and_execs() 
     fixture.artifact_resource("chat", "dependency 'build-api'");
     fixture.artifact_resource("[builders]/builder", "provide 'build-api'");
     fixture.artifact_resource("[builders]/legacy", "fx_version 'cerulean'");
-    let legacy = fixture
-        .root
-        .join("artifacts/citizen/system_resources/[builders]/legacy");
+    let legacy = fixture.artifact_resources().join("[builders]/legacy");
     fs::rename(legacy.join("fxmanifest.lua"), legacy.join("__resource.lua")).unwrap();
     fixture.resource("job", "dependency 'chat'");
-    let included = fixture
-        .root
-        .join("artifacts/citizen/system_resources/chat/settings.cfg");
+    let included = fixture.artifact_resources().join("chat/settings.cfg");
     fs::write(&included, "ensure build-api\n").unwrap();
     let source = "ensure chat\nstart job\nensure [builders]\nexec @chat/settings.cfg\n";
     fs::write(fixture.root.join("data/server.cfg"), source).unwrap();
@@ -69,8 +89,7 @@ fn missing_artifact_resources_are_not_assumed_and_unrelated_artifact_folders_are
     fs::write(misplaced.join("fxmanifest.lua"), "fx_version 'cerulean'").unwrap();
     for has_empty_system_folder in [false, true] {
         if has_empty_system_folder {
-            fs::create_dir_all(fixture.root.join("artifacts/citizen/system_resources/chat"))
-                .unwrap();
+            fs::create_dir_all(fixture.artifact_resources().join("chat")).unwrap();
         }
         let result = report(&inspect(&fixture.request()));
         assert_eq!(result.resource_count, 0);
@@ -102,7 +121,13 @@ fn artifact_inventory_does_not_hide_missing_data_resources_or_invalid_artifact_p
         .iter()
         .any(|item| item.code == "configured-resource-missing"));
 
-    fs::remove_file(fixture.root.join("artifacts/FXServer.exe")).unwrap();
+    fs::remove_file(
+        fixture
+            .root
+            .join("artifacts")
+            .join(super::super::server_exe::LEGACY_EXECUTABLE),
+    )
+    .unwrap();
     assert_eq!(report(&inspect(&fixture.request())).resource_count, 0);
     let mut request = fixture.request();
     request.artifact_path.clear();
@@ -118,8 +143,8 @@ fn same_name_across_roots_retains_custom_manifest_provides_and_groups_without_pi
     );
     fixture.artifact_resource("[system]/shared", "provide 'new-api'");
     let system_cfg = fixture
-        .root
-        .join("artifacts/citizen/system_resources/[system]/shared/settings.cfg");
+        .artifact_resources()
+        .join("[system]/shared/settings.cfg");
     fs::write(&system_cfg, "ensure new-api").unwrap();
     fs::write(
         fixture
@@ -297,11 +322,8 @@ fn linked_artifact_root_groups_and_aliases_are_read_only_and_cycles_are_bounded(
     .unwrap();
     let system = fixture.root.join("system");
     fs::create_dir(&system).unwrap();
-    fs::create_dir(fixture.root.join("artifacts/citizen")).unwrap();
-    link_directory(
-        &system,
-        &fixture.root.join("artifacts/citizen/system_resources"),
-    );
+    fs::create_dir_all(fixture.artifact_resources().parent().unwrap()).unwrap();
+    link_directory(&system, &fixture.artifact_resources());
     link_directory(&shared.join("group"), &system.join("[linked]"));
     link_directory(&shared.join("group/actual"), &system.join("alias"));
     link_directory(&system, &system.join("[cycle]"));
@@ -335,7 +357,7 @@ fn linked_artifact_root_groups_and_aliases_are_read_only_and_cycles_are_bounded(
 fn artifact_exec_cannot_escape_its_registered_resource() {
     let fixture = Fixture::new();
     fixture.artifact_resource("chat", "fx_version 'cerulean'");
-    let resource = fixture.root.join("artifacts/citizen/system_resources/chat");
+    let resource = fixture.artifact_resources().join("chat");
     fs::create_dir(fixture.root.join("private")).unwrap();
     fs::write(
         fixture.root.join("private/secret.cfg"),
@@ -376,9 +398,7 @@ fn incomplete_artifact_inventory_does_not_prove_resources_or_dependencies_missin
         if unreadable_manifest {
             fixture.artifact_resource("chat", "");
             fs::write(
-                fixture
-                    .root
-                    .join("artifacts/citizen/system_resources/chat/fxmanifest.lua"),
+                fixture.artifact_resources().join("chat/fxmanifest.lua"),
                 [0xff],
             )
             .unwrap();
@@ -412,13 +432,10 @@ fn incomplete_artifact_inventory_does_not_prove_resources_or_dependencies_missin
 #[test]
 fn broken_artifact_root_link_is_unknown_not_a_missing_resource() {
     let fixture = Fixture::new();
-    fs::create_dir(fixture.root.join("artifacts/citizen")).unwrap();
+    fs::create_dir_all(fixture.artifact_resources().parent().unwrap()).unwrap();
     let target = fixture.root.join("link-target");
     fs::create_dir(&target).unwrap();
-    link_directory(
-        &target,
-        &fixture.root.join("artifacts/citizen/system_resources"),
-    );
+    link_directory(&target, &fixture.artifact_resources());
     fs::remove_dir(&target).unwrap();
     fs::write(fixture.root.join("data/server.cfg"), "ensure chat").unwrap();
     let inspection = inspect(&fixture.request());

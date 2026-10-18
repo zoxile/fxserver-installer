@@ -25,7 +25,7 @@ pub(super) fn guidance(check: &DiagnosticCheck, inspection: &Inspection) -> Opti
     }) {
         return Some(Guidance {
             steps: vec![
-                "Review the bundled resource in citizen/system_resources and the selected artifact version.",
+                "Review the bundled resource in the artifact's system_resources directory and the selected artifact version.",
                 "Artifact resources are read-only diagnostic evidence, not profile resource repair or update targets. Review an artifact installation if bundled files are missing or incompatible.",
             ],
             page: "artifact-install",
@@ -35,7 +35,11 @@ pub(super) fn guidance(check: &DiagnosticCheck, inspection: &Inspection) -> Opti
     }
     let (page, label, steps): (_, _, Vec<_>) = match check.code.as_str() {
         "artifact-missing" | "artifact-conflict" => ("artifact-install", "Open artifacts", vec![
-            "Choose a folder containing only FXServer.exe (Legacy) or cfx-server.exe (Enhanced). Keep editions in separate folders.",
+            if cfg!(target_os = "linux") {
+                "Choose a complete Linux artifact folder containing run.sh and alpine/opt/cfx-server. Keep Legacy and Enhanced editions in separate folders."
+            } else {
+                "Choose a folder containing only FXServer.exe (Legacy) or cfx-server.exe (Enhanced). Keep editions in separate folders."
+            },
             "Rerun checks after correcting the artifact path. No executable is downloaded or launched by this check.",
         ]),
         "profile-invalid" | "profile-not-selected" | "txdata-missing" => ("server-manage", "Open server settings", vec![
@@ -110,13 +114,14 @@ struct PendingPatch {
     created: Instant,
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub async fn preview_diagnostic_config_patch(
     request: PreflightRequest,
 ) -> Result<ConfigPatchPreview, String> {
     super::super::run_blocking(move || prepare_patch(request)).await
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn apply_diagnostic_config_patch(
     app: AppHandle,

@@ -1,3 +1,4 @@
+#[cfg(feature = "desktop")]
 fn main() {
     let manifest = std::path::PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").unwrap())
         .join("windows-app-manifest.xml");
@@ -15,3 +16,6 @@ fn main() {
 
     tauri_build::try_build(attributes).expect("failed to run Tauri build script");
 }
+
+#[cfg(not(feature = "desktop"))]
+fn main() {}

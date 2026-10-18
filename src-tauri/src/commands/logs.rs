@@ -25,6 +25,7 @@ pub struct AppLogFile {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[cfg_attr(not(windows), allow(dead_code))]
 pub struct ClientLogRequest {
     directory: Option<String>,
     file_name: Option<String>,
@@ -85,8 +86,7 @@ fn append_app_log_blocking(app: AppHandle, entry: String) -> Result<(), String> 
         .lock()
         .map_err(|_| "Application log lock is unavailable.".to_string())?;
     let path = log_path(&app)?;
-    let mut file = OpenOptions::new()
-        .create(true)
+    let mut file = log_write_options()
         .append(true)
         .open(&path)
         .map_err(|error| format!("Failed to open application log file: {error}"))?;
@@ -124,7 +124,24 @@ fn clear_app_logs_blocking(app: AppHandle) -> Result<(), String> {
         .lock()
         .map_err(|_| "Application log lock is unavailable.".to_string())?;
     let path = log_path(&app)?;
-    fs::write(&path, "").map_err(|error| format!("Failed to clear application log file: {error}"))
+    log_write_options()
+        .truncate(true)
+        .open(&path)
+        .map(|_| ())
+        .map_err(|error| format!("Failed to clear application log file: {error}"))
+}
+
+fn log_write_options() -> OpenOptions {
+    let mut options = OpenOptions::new();
+    options.create(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+        #[cfg(target_os = "linux")]
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    options
 }
 
 #[tauri::command]
@@ -132,6 +149,12 @@ pub async fn read_client_logs(request: ClientLogRequest) -> Result<ClientLogResu
     super::run_blocking(move || read_client_logs_blocking(request)).await
 }
 
+#[cfg(not(windows))]
+fn read_client_logs_blocking(_request: ClientLogRequest) -> Result<ClientLogResult, String> {
+    Err("FiveM client logs are only supported on Windows. Server and application logs remain available on this platform.".into())
+}
+
+#[cfg(windows)]
 fn read_client_logs_blocking(request: ClientLogRequest) -> Result<ClientLogResult, String> {
     let directory = request
         .directory
@@ -139,7 +162,8 @@ fn read_client_logs_blocking(request: ClientLogRequest) -> Result<ClientLogResul
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
-        .unwrap_or_else(default_client_log_directory);
+        .map(Ok)
+        .unwrap_or_else(default_client_log_directory)?;
     let max_lines = request.max_lines.unwrap_or(700).clamp(50, 5000);
     let files = list_client_log_files(&directory)?;
     let selected = select_client_log_file(&files, request.file_name.as_deref());
@@ -176,21 +200,33 @@ fn log_path(app: &AppHandle) -> Result<PathBuf, String> {
         .map_err(|error| format!("Failed to resolve application data directory: {error}"))?
         .join(LOG_FOLDER);
 
+    super::config_history::ensure_unlinked_path(&directory)?;
     fs::create_dir_all(&directory)
         .map_err(|error| format!("Failed to create application log directory: {error}"))?;
 
-    Ok(directory.join(LOG_FILE))
+    let path = directory.join(LOG_FILE);
+    super::config_history::ensure_unlinked_path(&path)?;
+    if path
+        .try_exists()
+        .map_err(|error| format!("Failed to inspect application log: {error}"))?
+        && !path.is_file()
+    {
+        return Err("Application logs require a regular file.".into());
+    }
+    Ok(path)
 }
 
-fn default_client_log_directory() -> PathBuf {
+#[cfg(windows)]
+fn default_client_log_directory() -> Result<PathBuf, String> {
     std::env::var_os("LOCALAPPDATA")
+        .filter(|path| !path.is_empty())
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(""))
-        .join("FiveM")
-        .join("FiveM.app")
-        .join("logs")
+        .filter(|path| path.is_absolute())
+        .map(|path| path.join("FiveM/FiveM.app/logs"))
+        .ok_or_else(|| "The Windows local application data directory is unavailable. Select a FiveM client log directory explicitly.".into())
 }
 
+#[cfg(windows)]
 fn list_client_log_files(directory: &Path) -> Result<Vec<ClientLogFile>, String> {
     if !directory.is_dir() {
         return Err(format!(
@@ -241,6 +277,7 @@ fn list_client_log_files(directory: &Path) -> Result<Vec<ClientLogFile>, String>
     Ok(files)
 }
 
+#[cfg(windows)]
 fn is_log_like_file(path: &Path) -> bool {
     path.extension()
         .and_then(|extension| extension.to_str())
@@ -248,6 +285,7 @@ fn is_log_like_file(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+#[cfg(windows)]
 fn select_client_log_file(
     files: &[ClientLogFile],
     requested_file_name: Option<&str>,
@@ -268,6 +306,9 @@ fn select_client_log_file(
 }
 
 fn tail_file(path: &Path, max_lines: usize) -> Result<String, String> {
+    if !path.is_file() {
+        return Err("Logs can only be read from regular files.".into());
+    }
     let mut file = File::open(path)
         .map_err(|error| format!("Failed to open {}: {error}", path.to_string_lossy()))?;
     let file_size = file
@@ -305,4 +346,50 @@ fn tail_file(path: &Path, max_lines: usize) -> Result<String, String> {
     let lines: Vec<&str> = content.lines().collect();
     let start = lines.len().saturating_sub(max_lines);
     Ok(lines[start..].join("\n"))
+}
+
+#[cfg(all(test, not(windows)))]
+mod tests {
+    use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn application_log_files_are_private_and_truncate_without_changing_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let path = std::env::temp_dir().join(format!(
+            "fxi-log-{}-{}",
+            std::process::id(),
+            BACKGROUND_LOG_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        let mut file = log_write_options()
+            .create_new(true)
+            .append(true)
+            .open(&path)
+            .unwrap();
+        file.write_all(b"fixture\n").unwrap();
+        drop(file);
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        drop(log_write_options().truncate(true).open(&path).unwrap());
+        assert_eq!(fs::metadata(&path).unwrap().len(), 0);
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn client_logs_reject_both_default_and_explicit_directories() {
+        for directory in [None, Some("/tmp/FiveM/logs".into())] {
+            let result = read_client_logs_blocking(ClientLogRequest {
+                directory,
+                file_name: None,
+                max_lines: None,
+            });
+            assert!(matches!(result, Err(error) if error.contains("only supported on Windows")));
+        }
+    }
 }

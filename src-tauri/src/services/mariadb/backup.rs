@@ -7,13 +7,12 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+#[cfg(not(target_os = "linux"))]
+use super::{detect::get_install_path, query::find_mariadb_client};
 use crate::{
     models::mariadb::{MariaDBBackupOptions, MariaDBBackupResult, MariaDBCredentials},
     process::CommandNoWindowExt,
-    services::mariadb::{
-        detect::get_install_path,
-        query::{apply_credentials_args, find_mariadb_client, validate_database_argument},
-    },
+    services::mariadb::query::{apply_credentials_args, validate_database_argument},
 };
 
 pub fn create_backup(
@@ -23,17 +22,20 @@ pub fn create_backup(
     validate_backup_options(&options)?;
 
     let dump_client = find_dump_client().ok_or_else(|| {
-        "Could not find mariadb-dump.exe or mysqldump.exe. Install MariaDB or add its bin folder to PATH."
-            .to_string()
+        #[cfg(target_os = "linux")]
+        let message = "Could not find a MariaDB mariadb-dump/mysqldump client. Install the distro MariaDB clients package.";
+        #[cfg(not(target_os = "linux"))]
+        let message = "Could not find mariadb-dump.exe or mysqldump.exe. Install MariaDB or add its bin folder to PATH.";
+        message.to_string()
     })?;
     let output_path = backup_path(&options)?;
 
     let mut command = Command::new(dump_client);
     command.no_window();
     let _credentials_file = apply_credentials_args(&mut command, &credentials)?;
+    #[cfg(not(target_os = "linux"))]
+    command.arg("--result-file").arg(&output_path);
     command
-        .arg("--result-file")
-        .arg(&output_path)
         .arg("--hex-blob")
         .arg("--connect-timeout=10")
         .arg("--default-character-set=utf8mb4");
@@ -91,18 +93,47 @@ pub fn create_backup(
         }
     }
 
-    reserve_backup_file(&output_path)?;
-    let stderr = match run_backup_client(&mut command, "MariaDB backup") {
-        Ok(stderr) => stderr,
-        Err(error) => {
-            let _ = fs::remove_file(&output_path);
-            return Err(error);
-        }
+    #[cfg(target_os = "linux")]
+    let (stderr, metadata) = {
+        let handles = super::linux::filesystem::pin_directories(
+            output_path.parent().ok_or("Missing backup parent.")?,
+        )?;
+        let file = super::linux::filesystem::create_private_at(
+            handles.last().unwrap(),
+            output_path.file_name().ok_or("Missing backup filename.")?,
+        )?;
+        let stderr = run_client_with_output(
+            &mut command,
+            "MariaDB backup",
+            Duration::from_secs(3600),
+            Some(file.try_clone().map_err(|e| e.to_string())?),
+        )
+        .map_err(|error| {
+            format!(
+                "{} Partial output retained at {}.",
+                super::backup_storage::client_failure(&error),
+                output_path.display()
+            )
+        })?;
+        file.sync_all().map_err(|e| e.to_string())?;
+        (stderr, file.metadata().map_err(|e| e.to_string())?)
     };
+    #[cfg(not(target_os = "linux"))]
+    let (stderr, metadata) = {
+        reserve_backup_file(&output_path)?;
+        let stderr = match run_backup_client(&mut command, "MariaDB backup") {
+            Ok(stderr) => stderr,
+            Err(error) => {
+                let _ = fs::remove_file(&output_path);
+                return Err(error);
+            }
+        };
 
-    let metadata = fs::metadata(&output_path).map_err(|error| {
-        format!("Backup finished but the output file could not be inspected: {error}")
-    })?;
+        let metadata = fs::metadata(&output_path).map_err(|error| {
+            format!("Backup finished but the output file could not be inspected: {error}")
+        })?;
+        (stderr, metadata)
+    };
 
     Ok(MariaDBBackupResult {
         path: output_path.to_string_lossy().to_string(),
@@ -111,6 +142,7 @@ pub fn create_backup(
     })
 }
 
+#[cfg(any(not(target_os = "linux"), test))]
 fn reserve_backup_file(path: &Path) -> Result<(), String> {
     OpenOptions::new()
         .write(true)
@@ -131,8 +163,22 @@ fn run_client_with_timeout(
     operation: &str,
     timeout: Duration,
 ) -> Result<String, String> {
+    run_client_with_output(command, operation, timeout, None)
+}
+
+fn run_client_with_output(
+    command: &mut Command,
+    operation: &str,
+    timeout: Duration,
+    output: Option<fs::File>,
+) -> Result<String, String> {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
     let mut child = command
-        .stdout(Stdio::null())
+        .stdout(output.map(Stdio::from).unwrap_or_else(Stdio::null))
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|error| format!("Failed to start {operation}: {error}"))?;
@@ -155,11 +201,13 @@ fn run_client_with_timeout(
     let started = Instant::now();
     let status = loop {
         match child.try_wait() {
-            Ok(Some(status)) => break Ok(status),
-            Ok(None) if started.elapsed() < timeout => {
+            Ok(Some(status)) if reader.is_finished() => break Ok(status),
+            Ok(_) if started.elapsed() < timeout => {
                 thread::sleep(Duration::from_millis(100));
             }
             outcome => {
+                #[cfg(target_os = "linux")]
+                super::linux::runtime::terminate_group(&mut child);
                 let _ = child.kill();
                 let _ = child.wait();
                 break Err(match outcome {
@@ -169,8 +217,9 @@ fn run_client_with_timeout(
             }
         }
     };
+    let status = status?;
     let stderr = reader.join().unwrap_or_default();
-    if status?.success() {
+    if status.success() {
         Ok(stderr)
     } else if stderr.is_empty() {
         Err(format!("{operation} failed."))
@@ -234,6 +283,13 @@ fn backup_path(options: &MariaDBBackupOptions) -> Result<PathBuf, String> {
     Ok(Path::new(&output_dir).join(file_name))
 }
 
+#[cfg(target_os = "linux")]
+fn find_dump_client() -> Option<String> {
+    super::detect::find_binary(&["mariadb-dump", "mysqldump"])
+        .map(|path| path.to_string_lossy().into_owned())
+}
+
+#[cfg(not(target_os = "linux"))]
 fn find_dump_client() -> Option<String> {
     if let Some(install_path) = get_install_path() {
         for executable in ["mariadb-dump.exe", "mysqldump.exe"] {

@@ -19,6 +19,7 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+#[cfg(feature = "desktop")]
 use tauri::{AppHandle, Manager};
 
 use crate::{models::mariadb::MariaDBCredentials, process::CommandNoWindowExt};
@@ -161,7 +162,7 @@ struct CachedPreview {
     created: Instant,
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub async fn run_fxserver_preflight(request: PreflightRequest) -> Result<PreflightReport, String> {
     super::run_blocking(move || {
         let inspection = inspect(&request);
@@ -170,6 +171,7 @@ pub async fn run_fxserver_preflight(request: PreflightRequest) -> Result<Preflig
     .await
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn preview_diagnostic_export(
     app: AppHandle,
@@ -190,7 +192,7 @@ pub async fn preview_diagnostic_export(
     .await
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub async fn export_diagnostic_zip(
     preview_id: String,
     path: String,
@@ -323,7 +325,11 @@ fn inspect(request: &PreflightRequest) -> Inspection {
             "artifact-missing",
             Severity::Error,
             "FXServer executable missing",
-            "Choose the directory containing FXServer.exe (Legacy) or cfx-server.exe (Enhanced).",
+            if cfg!(target_os = "linux") {
+                "Choose the extracted Linux artifact directory containing run.sh and alpine/opt/cfx-server."
+            } else {
+                "Choose the directory containing FXServer.exe (Legacy) or cfx-server.exe (Enhanced)."
+            },
         );
     }
     if request.profile.trim().is_empty() {
@@ -434,7 +440,16 @@ fn read_bounded(path: &Path) -> Result<String, String> {
 }
 
 fn read_file_limit(path: &Path, limit: u64) -> Result<String, String> {
-    let file = File::open(path).map_err(|_| "File is unreadable.".to_string())?;
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NONBLOCK);
+    }
+    let file = options
+        .open(path)
+        .map_err(|_| "File is unreadable.".to_string())?;
     if !file
         .metadata()
         .map_err(|_| "File is unreadable.")?
@@ -487,6 +502,15 @@ struct ResourceScan {
     origin: ResourceOrigin,
 }
 
+fn artifact_resource_root(artifact: &Path) -> PathBuf {
+    // The Linux launcher is at the archive root; citizen belongs beside the ELF.
+    artifact
+        .join(super::server_exe::LEGACY_EXECUTABLE)
+        .parent()
+        .expect("server executable has an artifact parent")
+        .join("citizen/system_resources")
+}
+
 fn scan_artifact_resources(artifact: &Path, scan: &mut ResourceScan, inspection: &mut Inspection) {
     if artifact.as_os_str().is_empty()
         || !matches!(
@@ -498,7 +522,7 @@ fn scan_artifact_resources(artifact: &Path, scan: &mut ResourceScan, inspection:
     }
     // ServerResources.cpp scans data/resources, then citizen_dir/system_resources.
     // Inventory only: registering a read target never grants repair/update access.
-    let root = artifact.join("citizen/system_resources");
+    let root = artifact_resource_root(artifact);
     match fs::symlink_metadata(&root) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
         _ => {}
@@ -529,7 +553,7 @@ fn inspect_resource_shadowing(inspection: &mut Inspection) {
         .collect();
     for name in shadowed {
         check(inspection, "Resources", "resource-shadowed", Severity::Warning,
-            "Resource exists in data and artifact", format!("{name} also exists in citizen/system_resources. The later artifact scan normally takes precedence, but build-specific selection settings can filter either copy. Both manifests and groups are retained as conditional evidence; review the active implementation manually. Neither copy was changed."));
+            "Resource exists in data and artifact", format!("{name} also exists in the artifact's bundled system_resources directory. The later artifact scan normally takes precedence, but build-specific selection settings can filter either copy. Both manifests and groups are retained as conditional evidence; review the active implementation manually. Neither copy was changed."));
     }
 }
 
@@ -1346,6 +1370,9 @@ fn inspect_config(root: &Path, check_ports: bool, inspection: &mut Inspection) {
 
 fn validate_database(credentials: &MariaDBCredentials) -> Result<String, &'static str> {
     use crate::services::mariadb::query::{apply_credentials_args, find_mariadb_client};
+    let _database = crate::services::mariadb::access::database_access().map_err(|_| {
+        "Database check was not started: MariaDB coordination is unavailable or maintenance is in progress in another desktop/terminal session."
+    })?;
     let client = find_mariadb_client()
         .ok_or("MariaDB client was not found. Verify the connection in Manage MariaDB.")?;
     let mut command = Command::new(client);
@@ -1651,7 +1678,14 @@ fn export_preview(id: &str, path: &Path) -> Result<DiagnosticExportResult, Strin
 
 fn write_archive(path: &Path, entries: &[DiagnosticEntry]) -> Result<(), String> {
     super::config_history::ensure_unlinked_path(path)?;
-    let file = OpenOptions::new().write(true).create_new(true).open(path)
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let file = options.open(path)
         .map_err(|_| "Could not create the ZIP. Choose a new file name in a writable directory; existing files are never overwritten.".to_string())?;
     let result = (|| -> Result<(), String> {
         let mut archive = zip::ZipWriter::new(file);

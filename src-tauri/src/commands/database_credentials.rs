@@ -17,7 +17,7 @@ use crate::models::mariadb::MariaDBCredentials;
 
 static CREDENTIAL_ACCESS: Mutex<()> = Mutex::new(());
 const MAX_FILE_BYTES: u64 = 256 * 1024;
-const STORAGE_ERROR: &str = "Could not access the Windows-protected database login. Forget it and validate your credentials again.";
+const STORAGE_ERROR: &str = "Could not access the protected database login. Unlock your operating-system credential store, or forget the saved login and validate your credentials again.";
 
 #[derive(Serialize, Deserialize)]
 struct SavedLogin {

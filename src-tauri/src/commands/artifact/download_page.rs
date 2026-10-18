@@ -1,12 +1,17 @@
 use std::{io::Read, time::Duration};
 
+use crate::models::artifact::ArtifactPlatform;
 use serde_json::Value;
 
-pub(super) const LEGACY_PAGE: &str =
-    "https://docs.fivem.net/docs/server-download/?platform=legacy&os=windows";
-pub(super) const ENHANCED_PAGE: &str =
-    "https://docs.fivem.net/docs/server-download/?platform=enhanced&os=windows";
 const MAX_PAGE: u64 = 4 * 1024 * 1024;
+
+pub(super) fn page(platform: ArtifactPlatform, enhanced: bool) -> String {
+    format!(
+        "https://docs.fivem.net/docs/server-download/?platform={}&os={}",
+        if enhanced { "enhanced" } else { "legacy" },
+        platform.as_str()
+    )
+}
 
 pub(super) fn load(url: &str) -> Result<Value, String> {
     let response = super::enhanced::client(Duration::from_secs(30))?
@@ -19,15 +24,20 @@ pub(super) fn load(url: &str) -> Result<Value, String> {
             response.status()
         ));
     }
-    let mut bytes = Vec::new();
-    response
-        .take(MAX_PAGE + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|error| format!("Could not read official download data: {error}"))?;
-    if bytes.len() as u64 > MAX_PAGE {
-        return Err("Official download page exceeded the size limit.".into());
-    }
+    let bytes = read_bounded(response, MAX_PAGE)?;
     parse(std::str::from_utf8(&bytes).map_err(|_| "Official download page is not UTF-8.")?)
+}
+
+pub(super) fn read_bounded(reader: impl Read, limit: u64) -> Result<Vec<u8>, String> {
+    let mut bytes = Vec::new();
+    reader
+        .take(limit + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("Could not read download data: {error}"))?;
+    if bytes.len() as u64 > limit {
+        return Err("Download data exceeded the size limit.".into());
+    }
+    Ok(bytes)
 }
 
 pub(super) fn parse(page: &str) -> Result<Value, String> {
@@ -51,6 +61,12 @@ pub(super) fn parse(page: &str) -> Result<Value, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bounded_reader_checks_streamed_size_without_content_length() {
+        assert_eq!(read_bounded(&b"1234"[..], 4).unwrap(), b"1234");
+        assert!(read_bounded(&b"12345"[..], 4).is_err());
+    }
 
     #[test]
     fn reads_only_bounded_structured_data_not_the_visible_default_link() {

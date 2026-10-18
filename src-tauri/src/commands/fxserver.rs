@@ -1,14 +1,18 @@
 // Enhanced executable support adapted from Huntercorlett's fork (53f1834).
 use super::server_exe;
+#[cfg(target_os = "linux")]
+#[path = "fxserver/linux.rs"]
+mod linux;
+#[cfg(feature = "desktop")]
 mod maintenance_launch;
 
 use std::{
     collections::VecDeque,
-    env, fs,
+    fs,
     io::{BufRead, BufReader, Write},
     net::UdpSocket,
     path::{Path, PathBuf},
-    process::{Child, ChildStdin, Command, Stdio},
+    process::{Child, ChildStdin, Stdio},
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
@@ -17,6 +21,15 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 
+#[cfg(target_os = "windows")]
+use crate::FXSERVER_WATCHDOG_ARG;
+#[cfg(target_os = "linux")]
+use linux::OwnedProcessGroup as ProcessCleanupJob;
+#[cfg(any(target_os = "windows", test))]
+use std::env;
+#[cfg(not(target_os = "linux"))]
+use std::process::Command;
+#[cfg(feature = "desktop")]
 use tauri::{AppHandle, Emitter};
 
 use crate::{
@@ -29,7 +42,6 @@ use crate::{
         TxDataProfilesResult,
     },
     process::CommandNoWindowExt,
-    FXSERVER_WATCHDOG_ARG,
 };
 
 const GRACEFUL_STOP_TIMEOUT: Duration = Duration::from_secs(4);
@@ -42,8 +54,10 @@ pub struct FxserverManager {
     lifecycle: Arc<Mutex<()>>,
     terminal: Arc<Mutex<TerminalState>>,
     launch_intent: Arc<Mutex<LaunchIntent>>,
+    #[cfg(feature = "desktop")]
     maintenance_launch: Arc<Mutex<Option<maintenance_launch::MaintenanceLaunch>>>,
     shutting_down: Arc<AtomicBool>,
+    stop_requested: Arc<AtomicBool>,
 }
 
 #[derive(Default)]
@@ -106,6 +120,23 @@ struct ManagedFxserverProcess {
     started_at: SystemTime,
     resource_sample: Option<ResourceSample>,
     _cleanup_job: Option<Arc<ProcessCleanupJob>>,
+    _lease: Option<crate::platform::ServerLease>,
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for ManagedFxserverProcess {
+    fn drop(&mut self) {
+        if let Some(group) = self._cleanup_job.as_ref() {
+            if let Err(error) = group.force_stop(&mut self.child, FORCE_STOP_WAIT_TIMEOUT) {
+                log::error!("FXServer cleanup on drop failed: {error}");
+                // Do not unlock artifacts while a stuck child could still be using them.
+                // Normal Stop keeps the entire process tracked so callers can retry.
+                if let Some(lease) = self._lease.take() {
+                    std::mem::forget(lease);
+                }
+            }
+        }
+    }
 }
 
 #[derive(Default)]
@@ -146,13 +177,15 @@ impl Drop for ProcessCleanupJob {
     }
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
 struct ProcessCleanupJob;
 
 #[derive(Clone, Copy)]
 struct ResourceSample {
     cpu_seconds: f64,
     sampled_at: Instant,
+    #[cfg(target_os = "linux")]
+    start_ticks: u64,
 }
 
 #[cfg(target_os = "windows")]
@@ -169,13 +202,95 @@ impl Default for FxserverManager {
             lifecycle: Arc::new(Mutex::new(())),
             terminal: Arc::new(Mutex::new(TerminalState::default())),
             launch_intent: Arc::new(Mutex::new(LaunchIntent::default())),
+            #[cfg(feature = "desktop")]
             maintenance_launch: Arc::new(Mutex::new(None)),
             shutting_down: Arc::new(AtomicBool::new(false)),
+            stop_requested: Arc::new(AtomicBool::new(false)),
         }
     }
 }
 
 impl FxserverManager {
+    /// Blocking lifecycle API shared by desktop and terminal clients. Call from a worker thread.
+    pub fn start(&self, request: FxserverLaunchRequest) -> Result<FxserverLaunchResult, String> {
+        let _operation = self
+            .lifecycle
+            .try_lock()
+            .map_err(|_| "Another FXServer action is in progress.")?;
+        let launch = SavedLaunch::from_request(&request);
+        let generation = self.arm_start()?;
+        let result = start_fxserver_blocking(request, self)?;
+        if !self.remember_launch(launch, generation)? {
+            self.stop_process()?;
+            return Err("FXServer start was cancelled by a stop or shutdown request.".into());
+        }
+        Ok(result)
+    }
+
+    pub fn restart(
+        &self,
+        mut request: FxserverLaunchRequest,
+    ) -> Result<FxserverLaunchResult, String> {
+        let _operation = self
+            .lifecycle
+            .try_lock()
+            .map_err(|_| "Another FXServer action is in progress.")?;
+        server_exe::require_server_executable(Path::new(request.artifact_path.trim()))?;
+        request.environment = sanitize_environment(request.environment)?;
+        self.arm_start()?;
+        self.disarm_recovery();
+        let generation = self.launch_generation()?;
+        self.stop_process()?;
+        let launch = SavedLaunch::from_request(&request);
+        if self.launch_generation()? != generation {
+            return Err("FXServer restart was cancelled by a stop request.".into());
+        }
+        let result = start_fxserver_blocking(request, self)?;
+        if !self.remember_launch(launch, generation)? {
+            self.stop_process()?;
+            return Err("FXServer restart was cancelled by a stop or shutdown request.".into());
+        }
+        Ok(result)
+    }
+
+    pub fn stop(&self) -> Result<(), String> {
+        stop_fxserver_blocking(self)
+    }
+
+    /// Nonblocking cancellation for a UI; a worker must still call stop().
+    pub fn request_stop(&self) {
+        self.stop_requested.store(true, Ordering::Release);
+    }
+
+    fn arm_start(&self) -> Result<u64, String> {
+        let intent = self
+            .launch_intent
+            .lock()
+            .map_err(|_| "FXServer launch settings are unavailable.")?;
+        self.stop_requested.store(false, Ordering::Release);
+        Ok(intent.generation)
+    }
+
+    pub fn status(&self) -> Result<FxserverStatus, String> {
+        get_fxserver_status_blocking(self)
+    }
+
+    pub fn terminal(
+        &self,
+        max_lines: Option<usize>,
+        after_id: Option<u64>,
+    ) -> Result<FxserverTerminalResult, String> {
+        get_fxserver_terminal_blocking(max_lines, after_id, self)
+    }
+
+    pub fn send_command(&self, request: FxserverCommandRequest) -> Result<(), String> {
+        let _operation = self
+            .lifecycle
+            .try_lock()
+            .map_err(|_| "Another FXServer action is in progress.")?;
+        send_fxserver_command_blocking(request, self)
+    }
+
     pub(crate) fn set_incident_workspace(&self, workspace_id: &str) -> Result<(), String> {
         self.terminal
             .lock()
@@ -184,6 +299,7 @@ impl FxserverManager {
         Ok(())
     }
 
+    #[cfg(feature = "desktop")]
     pub fn start_incident_events(&self, app: AppHandle) {
         let manager = self.clone();
         tauri::async_runtime::spawn(async move {
@@ -208,6 +324,7 @@ impl FxserverManager {
     }
 
     pub fn stop_running_process(&self) -> Result<(), String> {
+        self.request_stop();
         self.disarm_recovery();
         let _operation = self
             .lifecycle
@@ -218,6 +335,7 @@ impl FxserverManager {
 
     pub fn begin_shutdown(&self) {
         self.shutting_down.store(true, Ordering::Release);
+        self.request_stop();
         self.disarm_recovery();
     }
 
@@ -241,7 +359,10 @@ impl FxserverManager {
             .launch_intent
             .lock()
             .map_err(|_| "FXServer launch settings are unavailable.".to_string())?;
-        if intent.generation != generation || self.shutting_down.load(Ordering::Acquire) {
+        if intent.generation != generation
+            || self.shutting_down.load(Ordering::Acquire)
+            || self.stop_requested.load(Ordering::Acquire)
+        {
             return Ok(false);
         }
         intent.launch = Some(launch);
@@ -355,7 +476,10 @@ impl FxserverManager {
         let Ok(_operation) = self.lifecycle.try_lock() else {
             return RecoveryOutcome::Busy;
         };
-        if self.shutting_down.load(Ordering::Acquire) || !enabled.load(Ordering::Acquire) {
+        if self.shutting_down.load(Ordering::Acquire)
+            || self.stop_requested.load(Ordering::Acquire)
+            || !enabled.load(Ordering::Acquire)
+        {
             return RecoveryOutcome::Cancelled;
         }
         let launch = match self.launch_intent.lock() {
@@ -385,6 +509,7 @@ impl FxserverManager {
                 if !still_expected
                     || !enabled.load(Ordering::Acquire)
                     || self.shutting_down.load(Ordering::Acquire)
+                    || self.stop_requested.load(Ordering::Acquire)
                 {
                     let _ = self.stop_process();
                     RecoveryOutcome::Cancelled
@@ -407,13 +532,14 @@ impl FxserverManager {
         };
 
         if process_is_running(process)? {
+            #[cfg(not(target_os = "linux"))]
             let pid = process.child.id();
             let _ =
                 append_terminal_line(&self.terminal, "system", "Stopping FXServer gracefully...");
 
             match request_graceful_fxserver_stop(process) {
                 Ok(true) => {
-                    if wait_for_child_exit(&mut process.child, GRACEFUL_STOP_TIMEOUT) {
+                    if wait_for_managed_exit(process, GRACEFUL_STOP_TIMEOUT)? {
                         *guard = None;
                         let _ = append_terminal_line(&self.terminal, "system", "FXServer stopped.");
                         return Ok(());
@@ -441,6 +567,13 @@ impl FxserverManager {
                 }
             }
 
+            #[cfg(target_os = "linux")]
+            process
+                ._cleanup_job
+                .as_ref()
+                .ok_or("FXServer process-group ownership is unavailable.")?
+                .force_stop(&mut process.child, FORCE_STOP_WAIT_TIMEOUT)?;
+            #[cfg(not(target_os = "linux"))]
             force_stop_fxserver_process(&mut process.child, pid)?;
         }
 
@@ -451,6 +584,7 @@ impl FxserverManager {
     }
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn prepare_fxserver_maintenance_launch(
     request: FxserverLaunchRequest,
@@ -461,6 +595,7 @@ pub async fn prepare_fxserver_maintenance_launch(
     super::run_blocking(move || maintenance_launch::prepare(&manager, request, expected_pid)).await
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn validate_fxserver_maintenance_launch(
     token: String,
@@ -470,6 +605,7 @@ pub async fn validate_fxserver_maintenance_launch(
     super::run_blocking(move || maintenance_launch::validate(&manager, &token)).await
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn stop_fxserver_for_maintenance(
     token: String,
@@ -479,6 +615,7 @@ pub async fn stop_fxserver_for_maintenance(
     super::run_blocking(move || maintenance_launch::stop(&manager, &token)).await
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn start_fxserver_after_maintenance(
     token: String,
@@ -488,6 +625,7 @@ pub async fn start_fxserver_after_maintenance(
     super::run_blocking(move || maintenance_launch::start(&manager, &token)).await
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn discard_fxserver_maintenance_launch(
     token: String,
@@ -497,40 +635,27 @@ pub async fn discard_fxserver_maintenance_launch(
     super::run_blocking(move || maintenance_launch::discard(&manager, &token)).await
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn start_fxserver(
     request: FxserverLaunchRequest,
     manager: tauri::State<'_, FxserverManager>,
 ) -> Result<FxserverLaunchResult, String> {
     let manager = manager.inner().clone();
-    super::run_blocking(move || {
-        let _operation = manager
-            .lifecycle
-            .try_lock()
-            .map_err(|_| "Another FXServer action is in progress.".to_string())?;
-        let launch = SavedLaunch::from_request(&request);
-        let generation = manager.launch_generation()?;
-        let result = start_fxserver_blocking(request, &manager)?;
-        if !manager.remember_launch(launch, generation)? {
-            manager.stop_process()?;
-            return Err("FXServer start was cancelled by a stop or shutdown request.".to_string());
-        }
-        Ok(result)
-    })
-    .await
+    super::run_blocking(move || manager.start(request)).await
 }
 
 fn start_fxserver_blocking(
     request: FxserverLaunchRequest,
     manager: &FxserverManager,
 ) -> Result<FxserverLaunchResult, String> {
-    if manager.shutting_down.load(Ordering::Acquire) {
+    if manager.shutting_down.load(Ordering::Acquire)
+        || manager.stop_requested.load(Ordering::Acquire)
+    {
         return Err("FXServer Installer is shutting down.".to_string());
     }
-    if !cfg!(target_os = "windows") {
-        return Err(
-            "FXServer process management is only supported on Windows right now.".to_string(),
-        );
+    if !cfg!(any(target_os = "windows", target_os = "linux")) {
+        return Err("FXServer process management is supported on Windows and Linux.".to_string());
     }
 
     let mut guard = manager
@@ -550,10 +675,17 @@ fn start_fxserver_blocking(
     if artifact_path.as_os_str().is_empty() {
         return Err("Choose an FXServer artifact folder before starting the server.".to_string());
     }
+    let artifact_path = artifact_path
+        .canonicalize()
+        .map_err(|error| format!("Failed to resolve the artifact folder: {error}"))?;
 
     let executable_path = server_exe::require_server_executable(&artifact_path)?;
+    let lease = crate::platform::ServerLease::acquire(&artifact_path)?;
 
+    #[cfg(not(target_os = "linux"))]
     let mut command = Command::new(&executable_path);
+    #[cfg(target_os = "linux")]
+    let mut command = linux::launch_command(&executable_path);
     command.no_window();
     command
         .current_dir(&artifact_path)
@@ -576,6 +708,11 @@ fn start_fxserver_blocking(
         .process
         .lock()
         .map_err(|_| "FXServer process state is unavailable.".to_string())?;
+    if manager.shutting_down.load(Ordering::Acquire)
+        || manager.stop_requested.load(Ordering::Acquire)
+    {
+        return Err("FXServer start was cancelled by a stop or shutdown request.".into());
+    }
     let mut child = command
         .spawn()
         .map_err(|error| format!("Failed to start {}: {error}", executable_path.display()))?;
@@ -598,6 +735,7 @@ fn start_fxserver_blocking(
                     started_at,
                     resource_sample: None,
                     _cleanup_job: None,
+                    _lease: Some(lease),
                 });
             }
             return Err(format!(
@@ -616,6 +754,7 @@ fn start_fxserver_blocking(
         started_at,
         resource_sample: None,
         _cleanup_job: Some(cleanup_job.clone()),
+        _lease: Some(lease),
     });
     drop(process_guard);
     let watchdog_warning = spawn_fxserver_watchdog(pid).err();
@@ -646,6 +785,7 @@ fn start_fxserver_blocking(
     }
 
     attach_process_tree_to_cleanup_job_later(cleanup_job, pid);
+    spawn_exit_monitor(manager, pid);
 
     Ok(FxserverLaunchResult {
         pid,
@@ -654,14 +794,17 @@ fn start_fxserver_blocking(
     })
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn stop_fxserver(manager: tauri::State<'_, FxserverManager>) -> Result<(), String> {
+    manager.request_stop();
     manager.disarm_recovery();
     let manager = manager.inner().clone();
-    super::run_blocking(move || stop_fxserver_blocking(&manager)).await
+    super::run_blocking(move || manager.stop()).await
 }
 
 fn stop_fxserver_blocking(manager: &FxserverManager) -> Result<(), String> {
+    manager.request_stop();
     manager.disarm_recovery();
     let _operation = manager
         .lifecycle
@@ -670,48 +813,30 @@ fn stop_fxserver_blocking(manager: &FxserverManager) -> Result<(), String> {
     manager.stop_process()
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn restart_fxserver(
-    mut request: FxserverLaunchRequest,
+    request: FxserverLaunchRequest,
     manager: tauri::State<'_, FxserverManager>,
 ) -> Result<FxserverLaunchResult, String> {
     let manager = manager.inner().clone();
-    super::run_blocking(move || {
-        let _operation = manager
-            .lifecycle
-            .try_lock()
-            .map_err(|_| "Another FXServer action is in progress.".to_string())?;
-        server_exe::require_server_executable(Path::new(request.artifact_path.trim()))?;
-        request.environment = sanitize_environment(request.environment)?;
-        manager.disarm_recovery();
-        manager.stop_process()?;
-        let launch = SavedLaunch::from_request(&request);
-        let generation = manager.launch_generation()?;
-        let result = start_fxserver_blocking(request, &manager)?;
-        if !manager.remember_launch(launch, generation)? {
-            manager.stop_process()?;
-            return Err(
-                "FXServer restart was cancelled by a stop or shutdown request.".to_string(),
-            );
-        }
-        Ok(result)
-    })
-    .await
+    super::run_blocking(move || manager.restart(request)).await
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn get_fxserver_status(
     manager: tauri::State<'_, FxserverManager>,
 ) -> Result<FxserverStatus, String> {
     let manager = manager.inner().clone();
-    super::run_blocking(move || get_fxserver_status_blocking(&manager)).await
+    super::run_blocking(move || manager.status()).await
 }
 
 fn get_fxserver_status_blocking(manager: &FxserverManager) -> Result<FxserverStatus, String> {
     let mut guard = manager
         .process
-        .lock()
-        .map_err(|_| "FXServer process state is unavailable.".to_string())?;
+        .try_lock()
+        .map_err(|_| "FXServer process state is busy; retry the status request.".to_string())?;
 
     let Some(process) = guard.as_mut() else {
         return Ok(FxserverStatus {
@@ -739,6 +864,11 @@ fn get_fxserver_status_blocking(manager: &FxserverManager) -> Result<FxserverSta
     let pid = process.child.id();
     let artifact_path = process.artifact_path.to_string_lossy().to_string();
     let started_at = system_time_to_label(process.started_at);
+    let uptime_seconds = process
+        .started_at
+        .elapsed()
+        .ok()
+        .map(|elapsed| elapsed.as_secs());
     let mut resource_sample = process.resource_sample;
     drop(guard);
     let resources = read_process_resources(pid, &mut resource_sample);
@@ -752,11 +882,12 @@ fn get_fxserver_status_blocking(manager: &FxserverManager) -> Result<FxserverSta
         pid: Some(pid),
         artifact_path: Some(artifact_path),
         started_at: Some(started_at),
-        uptime_seconds: None,
+        uptime_seconds,
         resources,
     })
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn get_fxserver_terminal(
     max_lines: Option<usize>,
@@ -764,7 +895,7 @@ pub async fn get_fxserver_terminal(
     manager: tauri::State<'_, FxserverManager>,
 ) -> Result<FxserverTerminalResult, String> {
     let manager = manager.inner().clone();
-    super::run_blocking(move || get_fxserver_terminal_blocking(max_lines, after_id, &manager)).await
+    super::run_blocking(move || manager.terminal(max_lines, after_id)).await
 }
 
 fn get_fxserver_terminal_blocking(
@@ -775,8 +906,8 @@ fn get_fxserver_terminal_blocking(
     let max_lines = max_lines.unwrap_or(500).clamp(50, 5000);
     let terminal = manager
         .terminal
-        .lock()
-        .map_err(|_| "FXServer terminal output is unavailable.".to_string())?;
+        .try_lock()
+        .map_err(|_| "FXServer terminal output is busy; retry the terminal request.".to_string())?;
     let start = if let Some(after_id) = after_id {
         let first_new = terminal
             .entries
@@ -799,7 +930,7 @@ fn get_fxserver_terminal_blocking(
     })
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub async fn get_fxserver_rcon_password(
     workspace_id: Option<String>,
 ) -> Result<Option<String>, String> {
@@ -826,7 +957,7 @@ fn get_fxserver_rcon_password_blocking(
         .map_err(|_| "Saved RCON password is not valid UTF-8.".to_string())
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub async fn save_fxserver_rcon_password(
     password: String,
     workspace_id: Option<String>,
@@ -861,7 +992,7 @@ fn save_fxserver_rcon_password_blocking(
     replace_secret_file(&temporary, &path)
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub async fn clear_fxserver_rcon_password(workspace_id: Option<String>) -> Result<(), String> {
     super::run_blocking(move || clear_fxserver_rcon_password_blocking(workspace_id.as_deref()))
         .await
@@ -879,13 +1010,14 @@ fn clear_fxserver_rcon_password_blocking(workspace_id: Option<&str>) -> Result<(
     Ok(())
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn send_fxserver_command(
     request: FxserverCommandRequest,
     manager: tauri::State<'_, FxserverManager>,
 ) -> Result<(), String> {
     let manager = manager.inner().clone();
-    super::run_blocking(move || send_fxserver_command_blocking(request, &manager)).await
+    super::run_blocking(move || manager.send_command(request)).await
 }
 
 fn send_fxserver_command_blocking(
@@ -951,7 +1083,7 @@ fn send_fxserver_command_blocking(
     Ok(())
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub async fn read_txdata_log(request: TxDataLogRequest) -> Result<TxDataLogResult, String> {
     super::run_blocking(move || read_txdata_log_blocking(request)).await
 }
@@ -997,7 +1129,7 @@ fn read_txdata_log_blocking(request: TxDataLogRequest) -> Result<TxDataLogResult
     })
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub async fn list_txdata_profiles(
     data_path: String,
     artifact_path: Option<String>,
@@ -1146,7 +1278,7 @@ fn list_txdata_profiles_blocking(data_path: String) -> Result<TxDataProfilesResu
     })
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub async fn read_server_config(
     request: ServerConfigRequest,
 ) -> Result<ServerConfigResult, String> {
@@ -1175,9 +1307,8 @@ fn read_server_config_blocking(request: ServerConfigRequest) -> Result<ServerCon
     })
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub async fn save_server_config(
-    app: AppHandle,
     request: SaveServerConfigRequest,
     tx_data_path: Option<String>,
     profile: Option<String>,
@@ -1191,7 +1322,7 @@ pub async fn save_server_config(
         };
         let expected = expected_content.ok_or("Reload and review the file before saving.")?;
         super::config_history::save_config_atomic(
-            &super::config_history::history_root(&app)?,
+            &super::config_history::core_history_root()?,
             &target,
             &expected,
             &request.content,
@@ -1205,7 +1336,7 @@ pub(crate) fn config_file_metadata(path: &Path) -> Result<ServerConfigFile, Stri
     read_cfg_file(path)
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub async fn scan_fxserver_resources(
     request: ResourceScanRequest,
 ) -> Result<ResourceScanResult, String> {
@@ -1237,7 +1368,7 @@ fn scan_fxserver_resources_blocking(
     })
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub async fn send_fxserver_rcon_command(request: FxserverCommandRequest) -> Result<String, String> {
     super::run_blocking(move || send_fxserver_rcon_command_blocking(request)).await
 }
@@ -1247,11 +1378,71 @@ fn send_fxserver_rcon_command_blocking(request: FxserverCommandRequest) -> Resul
 }
 
 fn process_is_running(process: &mut ManagedFxserverProcess) -> Result<bool, String> {
+    #[cfg(target_os = "linux")]
+    if let Some(group) = process._cleanup_job.as_ref() {
+        return group.is_running(&mut process.child);
+    }
     Ok(process
         .child
         .try_wait()
         .map_err(|error| format!("Failed to inspect FXServer: {error}"))?
         .is_none())
+}
+
+fn wait_for_managed_exit(
+    process: &mut ManagedFxserverProcess,
+    timeout: Duration,
+) -> Result<bool, String> {
+    #[cfg(target_os = "linux")]
+    if let Some(group) = process._cleanup_job.as_ref() {
+        return group.wait_for_exit(&mut process.child, timeout);
+    }
+    Ok(wait_for_child_exit(&mut process.child, timeout))
+}
+
+fn spawn_exit_monitor(manager: &FxserverManager, pid: u32) {
+    let process = Arc::downgrade(&manager.process);
+    let lifecycle = Arc::downgrade(&manager.lifecycle);
+    let terminal = Arc::downgrade(&manager.terminal);
+    thread::spawn(move || loop {
+        thread::sleep(Duration::from_millis(250));
+        let (Some(process), Some(lifecycle)) = (process.upgrade(), lifecycle.upgrade()) else {
+            break;
+        };
+        let Ok(_operation) = lifecycle.try_lock() else {
+            continue;
+        };
+        let Ok(mut guard) = process.try_lock() else {
+            continue;
+        };
+        let Some(child) = guard.as_mut().filter(|child| child.child.id() == pid) else {
+            break;
+        };
+        match process_is_running(child) {
+            Ok(true) => continue,
+            Ok(false) => {
+                let status = child
+                    .child
+                    .try_wait()
+                    .ok()
+                    .flatten()
+                    .map(|status| status.to_string())
+                    .unwrap_or_else(|| "unknown status".into());
+                if let Some(terminal) = terminal.upgrade() {
+                    let _ = append_terminal_line(
+                        &terminal,
+                        "system",
+                        format!("FXServer exited ({status})."),
+                    );
+                }
+                *guard = None;
+                break;
+            }
+            Err(error) => {
+                log::warn!("FXServer exit monitoring failed: {error}");
+            }
+        }
+    });
 }
 
 #[cfg(target_os = "windows")]
@@ -1310,7 +1501,12 @@ fn create_process_cleanup_job(child: &Child) -> Result<Arc<ProcessCleanupJob>, S
     Ok(Arc::new(ProcessCleanupJob(job as isize)))
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "linux")]
+fn create_process_cleanup_job(child: &Child) -> Result<Arc<ProcessCleanupJob>, String> {
+    Ok(Arc::new(ProcessCleanupJob::new(child)?))
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
 fn create_process_cleanup_job(_: &Child) -> Result<Arc<ProcessCleanupJob>, String> {
     Ok(Arc::new(ProcessCleanupJob))
 }
@@ -1456,10 +1652,16 @@ pub(crate) fn terminate_process_tree(root_pid: u32) -> Result<(), String> {
 
 #[cfg(not(target_os = "windows"))]
 pub(crate) fn terminate_process_tree(_: u32) -> Result<(), String> {
-    Ok(())
+    Err("Process termination requires an owned FXServer process group on this platform.".into())
 }
 
 fn request_graceful_fxserver_stop(process: &mut ManagedFxserverProcess) -> Result<bool, String> {
+    #[cfg(target_os = "linux")]
+    if let Some(group) = process._cleanup_job.as_ref() {
+        group.graceful_stop(process.stdin.as_mut())?;
+        process.stdin = None;
+        return Ok(true);
+    }
     let Some(mut stdin) = process.stdin.take() else {
         return Ok(false);
     };
@@ -2583,7 +2785,15 @@ fn utf16_z_to_string(value: &[u16]) -> String {
     String::from_utf16_lossy(&value[..len])
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "linux")]
+fn read_process_resources(
+    pid: u32,
+    previous_sample: &mut Option<ResourceSample>,
+) -> Option<FxserverResources> {
+    linux::read_resources(pid, previous_sample)
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
 fn read_process_resources(
     _pid: u32,
     _previous_sample: &mut Option<ResourceSample>,
@@ -2687,13 +2897,15 @@ fn parse_quake_rcon_response(packet: &[u8]) -> String {
 }
 
 fn rcon_password_path(workspace_id: Option<&str>) -> Result<PathBuf, String> {
-    let app_data = env::var_os("APPDATA")
+    // Keep the existing Windows DPAPI store location for upgrades.
+    #[cfg(target_os = "windows")]
+    let root = env::var_os("APPDATA")
         .map(PathBuf::from)
-        .ok_or_else(|| "Windows APPDATA folder is unavailable.".to_string())?;
-    scoped_rcon_password_path(
-        &app_data.join("fxserver-installer").join("secrets"),
-        workspace_id,
-    )
+        .ok_or("Windows APPDATA folder is unavailable.")?
+        .join("fxserver-installer");
+    #[cfg(not(target_os = "windows"))]
+    let root = crate::platform::data_dir()?;
+    scoped_rcon_password_path(&root.join("secrets"), workspace_id)
 }
 
 fn scoped_rcon_password_path(root: &Path, workspace_id: Option<&str>) -> Result<PathBuf, String> {
@@ -2868,19 +3080,31 @@ pub(crate) fn decrypt_secret(secret: &[u8]) -> Result<Vec<u8>, String> {
     Ok(unprotected)
 }
 
-#[cfg(not(target_os = "windows"))]
-pub(crate) fn encrypt_secret(_: &[u8]) -> Result<Vec<u8>, String> {
-    Err("Secure RCON password storage is only supported on Windows.".to_string())
+#[cfg(target_os = "linux")]
+pub(crate) fn encrypt_secret(secret: &[u8]) -> Result<Vec<u8>, String> {
+    crate::platform::encrypt_secret(secret)
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "linux")]
+pub(crate) fn decrypt_secret(secret: &[u8]) -> Result<Vec<u8>, String> {
+    crate::platform::decrypt_secret(secret)
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
+pub(crate) fn encrypt_secret(_: &[u8]) -> Result<Vec<u8>, String> {
+    Err("Secure secret storage is not supported on this platform.".into())
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
 pub(crate) fn decrypt_secret(_: &[u8]) -> Result<Vec<u8>, String> {
-    Err("Secure RCON password storage is only supported on Windows.".to_string())
+    Err("Secure secret storage is not supported on this platform.".into())
 }
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "desktop")]
     use super::maintenance_launch::public_scope_matches as launch_matches;
+    #[cfg(feature = "desktop")]
     #[test]
     fn maintenance_requires_matching_profile_environment_and_artifact() {
         let request = FxserverLaunchRequest {
@@ -2895,7 +3119,10 @@ mod tests {
         assert!(launch_matches(&saved, &request));
         let mut changed = saved.clone().into_request();
         changed.artifact_path = "c:\\SERVER\\".into();
-        assert!(launch_matches(&saved, &changed));
+        assert_eq!(
+            launch_matches(&saved, &changed),
+            cfg!(target_os = "windows")
+        );
         changed.server_profile = Some("staging".into());
         assert!(!launch_matches(&saved, &changed));
         changed = saved.clone().into_request();
@@ -2932,6 +3159,166 @@ mod tests {
 
     use super::*;
     use std::sync::mpsc;
+
+    #[test]
+    fn shared_facade_uses_one_guard_and_snapshots_do_not_wait_on_locks() {
+        let manager = FxserverManager::default();
+        let request = || FxserverLaunchRequest {
+            artifact_path: "unused".into(),
+            environment: vec![],
+            server_profile: None,
+        };
+        let guard = manager.lifecycle.lock().unwrap();
+        assert!(manager
+            .start(request())
+            .unwrap_err()
+            .contains("in progress"));
+        assert!(manager
+            .restart(request())
+            .unwrap_err()
+            .contains("in progress"));
+        assert!(manager
+            .send_command(FxserverCommandRequest {
+                command: "status".into(),
+                rcon: FxserverRconConfig {
+                    host: "127.0.0.1".into(),
+                    port: 30120,
+                    password: "test".into()
+                },
+            })
+            .unwrap_err()
+            .contains("in progress"));
+        assert!(manager.stop().unwrap_err().contains("in progress"));
+        drop(guard);
+        let process = manager.process.lock().unwrap();
+        assert!(manager.status().unwrap_err().contains("busy"));
+        drop(process);
+        let terminal = manager.terminal.lock().unwrap();
+        assert!(manager.terminal(None, None).unwrap_err().contains("busy"));
+        drop(terminal);
+        assert!(!manager.status().unwrap().running);
+    }
+
+    #[test]
+    fn stop_request_cancels_start_without_taking_lifecycle_or_intent_locks() {
+        let manager = FxserverManager::default();
+        let generation = manager.arm_start().unwrap();
+        let lifecycle = manager.lifecycle.lock().unwrap();
+        let intent = manager.launch_intent.lock().unwrap();
+        manager.request_stop();
+        assert!(manager.stop_requested.load(Ordering::Acquire));
+        drop(intent);
+        let launch = SavedLaunch {
+            artifact_path: "unused".into(),
+            environment: vec![],
+            server_profile: None,
+        };
+        assert!(!manager.remember_launch(launch.clone(), generation).unwrap());
+        assert!(start_fxserver_blocking(launch.into_request(), &manager).is_err());
+        drop(lifecycle);
+        manager.arm_start().unwrap();
+        assert!(!manager.stop_requested.load(Ordering::Acquire));
+        manager.begin_shutdown();
+        assert!(manager
+            .start(FxserverLaunchRequest {
+                artifact_path: "unused".into(),
+                environment: vec![],
+                server_profile: None,
+            })
+            .is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_manager_launcher_preserves_environment_profile_and_releases_lease() {
+        let root = fixture_secret_directory();
+        fs::create_dir_all(root.join("alpine/opt/cfx-server")).unwrap();
+        fs::write(root.join("alpine/opt/cfx-server/FXServer"), "fixture").unwrap();
+        // No real FXServer binary is installed or executed by this fixture.
+        fs::write(root.join("run.sh"), "#!/bin/bash\nprintf 'fixture:%s:%s:%s\\n' \"$TXHOST_SERVER_NAME\" \"$*\" \"$PWD\"\nread answer\ntest \"$answer\" = quit\n").unwrap();
+        let manager = FxserverManager::default();
+        let request = || FxserverLaunchRequest {
+            artifact_path: root.to_string_lossy().into(),
+            environment: vec![FxserverEnvironmentVariable {
+                key: "TXHOST_SERVER_NAME".into(),
+                value: "test host".into(),
+            }],
+            server_profile: Some("test profile".into()),
+        };
+        let result = manager.start(request()).unwrap();
+        assert!(result.pid > 1);
+        assert!(crate::platform::ServerLease::acquire(&root).is_err());
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut found = false;
+        while Instant::now() < deadline {
+            if manager.terminal(None, None).is_ok_and(|terminal| {
+                terminal.entries.iter().any(|entry| {
+                    entry
+                        .plain_line
+                        .contains("fixture:test host:+set serverProfile test profile:")
+                })
+            }) {
+                found = true;
+                break;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        manager.stop().unwrap();
+        assert!(found);
+        assert!(!manager.status().unwrap().running);
+        drop(crate::platform::ServerLease::acquire(&root).unwrap());
+        manager.start(request()).unwrap();
+        manager.restart(request()).unwrap();
+        manager.stop().unwrap();
+        fs::write(root.join("run.sh"), "#!/bin/bash\nsleep 30 &\nexit 7\n").unwrap();
+        manager.start(request()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            if manager
+                .process
+                .try_lock()
+                .is_ok_and(|process| process.is_none())
+            {
+                break;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        // No status polling is needed to clean up a crashed leader and its orphan.
+        let cleaned_by_monitor = manager.process.lock().unwrap().is_none();
+        manager.stop().unwrap();
+        assert!(cleaned_by_monitor);
+        drop(crate::platform::ServerLease::acquire(&root).unwrap());
+        fs::write(
+            root.join("run.sh"),
+            "#!/bin/bash\nsleep 30 &\nread answer\nexit 0\n",
+        )
+        .unwrap();
+        let manager = FxserverManager::default();
+        manager.start(request()).unwrap();
+        manager.begin_shutdown();
+        manager.stop_running_process().unwrap();
+        assert!(!manager.status().unwrap().running);
+        drop(crate::platform::ServerLease::acquire(&root).unwrap());
+
+        let manager = FxserverManager::default();
+        manager.start(request()).unwrap();
+        drop(manager);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut released = false;
+        while Instant::now() < deadline {
+            if let Ok(lease) = crate::platform::ServerLease::acquire(&root) {
+                drop(lease);
+                released = true;
+                break;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            released,
+            "Dropping the last manager must clean up before unlocking artifacts"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn resource_manifest_reads_are_bounded_and_keep_normal_metadata() {
@@ -3258,6 +3645,7 @@ mod tests {
             started_at: SystemTime::now(),
             resource_sample: None,
             _cleanup_job: None,
+            _lease: None,
         });
         let mutation = manager.with_stopped_server(|| Ok(()));
         let terminal = manager.terminal.clone();

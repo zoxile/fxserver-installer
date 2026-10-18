@@ -84,6 +84,12 @@ impl ProfilerCaptureManager {
         if active.is_some() {
             return Err("A guided profiler capture is already running.".into());
         }
+        #[cfg(target_os = "linux")]
+        let id = format!(
+            "fxi-profiler-{}",
+            super::workspace_clone::linux_fs::token()?
+        );
+        #[cfg(not(target_os = "linux"))]
         let id = capture_id();
         let cancel = Arc::new(AtomicBool::new(false));
         *active = Some(ActiveCapture {
@@ -515,8 +521,8 @@ async fn run_capture(
         loop {
             if cancel.load(Ordering::SeqCst) { manager.progress("cleaning", frames); }
             if file.writer_finished() {
-                // Cfx opens/truncates before conversion, writes once, then closes. Denying write
-                // sharing and observing nonempty output proves that writer has relinquished it.
+                // Windows denies write sharing; Linux observes a close-write event on the
+                // reserved inode. Nonempty output alone is never completion evidence.
                 export_pending = false;
                 if cancel.load(Ordering::SeqCst) { return Err(CANCEL_MESSAGE.into()); }
                 if io.identity().await? != target { return Err("The managed server changed before the capture could be read.".into()); }
@@ -573,6 +579,8 @@ struct CaptureFile {
     identity: (u64, u64, u64),
     reserved: Option<File>,
     _directory_pins: Vec<File>,
+    #[cfg(target_os = "linux")]
+    close_watch: LinuxCloseWatch,
 }
 
 impl CaptureFile {
@@ -584,9 +592,15 @@ impl CaptureFile {
         {
             return Err("Invalid generated profiler capture identifier.".into());
         }
+        #[cfg(not(target_os = "linux"))]
         let directory_pins = storage::pin_directories(root)?;
+        #[cfg(target_os = "linux")]
+        let directory_pins = vec![super::workspace_clone::linux_fs::directory(root)?];
+        #[cfg(not(target_os = "linux"))]
         let root =
             fs::canonicalize(root).map_err(|_| "Managed capture directory is unavailable.")?;
+        #[cfg(target_os = "linux")]
+        let root = root.to_path_buf();
         let name = format!("{id}.json");
         let path = root.join(&name);
         quoted_capture_path(&path)?;
@@ -598,9 +612,12 @@ impl CaptureFile {
             use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE};
             options.share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE);
         }
+        #[cfg(not(target_os = "linux"))]
         let created = options.open(&path).map_err(|_| {
             "Could not reserve a new capture file in the managed server working directory."
         })?;
+        #[cfg(target_os = "linux")]
+        let created = super::workspace_clone::linux_fs::create(&path)?;
         let identity = verify_capture_handle(&created, &path)?;
         // Cfx Create requests READ|WRITE but shares only READ. Keep a read-only reservation.
         let reserved = open_capture_file(&path, true)?;
@@ -608,12 +625,29 @@ impl CaptureFile {
             return Err("Generated capture file changed while reserving.".into());
         }
         drop(created);
+        #[cfg(target_os = "linux")]
+        let close_watch = match LinuxCloseWatch::new(&reserved) {
+            Ok(watch) => watch,
+            Err(error) => {
+                let cleanup = super::workspace_clone::linux_fs::remove_file_identity(
+                    &path,
+                    None,
+                    Some((identity.0, identity.1)),
+                );
+                return Err(match cleanup {
+                    Ok(()) => error,
+                    Err(cleanup) => format!("{error} Reservation cleanup failed: {cleanup}"),
+                });
+            }
+        };
         Ok(Self {
             root,
             name,
             identity,
             reserved: Some(reserved),
             _directory_pins: directory_pins,
+            #[cfg(target_os = "linux")]
+            close_watch,
         })
     }
 
@@ -622,6 +656,22 @@ impl CaptureFile {
     }
 
     fn save_command(&self) -> Result<String, String> {
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::fd::AsRawFd;
+            let file = self
+                .reserved
+                .as_ref()
+                .ok_or("Capture reservation was released.")?;
+            // The server opens the reserved inode, not a pathname an attacker can replace.
+            // /proc access must be allowed for the managed same-user server; otherwise timeout.
+            return Ok(format!(
+                "profiler saveJSON \"/proc/{}/fd/{}\"",
+                std::process::id(),
+                file.as_raw_fd()
+            ));
+        }
+        #[cfg(not(target_os = "linux"))]
         Ok(format!(
             "profiler saveJSON {}",
             quoted_capture_path(&self.path())?
@@ -638,6 +688,10 @@ impl CaptureFile {
     }
 
     fn writer_finished(&self) -> bool {
+        #[cfg(target_os = "linux")]
+        if !self.close_watch.finished() {
+            return false;
+        }
         self.open()
             .and_then(|file| {
                 file.metadata()
@@ -647,19 +701,20 @@ impl CaptureFile {
     }
 
     fn read(&self) -> Result<String, String> {
-        let file = self.open()?;
-        if file
+        let mut file = self.open()?;
+        let metadata = file
             .metadata()
-            .map_err(|_| "Capture metadata is unavailable.")?
-            .len()
-            > MAX_CAPTURE_BYTES
-        {
+            .map_err(|_| "Capture metadata is unavailable.")?;
+        if metadata.len() > MAX_CAPTURE_BYTES {
             return Err("Capture exceeds the 16 MiB limit. Choose fewer frames.".into());
         }
         let mut bytes = Vec::new();
-        file.take(MAX_CAPTURE_BYTES + 1)
+        Read::by_ref(&mut file)
+            .take(MAX_CAPTURE_BYTES + 1)
             .read_to_end(&mut bytes)
             .map_err(|_| "Capture could not be read.")?;
+        #[cfg(target_os = "linux")]
+        super::workspace_clone::linux_fs::unchanged(&file, &metadata)?;
         if bytes.len() as u64 > MAX_CAPTURE_BYTES {
             return Err("Capture exceeds the 16 MiB limit. Choose fewer frames.".into());
         }
@@ -678,20 +733,30 @@ impl CaptureFile {
     }
 
     fn remove(&mut self) -> Result<(), String> {
-        if self.reserved.is_some() {
-            // Do not release the non-delete-sharing guard while a writer still owns the file.
-            let snapshot = self.open()?;
-            self.reserved.take();
-            drop(snapshot);
-        }
-        if self
-            .path()
-            .try_exists()
-            .map_err(|_| "Capture path is unavailable.")?
+        #[cfg(target_os = "linux")]
         {
+            // Retain the descriptor until verified unlink succeeds, including on failed cleanup.
             self.remove_verified()?;
+            self.reserved.take();
+            return Ok(());
         }
-        Ok(())
+        #[cfg(not(target_os = "linux"))]
+        {
+            if self.reserved.is_some() {
+                // Do not release the non-delete-sharing guard while a writer still owns the file.
+                let snapshot = self.open()?;
+                self.reserved.take();
+                drop(snapshot);
+            }
+            if self
+                .path()
+                .try_exists()
+                .map_err(|_| "Capture path is unavailable.")?
+            {
+                self.remove_verified()?;
+            }
+            Ok(())
+        }
     }
 
     #[cfg(windows)]
@@ -713,9 +778,91 @@ impl CaptureFile {
         delete_capture_handle(&file)
     }
 
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
     fn remove_verified(&self) -> Result<(), String> {
-        Err("Safe profiler capture cleanup requires Windows.".into())
+        super::workspace_clone::linux_fs::remove_file_identity(
+            &self.path(),
+            None,
+            Some((self.identity.0, self.identity.1)),
+        )
+    }
+}
+
+#[cfg(target_os = "linux")]
+struct LinuxCloseWatch {
+    events: File,
+    closed: AtomicBool,
+    failed: AtomicBool,
+}
+
+#[cfg(target_os = "linux")]
+impl LinuxCloseWatch {
+    fn new(file: &File) -> Result<Self, String> {
+        use std::os::fd::{AsRawFd, FromRawFd};
+        let fd = unsafe { libc::inotify_init1(libc::IN_CLOEXEC | libc::IN_NONBLOCK) };
+        if fd < 0 {
+            return Err(format!(
+                "Cannot observe profiler writer: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        let events = unsafe { File::from_raw_fd(fd) };
+        let path = std::ffi::CString::new(format!("/proc/self/fd/{}", file.as_raw_fd())).unwrap();
+        if unsafe {
+            libc::inotify_add_watch(fd, path.as_ptr(), libc::IN_MODIFY | libc::IN_CLOSE_WRITE)
+        } < 0
+        {
+            return Err(format!(
+                "Cannot watch reserved profiler output: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        Ok(Self {
+            events,
+            closed: AtomicBool::new(false),
+            failed: AtomicBool::new(false),
+        })
+    }
+
+    fn finished(&self) -> bool {
+        let mut buffer = [0u8; 4096];
+        loop {
+            let count = match (&self.events).read(&mut buffer) {
+                Ok(0) => {
+                    self.failed.store(true, Ordering::Relaxed);
+                    break;
+                }
+                Ok(count) => count,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => {
+                    self.failed.store(true, Ordering::Relaxed);
+                    break;
+                }
+            };
+            let mut offset = 0;
+            while offset + std::mem::size_of::<libc::inotify_event>() <= count {
+                let event = unsafe {
+                    std::ptr::read_unaligned(
+                        buffer.as_ptr().add(offset).cast::<libc::inotify_event>(),
+                    )
+                };
+                if event.mask & (libc::IN_Q_OVERFLOW | libc::IN_IGNORED) != 0 {
+                    self.failed.store(true, Ordering::Relaxed);
+                }
+                if event.mask & libc::IN_MODIFY != 0 {
+                    self.closed.store(false, Ordering::Relaxed);
+                }
+                if event.mask & libc::IN_CLOSE_WRITE != 0 {
+                    self.closed.store(true, Ordering::Relaxed);
+                }
+                offset += std::mem::size_of::<libc::inotify_event>() + event.len as usize;
+            }
+            if offset != count {
+                self.failed.store(true, Ordering::Relaxed);
+            }
+        }
+        self.closed.load(Ordering::Relaxed) && !self.failed.load(Ordering::Relaxed)
     }
 }
 
@@ -723,16 +870,25 @@ fn quoted_capture_path(path: &Path) -> Result<String, String> {
     let value = path
         .to_str()
         .ok_or("Profiler export path must be valid Unicode.")?;
+    #[cfg(not(target_os = "linux"))]
     let value = value
         .strip_prefix(r"\\?\")
         .unwrap_or(value)
         .replace('\\', "/");
+    #[cfg(target_os = "linux")]
+    let value = value.to_string();
     let bytes = value.as_bytes();
+    #[cfg(target_os = "linux")]
+    let absolute =
+        value.starts_with('/') && !value.starts_with("//") && !value.contains(['\\', ':']);
+    #[cfg(not(target_os = "linux"))]
+    let absolute = bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && &bytes[1..3] == b":/"
+        && !value[2..].contains(':');
     if bytes.len() > 900
         || bytes.len() < 4
-        || !bytes[0].is_ascii_alphabetic()
-        || &bytes[1..3] != b":/"
-        || value[2..].contains(':')
+        || !absolute
         || value.chars().any(|ch| {
             ch.is_control()
                 || matches!(
@@ -778,6 +934,9 @@ fn open_capture_file(path: &Path, allow_writer: bool) -> Result<File, String> {
     }
     #[cfg(not(windows))]
     let _ = allow_writer;
+    #[cfg(target_os = "linux")]
+    let file = super::workspace_clone::linux_fs::read(path)?;
+    #[cfg(not(target_os = "linux"))]
     let file = options
         .open(path)
         .map_err(|_| "Capture is unavailable or its writer is still active.")?;
@@ -814,11 +973,6 @@ fn delete_capture_handle(file: &File) -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(not(windows))]
-fn delete_capture_handle(_: &File) -> Result<(), String> {
-    Err("Safe profiler capture cleanup requires Windows.".into())
-}
-
 #[cfg(windows)]
 fn verify_capture_handle(file: &File, expected: &Path) -> Result<(u64, u64, u64), String> {
     use std::os::windows::{ffi::OsStringExt, io::AsRawHandle};
@@ -851,7 +1005,7 @@ fn verify_capture_handle(file: &File, expected: &Path) -> Result<(u64, u64, u64)
     ))
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
 fn verify_capture_handle(file: &File, expected: &Path) -> Result<(u64, u64, u64), String> {
     use std::os::unix::fs::MetadataExt;
     let actual = file

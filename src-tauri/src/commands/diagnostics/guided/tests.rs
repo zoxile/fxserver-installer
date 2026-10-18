@@ -283,7 +283,7 @@ fn bundled_resource_configs_cannot_be_patch_targets_even_as_direct_or_linked_dat
     let fixture = Fixture::new();
     fixture.artifact_resource("chat", "fx_version 'cerulean'");
     fixture.artifact_resource("rconlog", "fx_version 'cerulean'");
-    let chat = fixture.root.join("artifacts/citizen/system_resources/chat");
+    let chat = fixture.artifact_resources().join("chat");
     fs::create_dir(chat.join("resources")).unwrap();
     fs::write(chat.join("server.cfg"), "# bundled configuration\n").unwrap();
     let linked = fixture.root.join("linked-data");

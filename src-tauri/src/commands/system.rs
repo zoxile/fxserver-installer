@@ -1,11 +1,34 @@
 use std::{fs::File, io::Read, path::Path, process::Command};
 
+use serde::Serialize;
+
 const MAX_TEXT_BYTES: u64 = 10 * 1024 * 1024;
 
 #[cfg(target_os = "windows")]
 use crate::process::CommandNoWindowExt;
 
-#[tauri::command]
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlatformInfo {
+    pub os: &'static str,
+    pub arch: &'static str,
+    pub artifact_platform: &'static str,
+    pub client_logs_supported: bool,
+    pub secure_storage_supported: bool,
+}
+
+#[cfg_attr(feature = "desktop", tauri::command)]
+pub fn get_platform_info() -> PlatformInfo {
+    PlatformInfo {
+        os: std::env::consts::OS,
+        arch: std::env::consts::ARCH,
+        artifact_platform: if cfg!(windows) { "windows" } else { "linux" },
+        client_logs_supported: cfg!(windows),
+        secure_storage_supported: crate::platform::secure_storage_supported(),
+    }
+}
+
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub async fn open_external_url(url: String) -> Result<(), String> {
     super::run_blocking(move || open_external_url_blocking(url)).await
 }
@@ -33,7 +56,7 @@ fn validate_external_url(url: &str) -> Result<reqwest::Url, String> {
     Ok(parsed)
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub async fn read_text_file(path: String, max_bytes: Option<u64>) -> Result<String, String> {
     super::run_blocking(move || read_text_file_blocking(path, max_bytes)).await
 }
@@ -108,6 +131,23 @@ fn open_url(url: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn platform_capabilities_use_the_frontend_contract() {
+        let info = get_platform_info();
+        assert_eq!(info.os, std::env::consts::OS);
+        assert_eq!(info.arch, std::env::consts::ARCH);
+        assert_eq!(info.client_logs_supported, cfg!(windows));
+        assert_eq!(
+            info.artifact_platform,
+            if cfg!(windows) { "windows" } else { "linux" }
+        );
+        let value = serde_json::to_value(info).unwrap();
+        assert_eq!(value.as_object().unwrap().len(), 5);
+        assert!(value["artifactPlatform"].is_string());
+        assert!(value["clientLogsSupported"].is_boolean());
+        assert!(value["secureStorageSupported"].is_boolean());
+    }
 
     #[test]
     fn external_urls_are_parsed_without_launching_a_handler() {

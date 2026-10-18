@@ -257,7 +257,7 @@ fn storage_root(app: &tauri::AppHandle) -> Result<PathBuf, String> {
         .map_err(io_error)?
         .join("resource-updates");
     create_checked_directory(&root)?;
-    root.canonicalize().map_err(io_error)
+    checked_directory_path(&root)
 }
 
 fn prepare(storage: &Path, request: PreviewRequest) -> Result<ResourcePreview, String> {
@@ -270,7 +270,7 @@ fn prepare(storage: &Path, request: PreviewRequest) -> Result<ResourcePreview, S
         return Err("Preview storage is full. Close an existing preview or wait for abandoned previews to expire (30 minutes).".into());
     }
     ensure_free_space(storage, MAX_ARCHIVE + MAX_TOTAL)?;
-    let id = unique_id();
+    let id = operation_id()?;
     let directory = storage.join("previews").join(&id);
     create_checked_directory(&directory)?;
     let result = (|| {
@@ -443,7 +443,7 @@ fn create_snapshot(
         return Err("Snapshot storage limit reached (20 snapshots or 10 GiB per resource). Remove an older snapshot from Snapshots before continuing.".into());
     }
     ensure_free_space(storage, files.values().map(|file| file.size).sum())?;
-    let id = unique_id();
+    let id = operation_id()?;
     let folder = snapshot_folder(storage, target, resource).join(&id);
     create_checked_directory(&folder)?;
     let result = (|| {
@@ -466,7 +466,7 @@ fn create_snapshot(
             files: files.clone(),
         };
         let bytes = serde_json::to_vec_pretty(&record).map_err(io_error)?;
-        let mut output = File::create(folder.join("snapshot.json")).map_err(io_error)?;
+        let mut output = create_file(&folder.join("snapshot.json"))?;
         output.write_all(&bytes).map_err(io_error)?;
         output.sync_all().map_err(io_error)?;
         Ok(snapshot)
@@ -491,7 +491,10 @@ fn replace_resource(
         remote.values().map(|file| file.size).sum::<u64>()
             + local.values().map(|file| file.size).sum::<u64>(),
     )?;
-    let transaction = parent.join(format!(".fxserver-update-{}", unique_id()));
+    let transaction = parent.join(format!(".fxserver-update-{}", operation_id()?));
+    #[cfg(target_os = "linux")]
+    super::workspace_clone::linux_fs::mkdir(&transaction)?;
+    #[cfg(not(target_os = "linux"))]
     fs::create_dir(&transaction).map_err(io_error)?;
     check_no_links(&transaction)?;
     let staged = transaction.join("new");
@@ -514,7 +517,7 @@ fn replace_resource(
             if let Some(parent) = destination.parent() {
                 check_no_links(parent)?;
             }
-            fs::copy(resource.join(path), destination).map_err(io_error)?;
+            copy_file(&resource.join(path), &destination)?;
         }
         if inventory(&staged)? != expected {
             return Err("Staged files failed verification. Original resource is unchanged.".into());
@@ -526,25 +529,44 @@ fn replace_resource(
         }
         check_no_links(resource)?;
         check_no_links(&staged)?;
-        fs::rename(resource, &original).map_err(|e| {
+        rename_new(resource, &original).map_err(|e| {
             format!(
                 "Could not move resource for replacement. Stop the resource/server and retry: {e}"
             )
         })?;
         if !inventory(&original).is_ok_and(|files| files == *local) {
-            fs::rename(&original, resource).map_err(|error| format!("Resource changed during replacement and could not be restored ({error}). Original files remain at {}.", original.display()))?;
+            rename_new(&original, resource).map_err(|error| format!("Resource changed during replacement and could not be restored ({error}). Original files remain at {}.", original.display()))?;
             return Err(
                 "Resource changed during replacement. Original files were restored; preview again."
                     .into(),
             );
         }
-        if let Err(error) = fs::rename(&staged, resource) {
-            if let Err(restore) = fs::rename(&original, resource) {
+        if let Err(error) = rename_new(&staged, resource) {
+            if let Err(restore) = rename_new(&original, resource) {
                 return Err(format!("Replacement failed ({error}); restoration failed ({restore}). Original files remain at {}. Restore them before starting the server.", original.display()));
             }
             return Err(format!(
                 "Replacement failed; original files were restored: {error}"
             ));
+        }
+        #[cfg(target_os = "linux")]
+        if !inventory(resource).is_ok_and(|files| files == expected) {
+            rename_new(resource, &staged).map_err(|error| {
+                format!(
+                    "Promoted resource changed ({error}); original preserved at {}.",
+                    original.display()
+                )
+            })?;
+            rename_new(&original, resource).map_err(|error| {
+                format!(
+                    "Resource restoration failed ({error}); original preserved at {}.",
+                    original.display()
+                )
+            })?;
+            return Err(
+                "Promoted resource changed during verification. Original files were restored."
+                    .into(),
+            );
         }
         Ok(())
     })();
@@ -585,7 +607,7 @@ fn resource_root(target: &ResourceTarget) -> Result<PathBuf, String> {
     }
     let root = Path::new(data).join("resources");
     check_no_links(&root)?;
-    root.canonicalize().map_err(io_error)
+    checked_directory_path(&root)
 }
 
 fn staging_parent(target: &ResourceTarget, resource: &Path) -> Result<PathBuf, String> {
@@ -603,7 +625,7 @@ fn resolve_resource(target: &ResourceTarget) -> Result<PathBuf, String> {
     let root = resource_root(target)?;
     let resource = PathBuf::from(&target.resource_path);
     check_no_links(&resource)?;
-    let resource = resource.canonicalize().map_err(io_error)?;
+    let resource = checked_directory_path(&resource)?;
     if !resource.starts_with(&root) || resource == root {
         return Err("Resource must be inside the selected profile's resources folder.".into());
     }
@@ -634,10 +656,17 @@ fn resolve_resource(target: &ResourceTarget) -> Result<PathBuf, String> {
 
 fn manifest_repository(resource: &Path) -> Result<Option<String>, String> {
     let manifest = require_manifest(resource)?;
-    if fs::metadata(&manifest).map_err(io_error)?.len() > 1024 * 1024 {
+    let file = read_file(&manifest)?;
+    if file.metadata().map_err(io_error)?.len() > 1024 * 1024 {
         return Err("Resource manifest is too large.".into());
     }
-    let content = fs::read_to_string(manifest).map_err(io_error)?;
+    let mut content = String::new();
+    file.take(1024 * 1024 + 1)
+        .read_to_string(&mut content)
+        .map_err(io_error)?;
+    if content.len() > 1024 * 1024 {
+        return Err("Resource manifest grew beyond its size limit.".into());
+    }
     Ok(content.lines().find_map(|line| {
         let rest = line.trim_start().strip_prefix("repository")?;
         if rest.starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_') {
@@ -722,7 +751,7 @@ fn download(owner: &str, repo: &str, branch: &str, path: &Path) -> Result<u64, S
     {
         return Err("Resource download exceeds 512 MiB.".into());
     }
-    let mut file = File::create(path).map_err(io_error)?;
+    let mut file = create_file(path)?;
     let bytes =
         std::io::copy(&mut response.by_ref().take(MAX_ARCHIVE + 1), &mut file).map_err(io_error)?;
     if bytes > MAX_ARCHIVE {
@@ -732,7 +761,7 @@ fn download(owner: &str, repo: &str, branch: &str, path: &Path) -> Result<u64, S
 }
 
 fn extract_archive(archive: &Path, destination: &Path) -> Result<(), String> {
-    let mut zip = zip::ZipArchive::new(File::open(archive).map_err(io_error)?).map_err(io_error)?;
+    let mut zip = zip::ZipArchive::new(read_file(archive)?).map_err(io_error)?;
     if zip.len() > MAX_FILES {
         return Err("Resource archive contains too many entries.".into());
     }
@@ -743,7 +772,7 @@ fn extract_archive(archive: &Path, destination: &Path) -> Result<(), String> {
     let mut total = 0_u64;
     for index in 0..zip.len() {
         let mut entry = zip.by_index(index).map_err(io_error)?;
-        let path = safe_relative(entry.name().trim_end_matches('/'))?;
+        let path = safe_relative(entry.name().map_err(io_error)?.trim_end_matches('/'))?;
         if entry
             .unix_mode()
             .is_some_and(|mode| !matches!(mode & 0o170000, 0 | 0o100000 | 0o040000))
@@ -798,11 +827,7 @@ fn extract_archive(archive: &Path, destination: &Path) -> Result<(), String> {
         if let Some(parent) = output.parent() {
             create_checked_directory(parent)?;
         }
-        let mut file = File::options()
-            .write(true)
-            .create_new(true)
-            .open(output)
-            .map_err(io_error)?;
+        let mut file = create_file(&output)?;
         let size = entry.size();
         let copied =
             std::io::copy(&mut entry.by_ref().take(MAX_FILE + 1), &mut file).map_err(io_error)?;
@@ -879,6 +904,12 @@ fn check_no_links(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
+fn create_checked_directory(path: &Path) -> Result<(), String> {
+    super::workspace_clone::linux_fs::mkdir_all(path)
+}
+
+#[cfg(not(target_os = "linux"))]
 fn create_checked_directory(path: &Path) -> Result<(), String> {
     match fs::symlink_metadata(path) {
         Ok(metadata) => {
@@ -942,11 +973,12 @@ fn inventory(root: &Path) -> Result<Inventory, String> {
 }
 
 fn fingerprint(path: &Path) -> Result<Fingerprint, String> {
-    let size = fs::metadata(path).map_err(io_error)?.len();
+    let mut input = read_file(path)?;
+    let metadata = input.metadata().map_err(io_error)?;
+    let size = metadata.len();
     if size > MAX_ARCHIVE {
         return Err("File exceeds checksum size limit.".into());
     }
-    let mut input = File::open(path).map_err(io_error)?;
     let mut hasher = Sha256::new();
     let mut buffer = [0_u8; 64 * 1024];
     let mut count = 0_u64;
@@ -964,6 +996,8 @@ fn fingerprint(path: &Path) -> Result<Fingerprint, String> {
     if count != size {
         return Err("File changed while hashing.".into());
     }
+    #[cfg(target_os = "linux")]
+    super::workspace_clone::linux_fs::unchanged(&input, &metadata)?;
     Ok(Fingerprint {
         size,
         sha256: format!("{:x}", hasher.finalize()),
@@ -983,7 +1017,7 @@ fn copy_inventory(source: &Path, destination: &Path, files: &Inventory) -> Resul
         if fs::symlink_metadata(&output).is_ok() {
             check_no_links(&output)?;
         }
-        fs::copy(input, output).map_err(io_error)?;
+        copy_file(&input, &output)?;
     }
     Ok(())
 }
@@ -1050,10 +1084,11 @@ fn snapshot_folder(storage: &Path, target: &ResourceTarget, resource: &Path) -> 
 fn read_snapshot(folder: &Path) -> Result<SnapshotRecord, String> {
     let path = folder.join("snapshot.json");
     check_no_links(&path)?;
-    if fs::metadata(&path).map_err(io_error)?.len() > 32 * 1024 * 1024 {
+    let file = read_file(&path)?;
+    if file.metadata().map_err(io_error)?.len() > 32 * 1024 * 1024 {
         return Err("Snapshot index is too large.".into());
     }
-    serde_json::from_reader(File::open(path).map_err(io_error)?).map_err(io_error)
+    serde_json::from_reader(file.take(32 * 1024 * 1024 + 1)).map_err(io_error)
 }
 
 fn cleanup_expired_previews(storage: &Path, current: SystemTime) -> Result<(), String> {
@@ -1113,19 +1148,70 @@ fn ensure_free_space(path: &Path, required: u64) -> Result<(), String> {
             return Err("Not enough disk space to stage and snapshot the resource safely.".into());
         }
     }
-    #[cfg(not(windows))]
-    let _ = (path, required);
+    #[cfg(target_os = "linux")]
+    if super::workspace_clone::linux_fs::available_bytes(path)?
+        < required.saturating_add(64 * 1024 * 1024)
+    {
+        return Err("Not enough disk space to stage and snapshot the resource safely.".into());
+    }
     Ok(())
 }
 
 fn remove_owned(root: &Path, target: &Path) -> Result<(), String> {
-    check_no_links(target)?;
-    let root = root.canonicalize().map_err(io_error)?;
-    let target = target.canonicalize().map_err(io_error)?;
-    if target == root || !target.starts_with(&root) {
-        return Err("Refusing to remove a folder outside resource update storage.".into());
+    #[cfg(target_os = "linux")]
+    return super::workspace_clone::linux_fs::remove_tree(root, target);
+    #[cfg(not(target_os = "linux"))]
+    {
+        check_no_links(target)?;
+        let root = root.canonicalize().map_err(io_error)?;
+        let target = target.canonicalize().map_err(io_error)?;
+        if target == root || !target.starts_with(&root) {
+            return Err("Refusing to remove a folder outside resource update storage.".into());
+        }
+        fs::remove_dir_all(target).map_err(io_error)
     }
-    fs::remove_dir_all(target).map_err(io_error)
+}
+
+fn read_file(path: &Path) -> Result<File, String> {
+    #[cfg(target_os = "linux")]
+    return super::workspace_clone::linux_fs::read(path);
+    #[cfg(not(target_os = "linux"))]
+    File::open(path).map_err(io_error)
+}
+
+fn checked_directory_path(path: &Path) -> Result<PathBuf, String> {
+    #[cfg(target_os = "linux")]
+    {
+        super::workspace_clone::linux_fs::directory(path)?;
+        return Ok(path.to_path_buf());
+    }
+    #[cfg(not(target_os = "linux"))]
+    path.canonicalize().map_err(io_error)
+}
+
+fn create_file(path: &Path) -> Result<File, String> {
+    #[cfg(target_os = "linux")]
+    return super::workspace_clone::linux_fs::create(path);
+    #[cfg(not(target_os = "linux"))]
+    File::options()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(io_error)
+}
+
+fn copy_file(from: &Path, to: &Path) -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    return super::workspace_clone::linux_fs::copy(from, to);
+    #[cfg(not(target_os = "linux"))]
+    fs::copy(from, to).map(|_| ()).map_err(io_error)
+}
+
+fn rename_new(from: &Path, to: &Path) -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    return super::workspace_clone::linux_fs::rename(from, to, false);
+    #[cfg(not(target_os = "linux"))]
+    fs::rename(from, to).map_err(io_error)
 }
 
 fn validate_id(value: &str) -> Result<(), String> {
@@ -1155,6 +1241,13 @@ fn unique_id() -> String {
         NEXT_ID.fetch_add(1, Ordering::Relaxed)
     )
 }
+
+fn operation_id() -> Result<String, String> {
+    #[cfg(target_os = "linux")]
+    return super::workspace_clone::linux_fs::token();
+    #[cfg(not(target_os = "linux"))]
+    Ok(unique_id())
+}
 fn file_name(path: &Path) -> String {
     path.file_name()
         .unwrap_or_default()
@@ -1168,6 +1261,27 @@ fn io_error(error: impl std::fmt::Display) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_disk_checks_and_linked_cleanup_fail_closed() {
+        use std::os::unix::fs::symlink;
+        let fixture = Fixture::new();
+        assert!(ensure_free_space(&fixture.root, u64::MAX).is_err());
+        assert!(ensure_free_space(&fixture.root.join("missing"), 0).is_err());
+        let owned = fixture.root.join("owned");
+        let outside = fixture.root.join("Outside");
+        fs::create_dir(&owned).unwrap();
+        fs::create_dir(&outside).unwrap();
+        fs::write(outside.join("keep.txt"), "keep").unwrap();
+        symlink(&outside, owned.join("link")).unwrap();
+        assert!(remove_owned(&fixture.root, &owned).is_err());
+        assert!(remove_owned(&owned, &outside).is_err());
+        assert_eq!(
+            fs::read_to_string(outside.join("keep.txt")).unwrap(),
+            "keep"
+        );
+    }
 
     struct Fixture {
         root: PathBuf,

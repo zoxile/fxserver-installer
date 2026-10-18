@@ -32,7 +32,11 @@ pub fn secure_token() -> Result<String, String> {
         }
         Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    {
+        crate::services::mariadb::linux::filesystem::secure_token()
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
     {
         Err("Secure restore tests require Windows.".into())
     }
@@ -192,7 +196,9 @@ pub fn validate_local_path(path: &Path) -> Result<(), String> {
             let value = value
                 .to_str()
                 .ok_or("Non-Unicode paths are not supported.")?;
+            #[cfg(windows)]
             let base = value.split('.').next().unwrap_or("").to_ascii_uppercase();
+            #[cfg(windows)]
             if value.ends_with(['.', ' '])
                 || value
                     .chars()
@@ -204,12 +210,23 @@ pub fn validate_local_path(path: &Path) -> Result<(), String> {
             {
                 return Err("Reserved or unsafe filesystem path component.".into());
             }
+            #[cfg(not(windows))]
+            if value.chars().any(char::is_control) {
+                return Err("Control characters are not supported in filesystem paths.".into());
+            }
         }
     }
     Ok(())
 }
 
 // Keep these handles alive for the entire path-based operation, not just validation.
+#[cfg(target_os = "linux")]
+pub fn pin_directories(path: &Path) -> Result<Vec<File>, String> {
+    validate_local_path(path)?;
+    crate::services::mariadb::linux::filesystem::pin_directories(path)
+}
+
+#[cfg(not(target_os = "linux"))]
 pub fn pin_directories(path: &Path) -> Result<Vec<File>, String> {
     validate_local_path(path)?;
     let mut handles = Vec::new();
@@ -241,6 +258,13 @@ pub fn pin_directories(path: &Path) -> Result<Vec<File>, String> {
     Ok(handles)
 }
 
+#[cfg(target_os = "linux")]
+pub fn open_snapshot(path: &Path) -> Result<File, String> {
+    validate_local_path(path)?;
+    crate::services::mariadb::linux::filesystem::open_snapshot(path)
+}
+
+#[cfg(not(target_os = "linux"))]
 pub fn open_snapshot(path: &Path) -> Result<File, String> {
     validate_local_path(path)?;
     let _handles = pin_directories(path.parent().ok_or("Missing snapshot parent.")?)?;
@@ -308,7 +332,7 @@ pub fn remove_snapshot(path: &Path, expected_sha256: &str) -> Result<(), String>
 
 #[cfg(not(windows))]
 pub fn remove_snapshot(_path: &Path, _expected_sha256: &str) -> Result<(), String> {
-    Err("Safe backup retention requires Windows.".into())
+    Err("Automatic retention is unavailable on this platform: safe deletion by verified file handle is required. Backups are retained.".into())
 }
 
 pub fn sha256(file: &mut File) -> Result<String, String> {
@@ -349,7 +373,12 @@ pub fn available_bytes(path: &Path) -> Result<u64, String> {
     Ok(available)
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
+pub fn available_bytes(path: &Path) -> Result<u64, String> {
+    crate::services::mariadb::linux::filesystem::available_bytes(path)
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
 pub fn available_bytes(_path: &Path) -> Result<u64, String> {
     Err("Managed database backups require Windows.".into())
 }
@@ -366,6 +395,14 @@ pub fn require_headroom(available: u64, estimate: u64) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
+pub fn save_json(path: &Path, value: &impl Serialize) -> Result<(), String> {
+    validate_local_path(path)?;
+    let bytes = serde_json::to_vec_pretty(value).map_err(|e| e.to_string())?;
+    crate::services::mariadb::linux::filesystem::save_json(path, &bytes)
+}
+
+#[cfg(not(target_os = "linux"))]
 pub fn save_json(path: &Path, value: &impl Serialize) -> Result<(), String> {
     validate_local_path(path)?;
     let _handles = pin_directories(path.parent().ok_or("Missing settings parent.")?)?;

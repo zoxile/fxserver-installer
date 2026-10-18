@@ -3,6 +3,22 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 static SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
+#[cfg(unix)]
+#[test]
+fn unix_include_names_do_not_use_windows_stream_or_trailing_dot_rules() {
+    let fixture = Fixture::new();
+    fixture.file("local:settings.cfg", "set first value\n");
+    fixture.file("settings./extra.cfg", "set second value\n");
+    let result = fixture.report("exec local:settings.cfg\nexec settings./extra.cfg\n");
+    assert_eq!(result.file_count, 3);
+    assert!(result.issues.is_empty());
+    assert!(fixture
+        .report("exec ../outside.cfg\n")
+        .issues
+        .iter()
+        .any(|issue| issue.code == "path-unsafe"));
+}
+
 struct Fixture(PathBuf);
 impl Fixture {
     fn new() -> Self {

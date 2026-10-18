@@ -37,7 +37,7 @@ pub struct ConfigValidationReport {
     pub file_count: usize,
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub async fn validate_config_change(
     request: ConfigFileRequest,
     content: String,
@@ -70,7 +70,9 @@ fn linked_component(path: &Path, root: &Path) -> Result<bool, &'static str> {
     for component in relative.components() {
         match component {
             Component::CurDir => continue,
-            Component::Normal(name) if !name.to_string_lossy().contains(':') => current.push(name),
+            Component::Normal(name) if !cfg!(windows) || !name.to_string_lossy().contains(':') => {
+                current.push(name)
+            }
             _ => return Err("path-unsafe"),
         }
         let metadata = match fs::symlink_metadata(&current) {
@@ -365,12 +367,17 @@ impl Scan<'_> {
 
     fn exec_target(&mut self, reference: &str) -> Result<PathBuf, &'static str> {
         // FXServer resolves plain exec paths from dataPath, not the including cfg's folder.
-        let normalized = reference.replace('\\', "/");
-        if normalized.contains(['\0', ':'])
+        let normalized = if cfg!(windows) {
+            reference.replace('\\', "/")
+        } else {
+            reference.to_string()
+        };
+        if normalized.contains('\0')
+            || cfg!(windows) && normalized.contains(':')
             || normalized.starts_with('/')
-            || normalized
-                .split('/')
-                .any(|part| part == ".." || part.ends_with([' ', '.']) && part != ".")
+            || normalized.split('/').any(|part| {
+                part == ".." || cfg!(windows) && part.ends_with([' ', '.']) && part != "."
+            })
         {
             return Err("path-unsafe");
         }

@@ -6,46 +6,46 @@ use super::{inspect, PreflightRequest, ResourceOrigin};
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DependencyRequest {
-    artifact_path: String,
-    tx_data_path: String,
-    profile: String,
+    pub artifact_path: String,
+    pub tx_data_path: String,
+    pub profile: String,
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DependencyResource {
-    name: String,
-    path: String,
-    origin: &'static str,
-    dependencies: Vec<String>,
-    provides: Vec<String>,
-    groups: Vec<String>,
-    dynamic: bool,
+    pub name: String,
+    pub path: String,
+    pub origin: &'static str,
+    pub dependencies: Vec<String>,
+    pub provides: Vec<String>,
+    pub groups: Vec<String>,
+    pub dynamic: bool,
 }
 
 #[derive(Serialize)]
 pub struct StartupCommand {
-    command: String,
-    target: String,
+    pub command: String,
+    pub target: String,
 }
 
 #[derive(Serialize)]
 pub struct ScanWarning {
-    code: String,
-    detail: String,
+    pub code: String,
+    pub detail: String,
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DependencyInventory {
-    resources: Vec<DependencyResource>,
-    resources_incomplete: bool,
-    configs_incomplete: bool,
-    startup: Vec<StartupCommand>,
-    warnings: Vec<ScanWarning>,
+    pub resources: Vec<DependencyResource>,
+    pub resources_incomplete: bool,
+    pub configs_incomplete: bool,
+    pub startup: Vec<StartupCommand>,
+    pub warnings: Vec<ScanWarning>,
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub async fn scan_resource_dependencies(
     request: DependencyRequest,
 ) -> Result<DependencyInventory, String> {

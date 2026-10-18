@@ -1,5 +1,60 @@
 use super::*;
 
+#[tokio::test(flavor = "current_thread")]
+async fn diagnostic_commands_work_on_tokio_without_an_app_handle() {
+    let fixture = Fixture::new();
+    fixture.artifact_resource("chat", "fx_version 'cerulean'");
+    fs::write(fixture.root.join("data/server.cfg"), "ensure chat\n").unwrap();
+    let request = fixture.request();
+    let preflight = run_fxserver_preflight(request.clone()).await.unwrap();
+    assert!(!preflight.blocking);
+    assert_eq!(preflight.resource_count, 1);
+    let inventory = resource_dependencies::scan_resource_dependencies(
+        resource_dependencies::DependencyRequest {
+            artifact_path: request.artifact_path,
+            tx_data_path: request.tx_data_path,
+            profile: request.profile,
+        },
+    )
+    .await
+    .unwrap();
+    assert!(!inventory.resources_incomplete);
+    assert_eq!(inventory.resources.len(), 1);
+    assert_eq!(inventory.resources[0].name, "chat");
+    assert_eq!(inventory.resources[0].origin, "artifact");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn diagnostic_reads_reject_fifos_without_waiting_for_a_writer() {
+    use std::{ffi::CString, os::unix::ffi::OsStrExt};
+    let fixture = Fixture::new();
+    let path = fixture.root.join("pipe.cfg");
+    let name = CString::new(path.as_os_str().as_bytes()).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+    assert!(read_bounded(&path).unwrap_err().contains("regular files"));
+}
+
+#[cfg(unix)]
+#[test]
+fn exported_archives_are_private_on_unix() {
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = Fixture::new();
+    let path = fixture.root.join("diagnostics.zip");
+    write_archive(
+        &path,
+        &[DiagnosticEntry {
+            name: "report.txt".into(),
+            content: "fixture".into(),
+        }],
+    )
+    .unwrap();
+    assert_eq!(
+        fs::metadata(path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+}
+
 pub(super) struct Fixture {
     pub(super) root: PathBuf,
 }
@@ -16,8 +71,14 @@ impl Fixture {
         fs::create_dir_all(root.join("data/resources")).unwrap();
         fs::create_dir_all(root.join("artifacts")).unwrap();
         fs::create_dir_all(root.join("txData/default")).unwrap();
+        let executable = root
+            .join("artifacts")
+            .join(super::super::server_exe::LEGACY_EXECUTABLE);
+        fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        fs::write(executable, "test fixture, not executable").unwrap();
+        #[cfg(target_os = "linux")]
         fs::write(
-            root.join("artifacts/FXServer.exe"),
+            root.join("artifacts/run.sh"),
             "test fixture, not executable",
         )
         .unwrap();
@@ -40,12 +101,13 @@ impl Fixture {
     }
 
     pub(super) fn artifact_resource(&self, path: &str, content: &str) {
-        let path = self
-            .root
-            .join("artifacts/citizen/system_resources")
-            .join(path);
+        let path = self.artifact_resources().join(path);
         fs::create_dir_all(&path).unwrap();
         fs::write(path.join("fxmanifest.lua"), content).unwrap();
+    }
+
+    pub(super) fn artifact_resources(&self) -> PathBuf {
+        artifact_resource_root(&self.root.join("artifacts"))
     }
 
     pub(super) fn request(&self) -> PreflightRequest {

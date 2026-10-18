@@ -1,5 +1,5 @@
 use std::{
-    fs::{self, File, OpenOptions},
+    fs::{self, OpenOptions},
     io::{Read, Write},
     path::{Component, Path, PathBuf},
     sync::{
@@ -11,6 +11,7 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+#[cfg(feature = "desktop")]
 use tauri::{AppHandle, Manager};
 
 use super::fxserver::{
@@ -24,7 +25,7 @@ const MAX_HISTORY_BYTES: usize = 4 * 1024 * 1024;
 const MAX_STORE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_HISTORY_FILES: usize = 256;
 const MAX_DIRECTORY_ENTRIES: usize = 4096;
-const HISTORY_ERROR: &str = "Configuration history is unreadable, altered, or belongs to another Windows account. The config was not changed.";
+const HISTORY_ERROR: &str = "Configuration history is unreadable, altered, or unavailable to this account. The config was not changed.";
 const STALE_ERROR: &str = "CONFIG_CHANGED: This file changed outside this editor. Reload and review the current file before saving or restoring.";
 static HISTORY_LOCK: Mutex<()> = Mutex::new(());
 static SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -89,6 +90,7 @@ struct Target {
     identity: String,
 }
 
+#[cfg(feature = "desktop")]
 pub(crate) fn history_root(app: &AppHandle) -> Result<PathBuf, String> {
     app.path()
         .app_local_data_dir()
@@ -96,7 +98,11 @@ pub(crate) fn history_root(app: &AppHandle) -> Result<PathBuf, String> {
         .map_err(|_| "The configuration history directory is unavailable.".into())
 }
 
-#[tauri::command]
+pub(crate) fn core_history_root() -> Result<PathBuf, String> {
+    crate::platform::data_dir().map(|path| path.join("config-history"))
+}
+
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub async fn read_config_history_file(
     request: ConfigFileRequest,
 ) -> Result<ServerConfigFile, String> {
@@ -108,6 +114,7 @@ pub async fn read_config_history_file(
     .await
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn list_config_history(
     app: AppHandle,
@@ -127,6 +134,7 @@ pub async fn list_config_history(
     .await
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn read_config_history_version(
     app: AppHandle,
@@ -144,6 +152,7 @@ pub async fn read_config_history_version(
     .await
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn restore_config_history_version(
     app: AppHandle,
@@ -297,7 +306,7 @@ fn resolve_target(request: &ConfigFileRequest) -> Result<Target, String> {
     if !path.is_absolute()
         || path.components().any(|part| {
             matches!(part, Component::ParentDir)
-                || matches!(part, Component::Normal(name) if name.to_string_lossy().contains(':'))
+                || matches!(part, Component::Normal(name) if cfg!(windows) && name.to_string_lossy().contains(':'))
         })
     {
         return Err("Choose an existing cfg inside the selected profile dataPath.".into());
@@ -324,7 +333,17 @@ pub(crate) fn read_bounded_config(path: &Path) -> Result<String, String> {
 }
 
 fn read_limit(path: &Path, limit: usize) -> Result<Vec<u8>, String> {
-    let file = File::open(path).map_err(|_| "The file cannot be read.".to_string())?;
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        // Opening a FIFO must not stall a worker before the regular-file check.
+        options.custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW);
+    }
+    let file = options
+        .open(path)
+        .map_err(|_| "The file cannot be read.".to_string())?;
     if !file
         .metadata()
         .map_err(|_| "The file cannot be inspected.")?
@@ -495,7 +514,7 @@ fn persist_journal(store: &Path, target: &Target, journal: &mut Journal) -> Resu
     let encrypted = loop {
         let bytes = serde_json::to_vec(&journal).map_err(|_| HISTORY_ERROR)?;
         let encrypted = encrypt_secret(&bytes).map_err(|_| {
-            "Windows could not encrypt configuration history. Nothing was written in plaintext."
+            "Secure storage could not encrypt configuration history. Nothing was written in plaintext."
                 .to_string()
         })?;
         if encrypted.len() <= MAX_HISTORY_BYTES {
@@ -549,14 +568,24 @@ fn stage_file(destination: &Path, bytes: &[u8]) -> Result<StagedFile, String> {
         std::process::id(),
         SEQUENCE.fetch_add(1, Ordering::Relaxed)
     ));
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&path)
-        .map_err(|_| {
-            "Cannot stage the configuration update; the original was preserved.".to_string()
-        })?;
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(&path).map_err(|_| {
+        "Cannot stage the configuration update; the original was preserved.".to_string()
+    })?;
     let staged = StagedFile(path);
+    // Atomic replacement must not reset a server config's existing access mode.
+    #[cfg(unix)]
+    if let Ok(metadata) = fs::metadata(destination) {
+        file.set_permissions(metadata.permissions()).map_err(|_| {
+            "Cannot preserve configuration permissions; the original was preserved.".to_string()
+        })?;
+    }
     file.write_all(bytes)
         .and_then(|_| file.sync_all())
         .map_err(|_| {
@@ -568,7 +597,7 @@ fn stage_file(destination: &Path, bytes: &[u8]) -> Result<StagedFile, String> {
 pub(crate) fn ensure_unlinked_path(path: &Path) -> Result<(), String> {
     if path.components().any(|part| {
         matches!(part, Component::ParentDir)
-            || matches!(part, Component::Normal(name) if name.to_string_lossy().contains(':'))
+            || matches!(part, Component::Normal(name) if cfg!(windows) && name.to_string_lossy().contains(':'))
     }) {
         return Err("File paths cannot contain traversal or alternate data streams.".into());
     }
@@ -644,6 +673,66 @@ fn atomic_replace(source: &Path, destination: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn config_reads_reject_fifos_without_waiting_for_a_writer() {
+        use std::{ffi::CString, os::unix::ffi::OsStrExt};
+        let fixture = Fixture::new();
+        let path = fixture.root.join("pipe.cfg");
+        let name = CString::new(path.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        assert!(read_bounded_config(&path)
+            .unwrap_err()
+            .contains("regular file"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn staged_configs_preserve_modes_and_new_history_files_are_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let fixture = Fixture::new();
+        let destination = Path::new(&fixture.request.path);
+        fs::set_permissions(destination, fs::Permissions::from_mode(0o640)).unwrap();
+        let staged = stage_file(destination, b"updated").unwrap();
+        assert_eq!(
+            fs::metadata(&staged.0).unwrap().permissions().mode() & 0o777,
+            0o640
+        );
+        atomic_replace(&staged.0, destination).unwrap();
+        assert_eq!(fixture.content(), "updated");
+        assert_eq!(
+            fs::metadata(destination).unwrap().permissions().mode() & 0o777,
+            0o640
+        );
+        let staged = stage_file(
+            &fixture.root.join("new-history.dpapi"),
+            b"encrypted fixture",
+        )
+        .unwrap();
+        assert_eq!(
+            fs::metadata(&staged.0).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_colons_are_filenames_but_traversal_and_symlinks_remain_rejected() {
+        let fixture = Fixture::new();
+        let mut request = fixture.request.clone();
+        request.path = fixture
+            .root
+            .join("data/server:local.cfg")
+            .to_string_lossy()
+            .into();
+        fs::write(&request.path, "fixture").unwrap();
+        assert!(resolve_target(&request).is_ok());
+        assert!(ensure_unlinked_path(&fixture.root.join("data/../data/server.cfg")).is_err());
+        let link = fixture.root.join("data/link.cfg");
+        std::os::unix::fs::symlink(&request.path, &link).unwrap();
+        assert!(ensure_unlinked_path(&link).is_err());
+    }
 
     struct Fixture {
         root: PathBuf,

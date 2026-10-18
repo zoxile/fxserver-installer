@@ -102,6 +102,12 @@ pub fn import_dump(
     };
     let work = (|| {
         target.validate(credentials)?;
+        // Linux advisory locks do not exclude outside writers. Hash, preflight, and
+        // import the same sealed copy instead of trusting a mutable source handle.
+        #[cfg(target_os = "linux")]
+        let mut immutable = crate::services::mariadb::linux::filesystem::sealed_snapshot(file)?;
+        #[cfg(target_os = "linux")]
+        let file = &mut immutable;
         if storage::sha256(file)? != expected_sha256 {
             return Err("Dump checksum changed. Import refused before SQL execution.".into());
         }

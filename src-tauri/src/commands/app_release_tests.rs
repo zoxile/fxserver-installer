@@ -2,10 +2,12 @@ use super::*;
 use serde_json::json;
 
 fn asset(tag: &str) -> String {
-    format!(
-        "{RELEASES}/download/{tag}/FXServer.Installer_{}_windows_x64-setup.exe",
-        tag.trim_start_matches('v')
-    )
+    let names = installer_names(
+        tag.trim_start_matches('v'),
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+    );
+    format!("{RELEASES}/download/{tag}/{}", names[0])
 }
 
 fn release(tag: &str) -> serde_json::Value {
@@ -36,7 +38,7 @@ fn canonical_urls_reject_other_hosts_tags_paths_and_asset_types() {
         asset("v0.4.0").replace("github.com", "github.com@evil.test"),
         asset("v0.4.0").replace("zoxile", "another-owner"),
         asset("v0.4.0").replace("https:", "http:"),
-        asset("v0.4.0").replace("windows_x64", "windows_arm64"),
+        asset("v0.4.0").replace("FXServer.Installer_", "Other.Installer_"),
         asset("v0.4.0").replace("/v0.4.0/", "/v0.3.2/"),
         format!("{}?download=1", asset("v0.4.0")),
         format!("{}#fragment", asset("v0.4.0")),

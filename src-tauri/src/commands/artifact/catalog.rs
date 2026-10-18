@@ -4,11 +4,12 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use crate::models::artifact::{ArtifactBuild, ArtifactCatalog, ArtifactIssue, ArtifactMetadata};
+use crate::models::artifact::{
+    ArtifactBuild, ArtifactCatalog, ArtifactIssue, ArtifactMetadata, ArtifactPlatform,
+};
 
 use super::download_page;
 
-const BASE: &str = "https://runtime.fivem.net/artifacts/fivem/build_server_windows/master/";
 const CACHE_SECONDS: u64 = 15 * 60;
 struct CatalogCache {
     catalog: Option<ArtifactCatalog>,
@@ -27,6 +28,7 @@ fn now() -> u64 {
 }
 
 pub(super) fn load_catalog(refresh: bool) -> Result<ArtifactCatalog, String> {
+    let platform = ArtifactPlatform::host()?;
     let mut cache = CACHE
         .lock()
         .map_err(|_| "Artifact catalog cache is unavailable.")?;
@@ -37,7 +39,7 @@ pub(super) fn load_catalog(refresh: bool) -> Result<ArtifactCatalog, String> {
     {
         return Ok(cached.clone());
     }
-    let builds = match fetch_builds() {
+    let builds = match fetch_builds(platform) {
         Ok(builds) => builds,
         Err(error) => {
             return cache
@@ -80,41 +82,57 @@ pub(super) fn load_catalog(refresh: bool) -> Result<ArtifactCatalog, String> {
     Ok(catalog)
 }
 
-fn fetch_builds() -> Result<Vec<ArtifactBuild>, String> {
-    parse_catalog(&download_page::load(download_page::LEGACY_PAGE)?)
+fn fetch_builds(platform: ArtifactPlatform) -> Result<Vec<ArtifactBuild>, String> {
+    parse_catalog(
+        &download_page::load(&download_page::page(platform, false))?,
+        platform,
+    )
 }
 
-fn parse_catalog(data: &serde_json::Value) -> Result<Vec<ArtifactBuild>, String> {
+fn parse_catalog(
+    data: &serde_json::Value,
+    platform: ArtifactPlatform,
+) -> Result<Vec<ArtifactBuild>, String> {
     let mut links = Vec::new();
     for branch in ["recommended", "latest"] {
-        let windows = data
-            .pointer(&format!("/props/pageProps/legacy/{branch}/windows"))
+        let items = data
+            .pointer(&format!(
+                "/props/pageProps/legacy/{branch}/{}",
+                platform.as_str()
+            ))
             .and_then(|value| value.as_array())
             .filter(|items| !items.is_empty() && items.len() <= 4096)
-            .ok_or("Official download data is missing a complete Legacy Windows build list.")?;
-        for item in windows {
+            .ok_or_else(|| {
+                format!(
+                    "Official download data is missing a complete Legacy {} build list.",
+                    platform.as_str()
+                )
+            })?;
+        for item in items {
             let link = item
                 .get("downloadURL")
                 .and_then(|value| value.as_str())
-                .ok_or("Official Windows build is missing its download URL.")?;
+                .ok_or("Official build is missing its download URL.")?;
             links.push(link.to_string());
         }
     }
-    parse_links(&links)
+    parse_links(&links, platform)
 }
 
-fn parse_links(links: &[String]) -> Result<Vec<ArtifactBuild>, String> {
-    let base = reqwest::Url::parse(BASE).map_err(|error| error.to_string())?;
+fn parse_links(links: &[String], platform: ArtifactPlatform) -> Result<Vec<ArtifactBuild>, String> {
+    let base = reqwest::Url::parse(platform.legacy_base()).map_err(|error| error.to_string())?;
     let mut builds = BTreeMap::new();
     for link in links {
         let Ok(url) = base.join(link) else { continue };
-        let Some(path) = url.as_str().strip_prefix(BASE) else {
+        let Some(path) = url.as_str().strip_prefix(platform.legacy_base()) else {
             continue;
         };
         let Some((directory, archive)) = path.split_once('/') else {
             continue;
         };
-        if !matches!(archive, "server.7z" | "server.zip" | "") {
+        if archive != platform.legacy_archive()
+            && !(platform == ArtifactPlatform::Windows && archive == "server.7z")
+        {
             continue;
         }
         let Some((version, hash)) = directory.split_once('-') else {
@@ -126,8 +144,12 @@ fn parse_links(links: &[String]) -> Result<Vec<ArtifactBuild>, String> {
         {
             continue;
         }
-        let download_url = format!("{BASE}{directory}/server.zip");
-        validate_download(&download_url, version)?;
+        let download_url = format!(
+            "{}{directory}/{}",
+            platform.legacy_base(),
+            platform.legacy_archive()
+        );
+        validate_download(&download_url, version, platform)?;
         builds
             .entry(version.parse::<u64>().unwrap())
             .or_insert(ArtifactBuild {
@@ -139,7 +161,10 @@ fn parse_links(links: &[String]) -> Result<Vec<ArtifactBuild>, String> {
             });
     }
     if builds.is_empty() {
-        return Err("The official listing contained no Windows artifact builds.".into());
+        return Err(format!(
+            "The official listing contained no {} artifact builds.",
+            platform.as_str()
+        ));
     }
     Ok(builds.into_values().rev().collect())
 }
@@ -151,9 +176,16 @@ fn valid_version(version: &str) -> bool {
         && version.parse::<u64>().is_ok_and(|value| value > 0)
 }
 
-pub(super) fn validate_download(value: &str, version: &str) -> Result<(), String> {
+pub(super) fn validate_download(
+    value: &str,
+    version: &str,
+    platform: ArtifactPlatform,
+) -> Result<(), String> {
     let invalid = || {
-        "Choose a valid official Windows artifact download and matching build number.".to_string()
+        format!(
+            "Choose a valid official {} artifact download and matching build number.",
+            platform.as_str()
+        )
     };
     if !valid_version(version) {
         return Err(invalid());
@@ -169,8 +201,12 @@ pub(super) fn validate_download(value: &str, version: &str) -> Result<(), String
     {
         return Err(invalid());
     }
-    let path = value.strip_prefix(BASE).ok_or_else(invalid)?;
-    let directory = path.strip_suffix("/server.zip").ok_or_else(invalid)?;
+    let path = value
+        .strip_prefix(platform.legacy_base())
+        .ok_or_else(invalid)?;
+    let directory = path
+        .strip_suffix(&format!("/{}", platform.legacy_archive()))
+        .ok_or_else(invalid)?;
     let (build, hash) = directory.split_once('-').ok_or_else(invalid)?;
     if build != version || hash.len() != 40 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err(invalid());
@@ -245,6 +281,7 @@ fn requires_acknowledgement(version: &str, metadata: Option<&ArtifactMetadata>) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    const WINDOWS: ArtifactPlatform = ArtifactPlatform::Windows;
     fn link(version: &str) -> String {
         format!("./{version}-0123456789abcdef0123456789abcdef01234567/server.7z")
     }
@@ -266,7 +303,7 @@ mod tests {
             "<a href='{}'>Download</a><script id=\"__NEXT_DATA__\">{data}</script>",
             link("35245")
         );
-        let builds = parse_catalog(&download_page::parse(&page).unwrap()).unwrap();
+        let builds = parse_catalog(&download_page::parse(&page).unwrap(), WINDOWS).unwrap();
         assert_eq!(
             builds
                 .iter()
@@ -274,10 +311,10 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["35945", "35245", "35186"]
         );
-        assert!(parse_catalog(&serde_json::json!({})).is_err());
+        assert!(parse_catalog(&serde_json::json!({}), WINDOWS).is_err());
         let mut missing_latest = data.clone();
         missing_latest["props"]["pageProps"]["legacy"]["latest"]["windows"] = serde_json::json!([]);
-        assert!(parse_catalog(&missing_latest).is_err());
+        assert!(parse_catalog(&missing_latest, WINDOWS).is_err());
     }
 
     #[test]
@@ -288,7 +325,12 @@ mod tests {
         assert!(!catalog.stale, "{:?}", catalog.warning);
         assert!(catalog.builds.iter().any(|build| build.recommended));
         for build in &catalog.builds {
-            validate_download(&build.download_url, &build.version).unwrap();
+            validate_download(
+                &build.download_url,
+                &build.version,
+                ArtifactPlatform::host().unwrap(),
+            )
+            .unwrap();
         }
         println!(
             "Live catalog: {} official Windows builds, JG metadata loaded.",
@@ -298,14 +340,17 @@ mod tests {
 
     #[test]
     fn official_links_are_sorted_deduplicated_and_confined() {
-        let builds = parse_links(&[
-            link("10268"),
-            link("8509"),
-            link("10268"),
-            "..".into(),
-            "https://evil.test/123/server.zip".into(),
-            "./../build_proot_linux/123/server.zip".into(),
-        ])
+        let builds = parse_links(
+            &[
+                link("10268"),
+                link("8509"),
+                link("10268"),
+                "..".into(),
+                "https://evil.test/123/server.zip".into(),
+                "./../build_proot_linux/123/server.zip".into(),
+            ],
+            WINDOWS,
+        )
         .unwrap();
         assert_eq!(
             builds
@@ -321,18 +366,21 @@ mod tests {
 
     #[test]
     fn download_validation_rejects_host_tricks_mismatches_and_paths() {
-        let good = format!("{BASE}123-0123456789abcdef0123456789abcdef01234567/server.zip");
-        assert!(validate_download(&good, "123").is_ok());
+        let good = format!(
+            "{}123-0123456789abcdef0123456789abcdef01234567/server.zip",
+            WINDOWS.legacy_base()
+        );
+        assert!(validate_download(&good, "123", WINDOWS).is_ok());
         for url in [
             good.replace("runtime.fivem.net", "runtime.fivem.net.evil.test"),
             good.replace("https://", "https://evil.test/"),
             format!("{good}?x=1"),
             good.replace("/server.zip", "/../server.zip"),
         ] {
-            assert!(validate_download(&url, "123").is_err(), "{url}");
+            assert!(validate_download(&url, "123", WINDOWS).is_err(), "{url}");
         }
-        assert!(validate_download(&good, "124").is_err());
-        assert!(validate_download(&good, "../../bad").is_err());
+        assert!(validate_download(&good, "124", WINDOWS).is_err());
+        assert!(validate_download(&good, "../../bad", WINDOWS).is_err());
     }
 
     #[test]
@@ -352,13 +400,16 @@ mod tests {
                 },
             ],
         };
-        let builds = parse_links(&[
-            link("10311"),
-            link("10310"),
-            link("10309"),
-            link("10268"),
-            link("10267"),
-        ])
+        let builds = parse_links(
+            &[
+                link("10311"),
+                link("10310"),
+                link("10309"),
+                link("10268"),
+                link("10267"),
+            ],
+            WINDOWS,
+        )
         .unwrap();
         let result = annotate(builds.clone(), Some(&metadata));
         assert_eq!(
@@ -382,5 +433,41 @@ mod tests {
         assert!(annotate(builds, None)
             .iter()
             .all(|build| build.health == "unknown"));
+    }
+
+    #[test]
+    fn linux_catalog_uses_only_linux_lists_and_tar_urls() {
+        let linux = ArtifactPlatform::Linux;
+        let linux_link = |version: &str| {
+            format!(
+                "{}{version}-0123456789abcdef0123456789abcdef01234567/fx.tar.xz",
+                linux.legacy_base()
+            )
+        };
+        let data = serde_json::json!({"props":{"pageProps":{"legacy":{
+            "recommended":{"linux":[{"downloadURL":linux_link("101")}], "windows":[{"downloadURL":link("999")}]},
+            "latest":{"linux":[{"downloadURL":linux_link("102")}], "windows":[{"downloadURL":link("999")}]}
+        }}}});
+        let builds = parse_catalog(&data, linux).unwrap();
+        assert_eq!(
+            builds
+                .iter()
+                .map(|b| b.version.as_str())
+                .collect::<Vec<_>>(),
+            ["102", "101"]
+        );
+        for build in builds {
+            assert!(validate_download(&build.download_url, &build.version, linux).is_ok());
+            assert!(validate_download(&build.download_url, &build.version, WINDOWS).is_err());
+        }
+        let windows_url = format!(
+            "{}101-0123456789abcdef0123456789abcdef01234567/server.zip",
+            WINDOWS.legacy_base()
+        );
+        assert!(validate_download(&windows_url, "101", linux).is_err());
+        assert!(parse_links(&[windows_url], linux).is_err());
+        let mut missing = data.clone();
+        missing["props"]["pageProps"]["legacy"]["latest"]["linux"] = serde_json::json!([]);
+        assert!(parse_catalog(&missing, linux).is_err());
     }
 }

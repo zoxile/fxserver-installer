@@ -114,7 +114,7 @@ pub fn prepare(
     if sensitive_text(text) {
         return Err("The selected SQL dump contains potential credentials or secret fields. Database copy refused; create a reviewed secret-free dump. SQL is never rewritten.".into());
     }
-    let mut file = storage::open_snapshot(&path)?;
+    let mut file = open_dump(&path)?;
     check_metadata(&file.metadata().map_err(io_error)?)?;
     let sha256 = storage::sha256(&mut file)?;
     if sha256 != digest(&bytes) {
@@ -130,7 +130,10 @@ pub fn prepare(
         return Err("Database dump does not match its package manifest.".into());
     }
     Ok(Some(DatabasePlan {
+        #[cfg(not(target_os = "linux"))]
         source: path.canonicalize().map_err(io_error)?,
+        #[cfg(target_os = "linux")]
+        source: path,
         package: metadata,
         table_count: guard.tables.len(),
     }))
@@ -253,7 +256,7 @@ impl DatabaseRun {
                 .ok_or("Missing database dump parent.")?,
         )?;
         check_no_links(&self.plan.source)?;
-        let mut file = storage::open_snapshot(&self.plan.source)?;
+        let mut file = open_dump(&self.plan.source)?;
         check_metadata(&file.metadata().map_err(io_error)?)?;
         let outcome = owned_restore::import_dump(
             &self.credentials,
@@ -302,5 +305,46 @@ impl DatabaseRun {
             username: self.credentials.username.clone(),
             database: self.target.database.clone(),
         }
+    }
+}
+
+fn open_dump(path: &Path) -> Result<File, String> {
+    #[cfg(target_os = "linux")]
+    {
+        let mut file = super::linux_fs::read(path)?;
+        let metadata = file.metadata().map_err(io_error)?;
+        let snapshot = crate::services::mariadb::linux::filesystem::sealed_snapshot(&mut file)?;
+        super::linux_fs::unchanged(&file, &metadata)?;
+        return Ok(snapshot);
+    }
+    #[cfg(not(target_os = "linux"))]
+    storage::open_snapshot(path)
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dump_preflight_uses_an_immutable_nofollow_snapshot() {
+        use std::os::unix::fs::symlink;
+        let root = std::env::temp_dir().join(format!(
+            "fxclone-dump-{}",
+            super::super::linux_fs::token().unwrap()
+        ));
+        fs::create_dir(&root).unwrap();
+        let path = root.join("dump.sql");
+        fs::write(&path, "original dump").unwrap();
+        let mut snapshot = open_dump(&path).unwrap();
+        fs::write(&path, "changed dump").unwrap();
+        let mut contents = String::new();
+        snapshot.read_to_string(&mut contents).unwrap();
+        assert_eq!(contents, "original dump");
+        assert!(snapshot.set_len(0).is_err());
+        symlink(&path, root.join("link.sql")).unwrap();
+        assert!(open_dump(&root.join("link.sql")).is_err());
+        fs::hard_link(&path, root.join("hardlink.sql")).unwrap();
+        assert!(open_dump(&path).is_err());
+        fs::remove_dir_all(root).unwrap();
     }
 }

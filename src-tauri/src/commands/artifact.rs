@@ -1,8 +1,9 @@
 // Enhanced edition integration adapted from Huntercorlett's fork (53f1834).
+#[cfg(windows)]
+use std::process::Command;
 use std::{
     fs,
     path::{Path, PathBuf},
-    process::Command,
     sync::Mutex,
 };
 
@@ -14,66 +15,63 @@ mod download_page;
 mod enhanced;
 #[path = "artifact/install.rs"]
 mod install;
+#[path = "artifact/tar_archive.rs"]
+mod tar_archive;
 use super::server_exe::{find_server_executable, ServerEdition};
 static INSTALL_OPERATION: Mutex<()> = Mutex::new(());
 
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub async fn get_enhanced_artifact_catalog(
 ) -> Result<crate::models::artifact::EnhancedArtifactCatalog, String> {
-    super::run_blocking(enhanced::load_catalog).await
+    super::run_blocking(load_enhanced_catalog).await
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn install_enhanced_artifact(
     manager: tauri::State<'_, super::fxserver::FxserverManager>,
     request: crate::models::artifact::EnhancedInstallRequest,
 ) -> Result<crate::models::artifact::ArtifactInstallResult, String> {
     let manager = manager.inner().clone();
-    super::run_blocking(move || {
-        let _operation = INSTALL_OPERATION
-            .try_lock()
-            .map_err(|_| "Another artifact installation is in progress.")?;
-        let version = enhanced::validate_enhanced_url(&request.url)?;
-        manager.with_stopped_server(|| {
-            install::install(
-                request.url.trim(),
-                &request.destination,
-                &version,
-                ServerEdition::Enhanced,
-            )
-        })
-    })
-    .await
+    super::run_blocking(move || install_enhanced_for_manager(&manager, request)).await
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub async fn get_windows_artifact_catalog(
     refresh: bool,
 ) -> Result<crate::models::artifact::ArtifactCatalog, String> {
-    super::run_blocking(move || catalog::load_catalog(refresh)).await
+    super::run_blocking(move || load_catalog(refresh)).await
 }
 
-use crate::{
-    models::artifact::{
-        ArtifactInstallRequest, ArtifactInstallResult, ArtifactMetadata, InstalledArtifactInfo,
-    },
-    process::CommandNoWindowExt,
+use crate::models::artifact::{
+    ArtifactCatalog, ArtifactInstallRequest, ArtifactInstallResult, ArtifactMetadata,
+    ArtifactPlatform, EnhancedArtifactCatalog, EnhancedInstallRequest, InstalledArtifactInfo,
 };
+#[cfg(windows)]
+use crate::process::CommandNoWindowExt;
 
-#[tauri::command]
+pub(crate) fn load_catalog(refresh: bool) -> Result<ArtifactCatalog, String> {
+    catalog::load_catalog(refresh)
+}
+
+pub(crate) fn load_enhanced_catalog() -> Result<EnhancedArtifactCatalog, String> {
+    enhanced::load_catalog()
+}
+
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub async fn get_windows_artifact_metadata() -> Result<ArtifactMetadata, String> {
     super::run_blocking(fetch_artifact_metadata_blocking).await
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub async fn get_installed_windows_artifact_info(
     destination: String,
 ) -> Result<InstalledArtifactInfo, String> {
-    super::run_blocking(move || get_installed_windows_artifact_info_blocking(destination)).await
+    super::run_blocking(move || get_installed_artifact_info(&destination)).await
 }
 
-fn get_installed_windows_artifact_info_blocking(
-    destination: String,
+pub(crate) fn get_installed_artifact_info(
+    destination: &str,
 ) -> Result<InstalledArtifactInfo, String> {
     let destination = PathBuf::from(destination.trim());
     if destination.as_os_str().is_empty() {
@@ -204,7 +202,11 @@ fn find_file_by_stem(directory: &Path, expected_stem: &str, depth: usize) -> Opt
 
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.is_file() {
+        let metadata = entry.file_type().ok()?;
+        if metadata.is_symlink() {
+            continue;
+        }
+        if metadata.is_file() {
             let stem_matches = path
                 .file_stem()
                 .and_then(|stem| stem.to_str())
@@ -235,7 +237,7 @@ fn find_file_by_stem(directory: &Path, expected_stem: &str, depth: usize) -> Opt
 
                 first_match.get_or_insert(path);
             }
-        } else if path.is_dir() {
+        } else if metadata.is_dir() {
             if let Some(found) = find_file_by_stem(&path, expected_stem, depth - 1) {
                 return Some(found);
             }
@@ -245,6 +247,12 @@ fn find_file_by_stem(directory: &Path, expected_stem: &str, depth: usize) -> Opt
     first_match
 }
 
+#[cfg(not(windows))]
+fn read_file_version_info(_path: &Path) -> Option<FileVersionInfo> {
+    None
+}
+
+#[cfg(windows)]
 fn read_file_version_info(path: &Path) -> Option<FileVersionInfo> {
     let path_literal = powershell_string_literal(&path.to_string_lossy());
     let script = format!(
@@ -295,6 +303,7 @@ $info = [System.Diagnostics.FileVersionInfo]::GetVersionInfo({path_literal})
     })
 }
 
+#[cfg(windows)]
 fn number_from_json(value: Option<&serde_json::Value>) -> Option<u64> {
     value.and_then(|value| {
         value
@@ -303,73 +312,55 @@ fn number_from_json(value: Option<&serde_json::Value>) -> Option<u64> {
     })
 }
 
+#[cfg(windows)]
 fn powershell_string_literal(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
 }
 
-fn fetch_artifact_metadata_blocking() -> Result<ArtifactMetadata, String> {
-    let script = r#"
-$ErrorActionPreference = "Stop"
-$ProgressPreference = "SilentlyContinue"
-[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-(Invoke-WebRequest -Uri "https://artifacts.jgscripts.com/jsonv2" -UseBasicParsing -TimeoutSec 30).Content
-"#;
-
-    let output = Command::new("powershell")
-        .no_window()
-        .arg("-NoProfile")
-        .arg("-ExecutionPolicy")
-        .arg("Bypass")
-        .arg("-Command")
-        .arg(script)
-        .output()
+pub(crate) fn fetch_artifact_metadata_blocking() -> Result<ArtifactMetadata, String> {
+    let platform = ArtifactPlatform::host()?;
+    let response = enhanced::client(std::time::Duration::from_secs(30))?
+        .get("https://artifacts.jgscripts.com/jsonv2")
+        .send()
+        .and_then(reqwest::blocking::Response::error_for_status)
         .map_err(|error| format!("Failed to fetch JG Scripts artifact metadata: {error}"))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(if stderr.is_empty() {
-            "JG Scripts artifact metadata request failed without output.".to_string()
-        } else {
-            stderr
-        });
+    if !response.status().is_success() {
+        return Err("Metadata redirects are not accepted.".into());
     }
-
-    let content = String::from_utf8_lossy(&output.stdout);
-    let metadata: ArtifactMetadata = serde_json::from_str(content.trim())
+    let bytes = download_page::read_bounded(response, 1024 * 1024)?;
+    let metadata: ArtifactMetadata = serde_json::from_slice(&bytes)
         .map_err(|error| format!("Failed to parse JG Scripts artifact metadata: {error}"))?;
 
-    if metadata.recommended_artifact.trim().is_empty()
-        || metadata.windows_download_link.trim().is_empty()
-    {
-        return Err("JG Scripts artifact metadata did not include a Windows artifact.".to_string());
-    }
+    let link = metadata.download_link(platform).ok_or_else(|| {
+        format!(
+            "JG Scripts metadata did not include a {} artifact.",
+            platform.as_str()
+        )
+    })?;
+    legacy_archive_url(link, &metadata.recommended_artifact, platform)?;
 
     Ok(metadata)
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn install_windows_artifact(
     manager: tauri::State<'_, super::fxserver::FxserverManager>,
     request: ArtifactInstallRequest,
 ) -> Result<ArtifactInstallResult, String> {
     let manager = manager.inner().clone();
-    super::run_blocking(move || {
-        let _operation = INSTALL_OPERATION
-            .try_lock()
-            .map_err(|_| "Another artifact installation is in progress.")?;
-        manager.with_stopped_server(|| install_windows_artifact_blocking(request))
-    })
-    .await
+    super::run_blocking(move || install_legacy_for_manager(&manager, request)).await
 }
 
-fn install_windows_artifact_blocking(
+/// Called only while holding the manager's stopped-server guard.
+fn install_legacy_artifact(
     request: ArtifactInstallRequest,
 ) -> Result<ArtifactInstallResult, String> {
-    if !cfg!(target_os = "windows") {
-        return Err("Artifact installation is only supported on Windows right now.".to_string());
-    }
-
-    let url = legacy_zip_url(&request.url, &request.version)?;
+    let _operation = INSTALL_OPERATION
+        .try_lock()
+        .map_err(|_| "Another artifact installation is in progress.")?;
+    let platform = ArtifactPlatform::host()?;
+    let url = legacy_archive_url(request.url.trim(), &request.version, platform)?;
     catalog::validate_install_risk(&request.version, request.acknowledge_risk)?;
 
     install::install(
@@ -377,16 +368,55 @@ fn install_windows_artifact_blocking(
         &request.destination,
         &request.version,
         ServerEdition::Legacy,
+        platform,
     )
 }
 
-fn legacy_zip_url(url: &str, version: &str) -> Result<String, String> {
+fn install_enhanced_artifact_blocking(
+    request: EnhancedInstallRequest,
+) -> Result<ArtifactInstallResult, String> {
+    let _operation = INSTALL_OPERATION
+        .try_lock()
+        .map_err(|_| "Another artifact installation is in progress.")?;
+    let platform = ArtifactPlatform::host()?;
+    let version = enhanced::validate_published_download(&request.url)?;
+    install::install(
+        request.url.trim(),
+        &request.destination,
+        &version,
+        ServerEdition::Enhanced,
+        platform,
+    )
+}
+
+pub(crate) fn install_legacy_for_manager(
+    manager: &super::fxserver::FxserverManager,
+    request: ArtifactInstallRequest,
+) -> Result<ArtifactInstallResult, String> {
+    manager.with_stopped_server(|| install_legacy_artifact(request))
+}
+
+pub(crate) fn install_enhanced_for_manager(
+    manager: &super::fxserver::FxserverManager,
+    request: EnhancedInstallRequest,
+) -> Result<ArtifactInstallResult, String> {
+    manager.with_stopped_server(|| install_enhanced_artifact_blocking(request))
+}
+
+fn legacy_archive_url(
+    url: &str,
+    version: &str,
+    platform: ArtifactPlatform,
+) -> Result<String, String> {
     // The official listing exposes .7z links; the same build also publishes server.zip.
-    let url = url
-        .strip_suffix("/server.7z")
-        .map(|base| format!("{base}/server.zip"))
+    let url = (platform == ArtifactPlatform::Windows)
+        .then_some(url)
+        .and_then(|url| {
+            url.strip_suffix("/server.7z")
+                .map(|base| format!("{base}/server.zip"))
+        })
         .unwrap_or_else(|| url.to_string());
-    catalog::validate_download(&url, version)?;
+    catalog::validate_download(&url, version, platform)?;
     Ok(url)
 }
 
@@ -397,14 +427,48 @@ mod tests {
     fn legacy_zip_and_seven_zip_links_resolve_to_the_same_validated_build() {
         let base = "https://runtime.fivem.net/artifacts/fivem/build_server_windows/master/123-0123456789abcdef0123456789abcdef01234567";
         assert_eq!(
-            legacy_zip_url(&format!("{base}/server.7z"), "123").unwrap(),
+            legacy_archive_url(
+                &format!("{base}/server.7z"),
+                "123",
+                ArtifactPlatform::Windows
+            )
+            .unwrap(),
             format!("{base}/server.zip")
         );
         assert_eq!(
-            legacy_zip_url(&format!("{base}/server.zip"), "123").unwrap(),
+            legacy_archive_url(
+                &format!("{base}/server.zip"),
+                "123",
+                ArtifactPlatform::Windows
+            )
+            .unwrap(),
             format!("{base}/server.zip")
         );
-        assert!(legacy_zip_url(&format!("{base}/server.7z"), "124").is_err());
-        assert!(legacy_zip_url("https://evil.example/server.7z", "123").is_err());
+        assert!(legacy_archive_url(
+            &format!("{base}/server.7z"),
+            "124",
+            ArtifactPlatform::Windows
+        )
+        .is_err());
+        assert!(legacy_archive_url(
+            "https://evil.example/server.7z",
+            "123",
+            ArtifactPlatform::Windows
+        )
+        .is_err());
+        assert!(legacy_archive_url(
+            &format!("{base}/server.zip"),
+            "123",
+            ArtifactPlatform::Linux
+        )
+        .is_err());
+        let linux_url = format!(
+            "{}123-0123456789abcdef0123456789abcdef01234567/fx.tar.xz",
+            ArtifactPlatform::Linux.legacy_base()
+        );
+        assert_eq!(
+            legacy_archive_url(&linux_url, "123", ArtifactPlatform::Linux).unwrap(),
+            linux_url
+        );
     }
 }

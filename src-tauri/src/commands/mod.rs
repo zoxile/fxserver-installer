@@ -1,25 +1,44 @@
+#[cfg(feature = "desktop")]
 pub mod app_release;
 pub mod artifact;
+#[cfg(feature = "desktop")]
 pub mod backup_manager;
+#[cfg(not(feature = "desktop"))]
+#[path = "headless_backups.rs"]
+pub(crate) mod backup_manager;
 pub mod config_history;
 pub mod config_validation;
+#[cfg(feature = "desktop")]
 pub mod database_admin;
+#[cfg(feature = "desktop")]
 pub mod database_browser;
+#[cfg(feature = "desktop")]
 pub mod database_credentials;
+#[cfg(feature = "desktop")]
 pub mod database_inspection;
 pub mod diagnostics;
 pub mod fxserver;
+#[cfg(feature = "desktop")]
 pub mod health;
+#[cfg(feature = "desktop")]
 pub mod jooat;
+#[cfg(feature = "desktop")]
 pub mod live_bridge;
+#[cfg(feature = "desktop")]
 pub mod logs;
+#[cfg(feature = "desktop")]
 pub mod managed_rcon;
+#[cfg(feature = "desktop")]
 pub mod mariadb;
+#[cfg(feature = "desktop")]
 pub mod profiler_capture;
+#[cfg(feature = "desktop")]
 pub mod resource_updates;
 pub(crate) mod server_exe;
+#[cfg(feature = "desktop")]
 pub mod sql_diagnostics;
 pub mod system;
+#[cfg(feature = "desktop")]
 pub mod workspace_clone;
 
 use std::sync::{Condvar, Mutex};
@@ -89,7 +108,7 @@ pub(crate) async fn run_blocking<T: Send + 'static>(
         work.active += 1;
     }
     let permit = WorkPermit;
-    tauri::async_runtime::spawn_blocking(move || {
+    tokio::task::spawn_blocking(move || {
         let _permit = permit;
         task()
     })

@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 const RELEASES: &str = "https://github.com/zoxile/fxserver-installer/releases";
 const API: &str = "https://api.github.com/repos/zoxile/fxserver-installer/releases?per_page=10";
 const MAX_BODY: usize = 1024 * 1024;
-const NO_RELEASE: &str = "Could not verify a published Windows installer for this release channel. Try again later or inspect the project's GitHub releases.";
+const NO_RELEASE: &str = "Could not verify a published installer compatible with this operating system and architecture for this release channel. Try again later or inspect the project's GitHub releases.";
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -91,6 +91,24 @@ fn tag_from_url(value: &str) -> Option<String> {
 }
 
 fn installer_url(value: &str, tag: &str) -> Option<String> {
+    installer_url_for_platform(value, tag, std::env::consts::OS, std::env::consts::ARCH)
+}
+
+fn installer_names(number: &str, os: &str, arch: &str) -> Vec<String> {
+    let suffixes: &[&str] = match (os, arch) {
+        ("windows", "x86_64") => &["windows_x64-setup.exe"],
+        ("windows", "aarch64") => &["windows_arm64-setup.exe"],
+        ("linux", "x86_64") => &["linux_x64.AppImage", "amd64.AppImage", "x86_64.AppImage"],
+        ("linux", "aarch64") => &["linux_arm64.AppImage", "aarch64.AppImage", "arm64.AppImage"],
+        _ => &[],
+    };
+    suffixes
+        .iter()
+        .map(|suffix| format!("FXServer.Installer_{number}_{suffix}"))
+        .collect()
+}
+
+fn installer_url_for_platform(value: &str, tag: &str, os: &str, arch: &str) -> Option<String> {
     version(tag)?;
     let value = if value.starts_with('/') {
         format!("https://github.com{value}")
@@ -98,9 +116,10 @@ fn installer_url(value: &str, tag: &str) -> Option<String> {
         value.into()
     };
     let number = tag.strip_prefix('v').unwrap_or(tag);
-    let expected =
-        format!("{RELEASES}/download/{tag}/FXServer.Installer_{number}_windows_x64-setup.exe");
-    (value == expected).then_some(value)
+    installer_names(number, os, arch)
+        .iter()
+        .any(|name| value == format!("{RELEASES}/download/{tag}/{name}"))
+        .then_some(value)
 }
 
 fn info(tag: &str, url: String, prerelease: bool) -> AppReleaseInfo {
@@ -217,6 +236,9 @@ fn asset_response(status: u16, location: Option<&str>, length: Option<u64>) -> b
 }
 
 fn lookup(beta: bool, policy: &[String]) -> Result<AppReleaseInfo, String> {
+    if installer_names("0.0.0", std::env::consts::OS, std::env::consts::ARCH).is_empty() {
+        return Err(NO_RELEASE.into());
+    }
     let client = Client::builder()
         .user_agent("FXServer-Installer release-check")
         .no_proxy()
@@ -398,3 +420,61 @@ fn api_releases(body: &str, beta: bool, policy: &[String]) -> Result<Vec<AppRele
 #[cfg(test)]
 #[path = "app_release_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod platform_tests {
+    use super::*;
+
+    #[test]
+    fn installer_assets_must_match_both_host_os_and_architecture() {
+        for (os, arch) in [
+            ("windows", "x86_64"),
+            ("windows", "aarch64"),
+            ("linux", "x86_64"),
+            ("linux", "aarch64"),
+        ] {
+            for name in installer_names("0.5.2", os, arch) {
+                let url = format!("{RELEASES}/download/v0.5.2/{name}");
+                assert_eq!(
+                    installer_url_for_platform(&url, "v0.5.2", os, arch),
+                    Some(url.clone())
+                );
+                let other_os = if os == "windows" { "linux" } else { "windows" };
+                let other_arch = if arch == "x86_64" {
+                    "aarch64"
+                } else {
+                    "x86_64"
+                };
+                assert!(installer_url_for_platform(&url, "v0.5.2", other_os, arch).is_none());
+                assert!(installer_url_for_platform(&url, "v0.5.2", os, other_arch).is_none());
+                assert!(
+                    installer_url_for_platform(&format!("{url}.sig"), "v0.5.2", os, arch).is_none()
+                );
+                assert!(installer_url_for_platform(
+                    &format!("{url}?download=1"),
+                    "v0.5.2",
+                    os,
+                    arch
+                )
+                .is_none());
+            }
+        }
+        assert!(installer_names("0.5.2", "linux", "riscv64").is_empty());
+        assert!(installer_names("0.5.2", "macos", "aarch64").is_empty());
+    }
+
+    #[test]
+    fn release_without_a_host_installer_is_not_advertised() {
+        let os = if cfg!(windows) { "linux" } else { "windows" };
+        let wrong_asset = &installer_names("0.5.2", os, "x86_64")[0];
+        let body = serde_json::json!([{
+            "tag_name": "v0.5.2", "html_url": format!("{RELEASES}/tag/v0.5.2"),
+            "draft": false, "prerelease": false, "published_at": "2026-10-18T12:00:00Z",
+            "assets": [{ "browser_download_url": format!("{RELEASES}/download/v0.5.2/{wrong_asset}"),
+                "state": "uploaded", "size": 1024 }]
+        }]);
+        assert!(api_releases(&body.to_string(), false, &[])
+            .unwrap()
+            .is_empty());
+    }
+}

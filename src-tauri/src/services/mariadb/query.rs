@@ -21,7 +21,9 @@ pub(crate) const QUERY_TIMEOUT: Duration = Duration::from_secs(30);
 
 use crate::models::mariadb::{MariaDBCredentials, MariaDBQueryResult};
 use crate::process::CommandNoWindowExt;
-use crate::services::mariadb::{detect::get_install_path, permissions::escape_identifier};
+#[cfg(not(target_os = "linux"))]
+use crate::services::mariadb::detect::get_install_path;
+use crate::services::mariadb::permissions::escape_identifier;
 
 pub fn execute_query(
     credentials: MariaDBCredentials,
@@ -48,12 +50,16 @@ pub fn execute_query(
 pub(crate) fn configured_client(
     credentials: &MariaDBCredentials,
 ) -> Result<(Command, CredentialFile), String> {
-    #[cfg(all(test, windows))]
+    #[cfg(all(test, windows, feature = "desktop"))]
     if let Some(client) = crate::commands::database_browser::isolated_test_client(credentials) {
         return client;
     }
     let client = find_mariadb_client().ok_or_else(|| {
-        "Could not find mariadb.exe. Install MariaDB or add its bin folder to PATH.".to_string()
+        #[cfg(target_os = "linux")]
+        let message = "Could not find a MariaDB mariadb/mysql client. Install the distro MariaDB client or add its bin folder to PATH.";
+        #[cfg(not(target_os = "linux"))]
+        let message = "Could not find mariadb.exe. Install MariaDB or add its bin folder to PATH.";
+        message.to_string()
     })?;
     let mut command = Command::new(client);
     command.no_window();
@@ -134,6 +140,11 @@ pub(crate) fn run_client(
     timeout: Duration,
 ) -> Result<ClientOutput, String> {
     let started = Instant::now();
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
     let mut child = command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -154,7 +165,10 @@ pub(crate) fn run_client(
             (started.elapsed() >= timeout).then(|| "Database query timed out.".to_string())
         });
         if let Some(error) = failure {
+            #[cfg(windows)]
             let _ = crate::commands::fxserver::terminate_process_tree(child.id());
+            #[cfg(target_os = "linux")]
+            super::linux::runtime::terminate_group(&mut child);
             let _ = child.kill();
             let _ = child.wait();
             break Err(error);
@@ -167,7 +181,10 @@ pub(crate) fn run_client(
             }
             Ok(_) => thread::sleep(Duration::from_millis(25)),
             Err(error) => {
+                #[cfg(windows)]
                 let _ = crate::commands::fxserver::terminate_process_tree(child.id());
+                #[cfg(target_os = "linux")]
+                super::linux::runtime::terminate_group(&mut child);
                 let _ = child.kill();
                 let _ = child.wait();
                 break Err(format!("Cannot wait for MariaDB client: {error}"));
@@ -364,6 +381,12 @@ pub(crate) fn find_mariadb_client() -> Option<String> {
         .map(|path| path.to_string_lossy().into_owned())
 }
 
+#[cfg(target_os = "linux")]
+fn find_mariadb_client_uncached() -> Option<PathBuf> {
+    super::detect::find_binary(&["mariadb", "mysql"])
+}
+
+#[cfg(not(target_os = "linux"))]
 fn find_mariadb_client_uncached() -> Option<PathBuf> {
     if let Some(install_path) = get_install_path() {
         let client_path = PathBuf::from(install_path).join("bin").join("mariadb.exe");

@@ -679,6 +679,7 @@ fn validate_disk_path(path: &str) -> Result<PathBuf, String> {
     Ok(path)
 }
 
+#[cfg(not(target_os = "linux"))]
 fn local_disk_path(path: &str) -> Result<PathBuf, String> {
     let bytes = path.as_bytes();
     if bytes.len() < 3
@@ -738,9 +739,39 @@ fn validate_local_disk_folder(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(not(target_os = "windows"))]
-fn validate_local_disk_folder(_: &Path) -> Result<(), String> {
-    Err("Native disk monitoring is only supported on Windows.".to_string())
+#[cfg(target_os = "linux")]
+fn local_disk_path(path: &str) -> Result<PathBuf, String> {
+    if !path.starts_with('/')
+        || path.starts_with("//")
+        || path.contains('\\')
+        || path.chars().any(char::is_control)
+        || path.split('/').any(|part| matches!(part, "." | ".."))
+    {
+        return Err("Choose an absolute local folder without traversal or symbolic links.".into());
+    }
+    Ok(PathBuf::from(path))
+}
+
+#[cfg(target_os = "linux")]
+fn validate_local_disk_folder(path: &Path) -> Result<(), String> {
+    use std::os::fd::AsRawFd;
+    let directory = super::workspace_clone::linux_fs::directory(path)?;
+    let mut stats = std::mem::MaybeUninit::<libc::statfs>::uninit();
+    if unsafe { libc::fstatfs(directory.as_raw_fd(), stats.as_mut_ptr()) } != 0 {
+        return Err(format!(
+            "Cannot inspect disk filesystem: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    let kind = unsafe { stats.assume_init() }.f_type as u64;
+    // NFS, SMB/CIFS, 9P and pseudo-filesystems are not local disk capacity.
+    if matches!(
+        kind,
+        0x6969 | 0xff534d42 | 0xfe534d42 | 0x517b | 0x9fa0 | 0x62656572 | 0x63677270 | 0x27e0eb
+    ) {
+        return Err("Disk monitoring requires a local storage filesystem.".into());
+    }
+    Ok(())
 }
 
 fn sample_disk(configured_path: &str) -> Result<(PathBuf, f64), String> {
@@ -783,9 +814,9 @@ fn free_disk_gb(path: &Path) -> Result<f64, String> {
     Ok(available as f64 / 1_073_741_824.0)
 }
 
-#[cfg(not(target_os = "windows"))]
-fn free_disk_gb(_: &Path) -> Result<f64, String> {
-    Err("Native disk monitoring is only supported on Windows.".to_string())
+#[cfg(target_os = "linux")]
+fn free_disk_gb(path: &Path) -> Result<f64, String> {
+    Ok(super::workspace_clone::linux_fs::available_bytes(path)? as f64 / 1_073_741_824.0)
 }
 
 #[cfg(test)]
@@ -1224,6 +1255,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "windows")]
     fn local_disk_path_accepts_drive_roots_and_plain_absolute_folders() {
         for path in ["C:\\", "D:/", "C:\\folder\\nested", "D:/folder/nested"] {
             assert!(local_disk_path(path).is_ok(), "{path}");
@@ -1231,7 +1263,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
     fn automatic_disk_sampling_reads_the_local_app_folder() {
         let (path, value) = sample_disk("").unwrap();
         assert!(path.is_absolute());
@@ -1242,6 +1274,34 @@ mod tests {
             ..HealthConfig::default()
         };
         assert!(config.validate().is_ok());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_disk_paths_are_absolute_case_sensitive_and_nofollow() {
+        use std::os::unix::fs::symlink;
+        let root = std::env::temp_dir().join(format!(
+            "fxsi-health-{}",
+            super::super::workspace_clone::linux_fs::token().unwrap()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        std::fs::create_dir(root.join("Data")).unwrap();
+        symlink(root.join("Data"), root.join("link")).unwrap();
+        assert!(sample_disk(root.join("Data").to_str().unwrap()).unwrap().1 >= 0.0);
+        assert!(sample_disk(root.join("data").to_str().unwrap()).is_err());
+        assert!(sample_disk(root.join("link").to_str().unwrap()).is_err());
+        for path in [
+            "relative",
+            "//host/share",
+            "/tmp/../etc",
+            "/tmp/./data",
+            "/tmp/a\\b",
+            "/tmp/a\0b",
+        ] {
+            assert!(local_disk_path(path).is_err(), "{path}");
+        }
+        assert!(validate_disk_path(Path::new("/proc").to_str().unwrap()).is_err());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

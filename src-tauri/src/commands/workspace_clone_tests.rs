@@ -1,5 +1,76 @@
 use super::*;
 
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_nofollow_io_and_cleanup_preserve_external_targets() {
+    use std::os::unix::fs::symlink;
+    let fixture = Fixture::new();
+    let outside = fixture.root.join("outside");
+    fs::create_dir(&outside).unwrap();
+    fs::write(outside.join("keep.txt"), "private data").unwrap();
+    let owned = fixture.root.join("owned");
+    fs::create_dir(&owned).unwrap();
+    symlink(&outside, owned.join("linked")).unwrap();
+    assert!(linux_fs::read(&owned.join("linked/keep.txt")).is_err());
+    assert!(linux_fs::create(&owned.join("linked/new.txt")).is_err());
+    assert!(linux_fs::mkdir(&owned.join("linked/new")).is_err());
+    assert!(linux_fs::remove_tree(&fixture.root, &owned).is_err());
+    assert!(linux_fs::remove_tree(&fixture.root, &fixture.root).is_err());
+    assert!(linux_fs::remove_tree(&fixture.root, &fixture.root.join("owned/../outside")).is_err());
+    assert_eq!(
+        fs::read_to_string(outside.join("keep.txt")).unwrap(),
+        "private data"
+    );
+    fs::hard_link(outside.join("keep.txt"), owned.join("hardlink")).unwrap();
+    assert!(linux_fs::read(&owned.join("hardlink")).is_err());
+    assert!(linux_fs::remove_file(&owned.join("hardlink"), None).is_err());
+    assert!(owned.join("hardlink").exists());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_exclusive_creation_atomic_copy_and_noreplace_promotion() {
+    let fixture = Fixture::new();
+    let source = fixture.root.join("new.txt");
+    let target = fixture.root.join("old.txt");
+    write_new(&source, b"new").unwrap();
+    write_new(&target, b"old").unwrap();
+    assert!(write_new(&target, b"overwrite").is_err());
+    assert!(promote(&source, &target).is_err());
+    assert_eq!(fs::read(&target).unwrap(), b"old");
+    linux_fs::copy(&source, &target).unwrap();
+    assert_eq!(fs::read(&target).unwrap(), b"new");
+    assert!(linux_fs::remove_file(&target, Some(&digest(b"wrong"))).is_err());
+    assert_eq!(fs::read(&target).unwrap(), b"new");
+    linux_fs::remove_file(&target, Some(&digest(b"new"))).unwrap();
+    assert!(!target.exists());
+    assert!(check_disk(&fixture.root, u64::MAX).is_err());
+    assert!(linux_fs::available_bytes(&fixture.root.join("missing")).is_err());
+    assert_ne!(linux_fs::token().unwrap(), linux_fs::token().unwrap());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_parent_replacement_by_symlink_is_not_traversed() {
+    use std::os::unix::fs::symlink;
+    let fixture = Fixture::new();
+    let parent = fixture.root.join("Parent");
+    fs::create_dir(&parent).unwrap();
+    fs::write(parent.join("file"), "keep").unwrap();
+    let _pin = pin_directories(&parent).unwrap();
+    let moved = fixture.root.join("Moved");
+    fs::rename(&parent, &moved).unwrap();
+    symlink(&moved, &parent).unwrap();
+    assert!(read_bounded(&parent.join("file"), 100).is_err());
+    assert!(linux_fs::remove_file(&parent.join("file"), None).is_err());
+    assert!(linux_fs::remove_empty_directory(&parent).is_err());
+    assert_eq!(fs::read_to_string(moved.join("file")).unwrap(), "keep");
+    assert!(linux_fs::directory(&fixture.root.join("moved")).is_err());
+    fs::create_dir(fixture.root.join("CON")).unwrap();
+    assert!(source_root(fixture.root.join("CON").to_str().unwrap()).is_ok());
+    assert!(source_root(fixture.root.join("con").to_str().unwrap()).is_err());
+}
+
 struct Fixture {
     root: PathBuf,
     source: PathBuf,
@@ -201,7 +272,7 @@ fn private_key_files_and_utf16_secrets_are_not_exported() {
     }
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 #[test]
 fn late_staging_changes_are_neither_promoted_nor_deleted() {
     for replace in [false, true] {
@@ -235,7 +306,7 @@ fn late_staging_changes_are_neither_promoted_nor_deleted() {
     }
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 #[test]
 fn clone_and_export_exclude_the_entire_machine_paired_bridge() {
     for mode in [CloneMode::Clone, CloneMode::Export] {
@@ -279,7 +350,7 @@ fn clone_and_export_exclude_the_entire_machine_paired_bridge() {
     }
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 #[test]
 fn imported_package_omits_all_bridge_files_with_one_folder_exclusion() {
     let fixture = Fixture::new();
@@ -419,7 +490,7 @@ fn database_preflight_rejects_unsupported_or_secret_sql_without_promoting() {
     }
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 #[test]
 fn opted_in_database_package_is_validated_without_connecting_to_any_database() {
     let fixture = Fixture::new();
@@ -470,7 +541,7 @@ fn opted_in_database_package_is_validated_without_connecting_to_any_database() {
         .any(|item| item.path == "database.sql"));
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 #[test]
 fn private_clone_and_local_package_round_trip_never_launch_or_restore() {
     let fixture = Fixture::new();
@@ -508,7 +579,7 @@ fn private_clone_and_local_package_round_trip_never_launch_or_restore() {
         .contains("fixture-rcon"));
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 #[test]
 fn failed_copy_cleans_stage_and_never_promotes_partial_files() {
     let fixture = Fixture::new();
@@ -531,7 +602,7 @@ fn failed_copy_cleans_stage_and_never_promotes_partial_files() {
     assert!(!fixture.root.join("target").exists());
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 #[test]
 fn late_destination_collision_is_not_overwritten() {
     let fixture = Fixture::new();

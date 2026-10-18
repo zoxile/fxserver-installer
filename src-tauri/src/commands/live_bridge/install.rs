@@ -108,6 +108,10 @@ impl ResourceSwap {
             }
             rename_new(&self.stage, &self.resource)?;
             self.promoted = true;
+            #[cfg(target_os = "linux")]
+            if inventory(&self.resource)? != *expected {
+                return Err("Promoted bridge files changed. Recovery files were preserved.".into());
+            }
         }
         Ok(())
     }
@@ -165,6 +169,9 @@ fn root(target: &BridgeTarget) -> Result<PathBuf, String> {
     let (_, _, _, data) =
         fxserver::resolve_profile_data_path(target.tx_data_path.clone(), target.profile.clone())?;
     no_links(&data)?;
+    #[cfg(target_os = "linux")]
+    crate::commands::workspace_clone::linux_fs::directory(&data)?;
+    #[cfg(not(target_os = "linux"))]
     let data = data.canonicalize().map_err(io_error)?;
     no_links(&data.join("resources"))?;
     if !data.join("resources").is_dir() {
@@ -293,13 +300,12 @@ pub(super) fn apply(app: &AppHandle, id: &str) -> Result<Installation, String> {
     let staged = if let Some(key_id) = &new_key {
         let token = random_id()?;
         let key = key_path(app, key_id)?;
-        fs::create_dir_all(key.parent().ok_or("Bridge key folder is unavailable.")?)
-            .map_err(io_error)?;
+        create_directories(key.parent().ok_or("Bridge key folder is unavailable.")?)?;
         write_new(&key, &fxserver::encrypt_secret(token.as_bytes())?)?;
         match stage_resource(&stage, key_id, &token) {
             Ok(files) => Some(files),
             Err(error) => {
-                let _ = fs::remove_file(key);
+                let _ = remove_key(&key);
                 return Err(error);
             }
         }
@@ -349,7 +355,7 @@ pub(super) fn apply(app: &AppHandle, id: &str) -> Result<Installation, String> {
                 )
             })?;
             if let Some(key_id) = new_key {
-                let _ = fs::remove_file(key_path(app, &key_id)?);
+                let _ = remove_key(&key_path(app, &key_id)?);
             }
             return Err(error);
         }
@@ -362,7 +368,7 @@ pub(super) fn apply(app: &AppHandle, id: &str) -> Result<Installation, String> {
         )
     })?;
     if let Some(marker) = previous {
-        let _ = fs::remove_file(key_path(app, &marker.key_id)?);
+        let _ = remove_key(&key_path(app, &marker.key_id)?);
     }
     inspect(app, &preview.target)
 }
@@ -422,6 +428,9 @@ fn stage_resource(
     token: &str,
 ) -> Result<BTreeMap<String, String>, String> {
     no_links(path)?;
+    #[cfg(target_os = "linux")]
+    crate::commands::workspace_clone::linux_fs::mkdir(path)?;
+    #[cfg(not(target_os = "linux"))]
     fs::create_dir(path).map_err(io_error)?;
     let mut files = BTreeMap::new();
     let result: Result<(), String> = (|| {
@@ -565,9 +574,19 @@ fn remove_verified_files(path: &Path, expected: &BTreeMap<String, String>) -> Re
     {
         return Err("Changed or unexpected bridge files were preserved.".into());
     }
+    #[cfg(not(target_os = "linux"))]
     for name in expected.keys() {
         fs::remove_file(path.join(name)).map_err(io_error)?;
     }
+    #[cfg(target_os = "linux")]
+    {
+        use crate::commands::workspace_clone::linux_fs;
+        for (name, hash) in expected {
+            linux_fs::remove_file(&path.join(name), Some(hash))?;
+        }
+        return linux_fs::remove_empty_directory(path);
+    }
+    #[cfg(not(target_os = "linux"))]
     fs::remove_dir(path).map_err(io_error)
 }
 
@@ -577,6 +596,9 @@ fn rename_new(source: &Path, destination: &Path) -> Result<(), String> {
     if destination.try_exists().map_err(io_error)? {
         return Err("Bridge destination already exists. Its files were preserved.".into());
     }
+    #[cfg(target_os = "linux")]
+    return crate::commands::workspace_clone::linux_fs::rename(source, destination, false);
+    #[cfg(not(target_os = "linux"))]
     fs::rename(source, destination).map_err(io_error)
 }
 
@@ -610,11 +632,18 @@ fn io_error(error: impl std::fmt::Display) -> String {
 fn read_bounded(path: &Path, limit: usize) -> Result<Vec<u8>, String> {
     no_links(path)?;
     let mut bytes = Vec::new();
-    File::open(path)
-        .map_err(io_error)?
+    #[cfg(target_os = "linux")]
+    let mut file = crate::commands::workspace_clone::linux_fs::read(path)?;
+    #[cfg(not(target_os = "linux"))]
+    let mut file = File::open(path).map_err(io_error)?;
+    #[cfg(target_os = "linux")]
+    let metadata = file.metadata().map_err(io_error)?;
+    Read::by_ref(&mut file)
         .take(limit as u64 + 1)
         .read_to_end(&mut bytes)
         .map_err(io_error)?;
+    #[cfg(target_os = "linux")]
+    crate::commands::workspace_clone::linux_fs::unchanged(&file, &metadata)?;
     if bytes.len() > limit {
         return Err("Bridge file exceeds its size limit.".into());
     }
@@ -623,16 +652,20 @@ fn read_bounded(path: &Path, limit: usize) -> Result<Vec<u8>, String> {
 
 fn write_new(path: &Path, bytes: &[u8]) -> Result<(), String> {
     no_links(path)?;
+    #[cfg(not(target_os = "linux"))]
     let mut file = OpenOptions::new()
         .create_new(true)
         .write(true)
         .open(path)
         .map_err(io_error)?;
+    #[cfg(target_os = "linux")]
+    let mut file = crate::commands::workspace_clone::linux_fs::create(path)?;
     let result = file
         .write_all(bytes)
         .and_then(|_| file.sync_all())
         .map_err(io_error);
     drop(file);
+    #[cfg(not(target_os = "linux"))]
     if result.is_err() {
         let _ = fs::remove_file(path);
     }
@@ -681,9 +714,23 @@ fn random_id() -> Result<String, String> {
     Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
 fn random_id() -> Result<String, String> {
-    Err("Live bridge pairing requires Windows.".into())
+    crate::commands::workspace_clone::linux_fs::token()
+}
+
+fn create_directories(path: &Path) -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    return crate::commands::workspace_clone::linux_fs::mkdir_all(path);
+    #[cfg(not(target_os = "linux"))]
+    fs::create_dir_all(path).map_err(io_error)
+}
+
+fn remove_key(path: &Path) -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    return crate::commands::workspace_clone::linux_fs::remove_file(path, None);
+    #[cfg(not(target_os = "linux"))]
+    fs::remove_file(path).map_err(io_error)
 }
 
 #[cfg(test)]
@@ -810,13 +857,38 @@ mod tests {
     }
 
     #[test]
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "linux"))]
     fn pairing_tokens_have_sufficient_entropy_and_valid_shape() {
         let a = random_id().unwrap();
         let b = random_id().unwrap();
         assert!(valid_id(&a));
         assert_ne!(a, b);
         assert!(!valid_id("../../secret"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_bridge_files_are_private_and_link_targets_are_preserved() {
+        use std::os::unix::fs::{symlink, MetadataExt};
+        let fixture = Fixture::new();
+        let outside = fixture.0.join("outside");
+        fs::create_dir(&outside).unwrap();
+        fs::write(outside.join("keep"), "keep").unwrap();
+        symlink(&outside, fixture.0.join("linked")).unwrap();
+        assert!(read_bounded(&fixture.0.join("linked/keep"), 100).is_err());
+        assert!(write_new(&fixture.0.join("linked/new"), b"new").is_err());
+        let stage = fixture.0.join(".fxsi-bridge-stage-linux");
+        let files = stage_resource(&stage, &"a".repeat(64), &"b".repeat(64)).unwrap();
+        assert_eq!(
+            fs::metadata(stage.join("bridge-token.txt")).unwrap().mode() & 0o077,
+            0
+        );
+        let target = fixture.0.join("occupied");
+        fs::create_dir(&target).unwrap();
+        assert!(rename_new(&stage, &target).is_err());
+        assert_eq!(inventory(&stage).unwrap(), files);
+        remove_verified_files(&stage, &files).unwrap();
+        assert_eq!(fs::read_to_string(outside.join("keep")).unwrap(), "keep");
     }
 
     #[test]

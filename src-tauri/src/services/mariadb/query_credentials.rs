@@ -9,6 +9,8 @@ pub(crate) struct CredentialFile {
     file: Option<File>,
     #[cfg(windows)]
     _directories: Vec<File>,
+    #[cfg(target_os = "linux")]
+    _private: crate::services::mariadb::linux::filesystem::PrivateCredential,
 }
 
 impl CredentialFile {
@@ -18,7 +20,7 @@ impl CredentialFile {
 
     #[cfg(windows)]
     pub(super) fn create(contents: &str) -> Result<Self, String> {
-        use crate::commands::backup_manager::storage::{pin_directories, secure_token};
+        use crate::services::mariadb::backup_storage::{pin_directories, secure_token};
         use std::io::Write;
         let directory = std::env::temp_dir();
         let directories = pin_directories(&directory).map_err(|error| {
@@ -39,7 +41,17 @@ impl CredentialFile {
         Ok(guard)
     }
 
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    pub(super) fn create(contents: &str) -> Result<Self, String> {
+        let private =
+            crate::services::mariadb::linux::filesystem::PrivateCredential::create(contents)?;
+        Ok(Self {
+            path: private.path.clone(),
+            _private: private,
+        })
+    }
+
+    #[cfg(not(any(windows, target_os = "linux")))]
     pub(super) fn create(_: &str) -> Result<Self, String> {
         Err("Protected MariaDB credential files currently require Windows.".into())
     }

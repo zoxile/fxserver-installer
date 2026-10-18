@@ -1,4 +1,3 @@
-use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use tauri::{AppHandle, Emitter, State};
 
 use super::backup_manager::BackupManager;
@@ -10,6 +9,7 @@ use crate::{
         MariaDBUserConfig, MariaDBUserUpdateConfig,
     },
     services::mariadb::{
+        access::{self, DatabaseLease, MaintenanceLease},
         backup::create_backup,
         detect::{clear_detection_cache, detect_mariadb},
         install::{
@@ -26,17 +26,12 @@ use crate::{
     },
 };
 
-static DATABASE_ACCESS: RwLock<()> = RwLock::new(());
-
-pub(crate) fn database_access() -> Result<RwLockReadGuard<'static, ()>, String> {
-    DATABASE_ACCESS.try_read().map_err(|_| {
-        "MariaDB maintenance or a restore is in progress. Try again after it finishes.".into()
-    })
+pub(crate) fn database_access() -> Result<DatabaseLease, String> {
+    access::database_access()
 }
 
-pub(crate) fn maintenance_access() -> Result<RwLockWriteGuard<'static, ()>, String> {
-    DATABASE_ACCESS.try_write()
-        .map_err(|_| "A MariaDB operation is in progress. Wait for backups, restores, and queries to finish before changing the service.".into())
+pub(crate) fn maintenance_access() -> Result<MaintenanceLease, String> {
+    access::maintenance_access()
 }
 
 pub(crate) async fn run_mutation<T: Send + 'static>(
@@ -307,22 +302,4 @@ pub async fn delete_mariadb_user(
         drop_user(credentials, username, host)
     })
     .await
-}
-
-#[cfg(test)]
-mod coordination_tests {
-    use super::*;
-
-    #[test]
-    fn service_changes_and_restores_do_not_overlap_database_work() {
-        let backup = database_access().unwrap();
-        assert!(database_access().is_ok());
-        assert!(maintenance_access().is_err());
-        drop(backup);
-        let maintenance = maintenance_access().unwrap();
-        assert!(database_access().is_err());
-        assert!(maintenance_access().is_err());
-        drop(maintenance);
-        assert!(database_access().is_ok());
-    }
 }

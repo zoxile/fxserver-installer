@@ -35,6 +35,62 @@ fn cfx_write(path: &Path, content: &str) {
 const TRACE: &str =
     r#"{"traceEvents":[{"name":"Resource Manager Tick","ph":"X","ts":0,"dur":1200}]}"#;
 
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_capture_observes_writer_close_not_just_nonempty_bytes() {
+    use std::io::Write;
+    let fixture = Fixture::new();
+    let mut file = CaptureFile::reserve(&fixture.0, &capture_id()).unwrap();
+    let mut writer = OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(file.path())
+        .unwrap();
+    writer.write_all(TRACE.as_bytes()).unwrap();
+    assert!(!file.writer_finished());
+    drop(writer);
+    assert!(file.writer_finished());
+    assert_eq!(file.read().unwrap(), TRACE);
+    assert!(file.writer_finished());
+    file.remove().unwrap();
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_export_targets_reserved_inode_and_preserves_replacement() {
+    use std::os::unix::fs::symlink;
+    for hardlink in [false, true] {
+        let fixture = Fixture::new();
+        let mut file = CaptureFile::reserve(&fixture.0, &capture_id()).unwrap();
+        let command = file.save_command().unwrap();
+        let descriptor = Path::new(
+            command
+                .strip_prefix("profiler saveJSON \"")
+                .unwrap()
+                .strip_suffix('"')
+                .unwrap(),
+        );
+        fs::rename(file.path(), fixture.0.join("reserved.json")).unwrap();
+        let unrelated = fixture.0.join("unrelated.json");
+        fs::write(&unrelated, "keep").unwrap();
+        if hardlink {
+            fs::hard_link(&unrelated, file.path()).unwrap();
+        } else {
+            symlink(&unrelated, file.path()).unwrap();
+        }
+        cfx_write(descriptor, TRACE);
+        assert_eq!(fs::read_to_string(&unrelated).unwrap(), "keep");
+        assert_eq!(
+            fs::read_to_string(fixture.0.join("reserved.json")).unwrap(),
+            TRACE
+        );
+        assert!(file.read().is_err());
+        assert!(file.remove().is_err());
+        assert!(file.reserved.is_some());
+        assert!(file.path().symlink_metadata().is_ok());
+    }
+}
+
 struct Fixture(PathBuf);
 impl Fixture {
     fn new() -> Self {
@@ -123,11 +179,13 @@ impl CaptureIo for FakeIo {
                     .unwrap(),
             );
             assert!(path.is_absolute());
+            // Linux exports through the app's reserved descriptor, never a replaceable path.
+            let output = fs::canonicalize(&path).unwrap();
             assert_eq!(
-                fs::canonicalize(path.parent().unwrap()).unwrap(),
+                fs::canonicalize(output.parent().unwrap()).unwrap(),
                 self.target.root
             );
-            assert!(path
+            assert!(output
                 .file_name()
                 .unwrap()
                 .to_str()
@@ -255,6 +313,7 @@ fn response_collection_has_byte_and_line_limits() {
 
 #[test]
 fn absolute_save_path_quotes_spaces_and_rejects_command_characters() {
+    #[cfg(windows)]
     assert_eq!(
         quoted_capture_path(Path::new(
             r"\\?\C:\FX Server\artifact\fxi-profiler-test.json"
@@ -262,6 +321,22 @@ fn absolute_save_path_quotes_spaces_and_rejects_command_characters() {
         .unwrap(),
         "\"C:/FX Server/artifact/fxi-profiler-test.json\""
     );
+    #[cfg(target_os = "linux")]
+    {
+        assert_eq!(
+            quoted_capture_path(Path::new("/home/user/FX Server/capture.json")).unwrap(),
+            "\"/home/user/FX Server/capture.json\""
+        );
+        for path in [
+            "/tmp/../capture.json",
+            "/tmp/a;quit/x.json",
+            "/tmp/a\\b/x.json",
+            "/tmp/a\"b/x.json",
+            "//host/share/x.json",
+        ] {
+            assert!(quoted_capture_path(Path::new(path)).is_err());
+        }
+    }
     for path in [
         "relative.json",
         "C:/safe;quit/x.json",
@@ -290,7 +365,10 @@ async fn capture_with_spaces_exports_to_absolute_artifact_root_not_child_cwd() {
     assert_eq!(result.json, TRACE);
     let command = io.commands.last().unwrap();
     assert!(command.starts_with("profiler saveJSON \""));
+    #[cfg(windows)]
     assert!(command.contains("Artifact With Spaces/"));
+    #[cfg(target_os = "linux")]
+    assert!(command.contains(&format!("/proc/{}/fd/", std::process::id())));
     assert!(!root.join(result.file_name).exists());
 }
 
@@ -320,8 +398,9 @@ async fn unknown_writer_retains_one_protected_file_and_retry_cleans_after_late_w
     assert!(error.contains("remains protected"));
     assert!(error.contains("No background cleanup"));
     assert_eq!(io.clock, SAVE_TIMEOUT);
-    let path = io.pending_write.as_ref().unwrap().0.clone();
+    let path = fs::canonicalize(&io.pending_write.as_ref().unwrap().0).unwrap();
     assert!(path.exists());
+    #[cfg(windows)]
     assert!(fs::remove_file(&path).is_err());
     manager
         .retry_retained_cleanup(&status_for(&io, true))
@@ -742,6 +821,7 @@ fn generated_files_reject_traversal_collisions_and_oversize_reads() {
 }
 
 #[test]
+#[cfg(windows)]
 fn reservation_blocks_replacement_with_a_hardlink_before_cfx_write() {
     let fixture = Fixture::new();
     let unrelated = fixture.0.join("unrelated.json");

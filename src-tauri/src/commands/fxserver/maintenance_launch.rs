@@ -127,11 +127,18 @@ pub(super) fn public_scope_matches(saved: &SavedLaunch, request: &FxserverLaunch
         return false;
     }
     let path = |value: &str| {
-        value
-            .trim()
-            .replace('\\', "/")
-            .trim_end_matches('/')
-            .to_lowercase()
+        #[cfg(target_os = "windows")]
+        {
+            value
+                .trim()
+                .replace('\\', "/")
+                .trim_end_matches('/')
+                .to_lowercase()
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            value.trim().trim_end_matches('/').to_string()
+        }
     };
     let public_environment = |launch: &SavedLaunch| {
         sanitize_environment(launch.environment.clone()).map(|entries| {
