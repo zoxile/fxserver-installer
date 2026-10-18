@@ -12,6 +12,7 @@ dist
 dist-ssr
 .playwright-cli/
 output/
+__pycache__/
 *.local
 
 # Editor directories and files

@@ -144,7 +144,7 @@ fn run(args: &[&str], input: Option<&str>) -> Result<(bool, String), String> {
         }
     };
     let bytes = rx
-        .recv_timeout(Duration::from_millis(100))
+        .recv_timeout(deadline.saturating_duration_since(Instant::now()))
         .map_err(|_| UNAVAILABLE)?
         .map_err(|_| UNAVAILABLE)?;
     if bytes.len() > 4096 {
@@ -190,6 +190,64 @@ pub(crate) fn decrypt_secret(bytes: &[u8]) -> Result<Vec<u8>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "requires an isolated CI D-Bus session and disposable GNOME keyring"]
+    fn native_keyring_persists_across_processes_and_fails_closed() {
+        use std::{fs, os::unix::fs::PermissionsExt, path::PathBuf};
+        assert_eq!(std::env::var("GITHUB_ACTIONS").as_deref(), Ok("true"));
+        assert_eq!(
+            std::env::var("RUNNER_ENVIRONMENT").as_deref(),
+            Ok("github-hosted")
+        );
+        let sandbox = PathBuf::from(std::env::var_os("FXI_INTEGRATION_ROOT").unwrap())
+            .canonicalize()
+            .unwrap();
+        assert_eq!(sandbox.parent(), Some(std::path::Path::new("/tmp")));
+        assert!(sandbox
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .starts_with("fxi-native-"));
+        let root = super::super::data_dir().unwrap();
+        assert_eq!(root, sandbox.join("data/com.fxserver.installer"));
+        let fixture = sandbox.join("sealed.bin");
+        let plaintext = b"public test fixture, not a real credential";
+        match std::env::var("FXI_KEYRING_MODE").unwrap().as_str() {
+            "write" => {
+                let sealed = encrypt_secret(plaintext).unwrap();
+                assert!(!sealed
+                    .windows(plaintext.len())
+                    .any(|bytes| bytes == plaintext));
+                let mut file = super::super::private_options()
+                    .create_new(true)
+                    .open(&fixture)
+                    .unwrap();
+                file.write_all(&sealed).unwrap();
+                assert_eq!(file.metadata().unwrap().permissions().mode() & 0o777, 0o600);
+                assert_eq!(
+                    fs::metadata(&root).unwrap().permissions().mode() & 0o777,
+                    0o700
+                );
+            }
+            "read" => {
+                assert_eq!(
+                    decrypt_secret(&fs::read(&fixture).unwrap()).unwrap(),
+                    plaintext
+                );
+            }
+            "missing" => {
+                let before = fs::read(&fixture).unwrap();
+                assert!(decrypt_secret(&before).is_err());
+                assert!(encrypt_secret(plaintext).is_err());
+                assert_eq!(fs::read(&fixture).unwrap(), before);
+                assert!(root.join("keyring.initialized").is_file());
+            }
+            other => panic!("Unexpected integration mode {other}"),
+        }
+    }
+
     #[test]
     fn encrypted_data_is_authenticated_and_uses_fresh_nonces() {
         let key = [42u8; 32];

@@ -16,7 +16,7 @@ concurrency:
 jobs:
   check:
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 90
     steps:
       - name: Checkout repository
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -32,7 +32,7 @@ jobs:
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
-          components: rustfmt
+          components: rustfmt, clippy
 
       - name: Cache Rust build output
         uses: swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
@@ -46,7 +46,8 @@ jobs:
           sudo apt-get install --no-install-recommends -y \
             build-essential pkg-config libssl-dev liblzma-dev \
             libwebkit2gtk-4.1-dev curl wget file libxdo-dev \
-            libayatana-appindicator3-dev librsvg2-dev
+            libayatana-appindicator3-dev librsvg2-dev \
+            webkit2gtk-driver xvfb dbus-x11 gnome-keyring libsecret-tools rpm libarchive-tools
 
       - name: Install frontend dependencies
         run: npm ci
@@ -60,6 +61,23 @@ jobs:
       - name: Test platform compatibility
         run: node --test src/tests/linux-platform.test.mjs
 
+      - name: Audit frontend dependencies
+        run: npm audit --audit-level=low
+
+      - name: Test disposable integration guards
+        run: python3 -m unittest discover -s scripts/tests -v
+
+      - name: Install verification tools
+        run: |
+          cargo install cargo-audit --version 0.22.2 --locked
+          cargo install tauri-driver --version 2.1.0 --locked
+
+      - name: Audit Rust dependencies
+        run: cargo audit --file src-tauri/Cargo.lock
+
+      - name: Verify pinned GLib security backport
+        run: python3 src-tauri/vendor/glib/verify_backport.py
+
       - name: Check Rust formatting
         run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
 
@@ -69,6 +87,13 @@ jobs:
       - name: Test headless safeguards
         run: cargo test --manifest-path src-tauri/Cargo.toml --locked --no-default-features --features terminal
 
+      - name: Test native secure storage
+        timeout-minutes: 5
+        run: |
+          cargo test --manifest-path src-tauri/Cargo.toml --locked --no-default-features --features terminal --lib --no-run --message-format=json > "$RUNNER_TEMP/keyring-tests.json"
+          test_binary="$(jq -r 'select(.profile.test == true and .target.name == "app_lib") | .executable // empty' "$RUNNER_TEMP/keyring-tests.json")"
+          python3 scripts/test-linux-keyring.py "$test_binary"
+
       - name: Smoke test native terminal
         run: |
           cargo build --manifest-path src-tauri/Cargo.toml --locked --no-default-features --features terminal --bin fxserver-manager
@@ -77,18 +102,73 @@ jobs:
       - name: Build frontend
         run: npm run build
 
+      - name: Test browser workflows
+        timeout-minutes: 10
+        run: |
+          npx playwright install --with-deps chromium
+          npm run test:ui
+
       - name: Check desktop
         run: cargo check --manifest-path src-tauri/Cargo.toml --locked --no-default-features --features desktop --all-targets
+
+      - name: Check Rust quality
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --locked --features terminal --all-targets -- -D warnings
 
       - name: Test desktop backend safeguards
         timeout-minutes: 25
         # These command-module tests are excluded from the terminal feature set.
         run: cargo test --manifest-path src-tauri/Cargo.toml --locked --no-default-features --features desktop --lib
 
+      - name: Test MariaDB against disposable Ubuntu packages
+        timeout-minutes: 15
+        run: |
+          set -euo pipefail
+          cargo test --manifest-path src-tauri/Cargo.toml --locked --no-default-features --features desktop --lib --no-run --message-format=json > "$RUNNER_TEMP/database-tests.json"
+          test_binary="$(jq -r 'select(.profile.test == true and .target.name == "app_lib") | .executable // empty' "$RUNNER_TEMP/database-tests.json")"
+          docker build --build-arg WITH_DESKTOP_TESTS=1 --tag fxi-mariadb-ubuntu:ci - < scripts/ci/mariadb.Dockerfile
+          container="fxi-db-ubuntu-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          trap 'docker rm --force "$container" >/dev/null 2>&1 || true' EXIT
+          docker run --rm --init --name "$container" \
+            --env GITHUB_ACTIONS=true --env RUNNER_ENVIRONMENT=github-hosted \
+            --env GITHUB_RUN_ID --env FXI_DISPOSABLE_MARIADB=github-container-v1 \
+            --mount "type=bind,source=$GITHUB_WORKSPACE/scripts/test-linux-mariadb.py,target=/test.py,readonly" \
+            --mount "type=bind,source=$GITHUB_WORKSPACE/src-tauri/target/debug/fxserver-manager,target=/fxserver-manager,readonly" \
+            --mount "type=bind,source=$test_binary,target=/restore-tests,readonly" \
+            fxi-mariadb-ubuntu:ci python3 /test.py /fxserver-manager --packages --restore-test-binary /restore-tests
+
+      - name: Build Linux release packages
+        timeout-minutes: 35
+        env:
+          CARGO_BUILD_JOBS: "2"
+          APPIMAGE_EXTRACT_AND_RUN: "1"
+        run: npm run tauri -- build --bundles deb,rpm,appimage --config src-tauri/tauri.linux.conf.json
+
+      - name: Check Linux package contents
+        run: python3 scripts/test-linux-packages.py src-tauri/target/release/bundle
+
+      - name: Test optimized GLib iteration
+        timeout-minutes: 15
+        env:
+          CARGO_BUILD_JOBS: "2"
+        run: cargo test --manifest-path src-tauri/Cargo.toml --release --locked --lib platform::glib_regression -- --nocapture
+
+      - name: Test native Linux desktop
+        timeout-minutes: 5
+        run: dbus-run-session -- xvfb-run -a python3 scripts/test-linux-desktop.py src-tauri/target/release/app
+
+      - name: Retain native desktop evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: native-linux-desktop
+          path: output/native-linux/
+          if-no-files-found: ignore
+          retention-days: 7
+
   headless-distros:
     name: Headless / ${{ matrix.name }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       max-parallel: 3
@@ -116,7 +196,7 @@ jobs:
         uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
 
       - name: Prepare distro build dependencies
-        timeout-minutes: 10
+        timeout-minutes: 15
         shell: bash
         # Build from stdin without a source context; package setup cannot access the checkout.
         run: |
@@ -141,6 +221,9 @@ jobs:
                 *) exit 1 ;; \
               esac
           DOCKERFILE
+          docker build --platform linux/amd64 \
+            --build-arg BASE_IMAGE="$digest" --build-arg DISTRO="$DISTRO" \
+            --tag "fxi-mariadb-$DISTRO:ci" - < scripts/ci/mariadb.Dockerfile
 
       - name: Build and test headless backend in distro
         timeout-minutes: 30
@@ -148,6 +231,7 @@ jobs:
         run: |
           set -euo pipefail
           scratch="$(mktemp -d "$RUNNER_TEMP/fxi-$DISTRO.XXXXXX")"
+          echo "DISTRO_BUILD_ROOT=$scratch" >> "$GITHUB_ENV"
           mkdir -p "$scratch/cargo" "$scratch/target" "$scratch/home" "$scratch/tmp"
           toolchain="$(rustc --print sysroot)"
           container="fxi-$DISTRO-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
@@ -173,3 +257,17 @@ jobs:
               cargo build --manifest-path src-tauri/Cargo.toml --locked --no-default-features --features terminal --all-targets
               cargo test --manifest-path src-tauri/Cargo.toml --locked --no-default-features --features terminal --all-targets
             '
+
+      - name: Test real MariaDB package and data lifecycle
+        timeout-minutes: 15
+        shell: bash
+        run: |
+          set -euo pipefail
+          container="fxi-db-$DISTRO-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          trap 'docker rm --force "$container" >/dev/null 2>&1 || true' EXIT
+          docker run --rm --init --name "$container" --platform linux/amd64 \
+            --env GITHUB_ACTIONS=true --env RUNNER_ENVIRONMENT=github-hosted \
+            --env GITHUB_RUN_ID --env FXI_DISPOSABLE_MARIADB=github-container-v1 \
+            --mount "type=bind,source=$GITHUB_WORKSPACE/scripts/test-linux-mariadb.py,target=/test.py,readonly" \
+            --mount "type=bind,source=$DISTRO_BUILD_ROOT/target/debug/fxserver-manager,target=/fxserver-manager,readonly" \
+            "fxi-mariadb-$DISTRO:ci" python3 /test.py /fxserver-manager --packages

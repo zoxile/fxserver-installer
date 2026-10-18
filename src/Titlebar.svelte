@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { onMount } from "svelte";
 	import { getCurrentWindow } from "@tauri-apps/api/window";
+	import { platform } from "$lib/core/platform.svelte";
 
 	import icon from "./assets/icon128x128.png";
 
@@ -51,7 +52,7 @@
 			</svg>
 		</button>
 
-		<button bind:this={closeBtn} title="Close to tray" class="flex h-9 w-[42px] items-center justify-center transition-colors hover:bg-red-500 hover:text-white">
+		<button bind:this={closeBtn} title={platform.os === "linux" ? "Quit application" : "Close to tray"} class="flex h-9 w-[42px] items-center justify-center transition-colors hover:bg-red-500 hover:text-white">
 			<svg width="14" height="14" viewBox="0 0 24 24">
 				<path fill="currentColor" d="M13.46 12L19 17.54V19h-1.46L12 13.46L6.46 19H5v-1.46L10.54 12L5 6.46V5h1.46L12 10.54L17.54 5H19v1.46z" />
 			</svg>
