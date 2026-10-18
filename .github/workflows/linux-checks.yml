@@ -69,6 +69,11 @@ jobs:
       - name: Test headless safeguards
         run: cargo test --manifest-path src-tauri/Cargo.toml --locked --no-default-features --features terminal
 
+      - name: Smoke test native terminal
+        run: |
+          cargo build --manifest-path src-tauri/Cargo.toml --locked --no-default-features --features terminal --bin fxserver-manager
+          python3 scripts/test-terminal-pty.py src-tauri/target/debug/fxserver-manager
+
       - name: Build frontend
         run: npm run build
 
