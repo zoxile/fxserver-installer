@@ -132,7 +132,6 @@ fn traversals_absolute_paths_streams_and_devices_are_rejected_without_echoing_in
         "nested/../../private.cfg",
         "C:/private.cfg",
         "/private.cfg",
-        "file.cfg:secret",
         "\\\\server\\private.cfg",
         "@resource/../private.cfg",
         "@resource//private.cfg",
@@ -141,6 +140,12 @@ fn traversals_absolute_paths_streams_and_devices_are_rejected_without_echoing_in
         assert!(has(&report, "path-unsafe", "error"), "{path}");
         assert!(!serde_json::to_string(&report).unwrap().contains(path));
     }
+    #[cfg(windows)]
+    assert!(has(
+        &f.report("exec file.cfg:secret"),
+        "path-unsafe",
+        "error"
+    ));
     let outside = Fixture::new();
     let path = outside.file("outside.cfg", "secret");
     assert!(inspect(&f.0, &path, "set x y").is_err());
@@ -395,7 +400,6 @@ fn resource_junction_cfg_is_unverified_not_missing_and_external_contents_stay_un
     for target in [
         "@fixture/../secret.cfg",
         "@fixture/config/../../secret.cfg",
-        "@fixture/config/permissions.cfg:stream",
         "@fixture//secret.cfg",
     ] {
         assert!(has(
@@ -404,6 +408,12 @@ fn resource_junction_cfg_is_unverified_not_missing_and_external_contents_stay_un
             "error"
         ));
     }
+    #[cfg(windows)]
+    assert!(has(
+        &f.report("exec @fixture/config/permissions.cfg:stream"),
+        "path-unsafe",
+        "error"
+    ));
     assert!(has(
         &f.report("exec @unrelated/missing.cfg"),
         "exec-missing",

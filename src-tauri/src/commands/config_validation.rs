@@ -372,8 +372,14 @@ impl Scan<'_> {
         } else {
             reference.to_string()
         };
+        let drive_prefix = normalized
+            .as_bytes()
+            .first()
+            .is_some_and(u8::is_ascii_alphabetic)
+            && normalized.as_bytes().get(1) == Some(&b':');
         if normalized.contains('\0')
-            || normalized.contains(':')
+            || drive_prefix
+            || cfg!(windows) && normalized.contains(':')
             || !cfg!(windows) && normalized.contains('\\')
             || normalized.starts_with('/')
             || normalized.split('/').any(|part| {
