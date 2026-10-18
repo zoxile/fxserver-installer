@@ -24,7 +24,7 @@ use std::{
 #[cfg(target_os = "windows")]
 use crate::FXSERVER_WATCHDOG_ARG;
 #[cfg(target_os = "linux")]
-use linux::OwnedProcessGroup as ProcessCleanupJob;
+use linux::Supervisor as ProcessCleanupJob;
 #[cfg(any(target_os = "windows", test))]
 use std::env;
 #[cfg(not(target_os = "linux"))]
@@ -120,6 +120,7 @@ struct ManagedFxserverProcess {
     started_at: SystemTime,
     resource_sample: Option<ResourceSample>,
     _cleanup_job: Option<Arc<ProcessCleanupJob>>,
+    #[cfg(not(target_os = "linux"))]
     _lease: Option<crate::platform::ServerLease>,
 }
 
@@ -127,16 +128,29 @@ struct ManagedFxserverProcess {
 impl Drop for ManagedFxserverProcess {
     fn drop(&mut self) {
         if let Some(group) = self._cleanup_job.as_ref() {
-            if let Err(error) = group.force_stop(&mut self.child, FORCE_STOP_WAIT_TIMEOUT) {
-                log::error!("FXServer cleanup on drop failed: {error}");
-                // Do not unlock artifacts while a stuck child could still be using them.
-                // Normal Stop keeps the entire process tracked so callers can retry.
-                if let Some(lease) = self._lease.take() {
-                    std::mem::forget(lease);
+            let _ = group.graceful_stop(None);
+            if !group
+                .wait_for_exit(&mut self.child, GRACEFUL_STOP_TIMEOUT)
+                .unwrap_or(false)
+            {
+                if let Err(error) = group.force_stop(&mut self.child, FORCE_STOP_WAIT_TIMEOUT) {
+                    log::error!("FXServer supervisor is still cleaning up: {error}");
                 }
             }
         }
     }
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) use linux::run_supervisor_from_args;
+
+fn resource_process_id(process: &ManagedFxserverProcess) -> u32 {
+    // Public PID identifies the supervised session; /proc sampling uses its server child.
+    #[cfg(target_os = "linux")]
+    if let Some(supervisor) = process._cleanup_job.as_ref() {
+        return supervisor.server_pid;
+    }
+    process.child.id()
 }
 
 #[derive(Default)]
@@ -439,6 +453,7 @@ impl FxserverManager {
         if pid.is_none() {
             *process = None;
         }
+        let resource_pid = process.as_ref().map(resource_process_id);
         let intent = self
             .launch_intent
             .lock()
@@ -455,7 +470,7 @@ impl FxserverManager {
             sampler.pid = pid;
         }
         let resources = if include_resources {
-            pid.and_then(|pid| read_process_resources(pid, &mut sampler.previous))
+            resource_pid.and_then(|pid| read_process_resources(pid, &mut sampler.previous))
         } else {
             None
         };
@@ -680,18 +695,21 @@ fn start_fxserver_blocking(
         .map_err(|error| format!("Failed to resolve the artifact folder: {error}"))?;
 
     let executable_path = server_exe::require_server_executable(&artifact_path)?;
+    #[cfg(not(target_os = "linux"))]
     let lease = crate::platform::ServerLease::acquire(&artifact_path)?;
 
     #[cfg(not(target_os = "linux"))]
     let mut command = Command::new(&executable_path);
     #[cfg(target_os = "linux")]
-    let mut command = linux::launch_command(&executable_path);
+    let (mut command, supervisor) = linux::launch_command(&executable_path)?;
     command.no_window();
     command
         .current_dir(&artifact_path)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    #[cfg(target_os = "linux")]
+    command.stdin(Stdio::null());
 
     for variable in sanitize_environment(request.environment)? {
         command.env(variable.key, variable.value);
@@ -699,7 +717,10 @@ fn start_fxserver_blocking(
 
     if let Some(profile) = request.server_profile.map(|value| value.trim().to_string()) {
         if !profile.is_empty() {
+            #[cfg(not(target_os = "linux"))]
             command.arg("+set").arg("serverProfile").arg(profile);
+            #[cfg(target_os = "linux")]
+            linux::set_profile(&mut command, &profile);
         }
     }
 
@@ -722,6 +743,17 @@ fn start_fxserver_blocking(
     let stdin = child.stdin.take();
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
+    #[cfg(target_os = "linux")]
+    let cleanup_job = match supervisor.connect(&mut child) {
+        Ok(supervisor) => Arc::new(supervisor),
+        Err(error) => {
+            thread::spawn(move || {
+                let _ = child.wait();
+            });
+            return Err(error);
+        }
+    };
+    #[cfg(not(target_os = "linux"))]
     let cleanup_job = match create_process_cleanup_job(&child) {
         Ok(job) => job,
         Err(error) => {
@@ -754,6 +786,7 @@ fn start_fxserver_blocking(
         started_at,
         resource_sample: None,
         _cleanup_job: Some(cleanup_job.clone()),
+        #[cfg(not(target_os = "linux"))]
         _lease: Some(lease),
     });
     drop(process_guard);
@@ -870,8 +903,9 @@ fn get_fxserver_status_blocking(manager: &FxserverManager) -> Result<FxserverSta
         .ok()
         .map(|elapsed| elapsed.as_secs());
     let mut resource_sample = process.resource_sample;
+    let resource_pid = resource_process_id(process);
     drop(guard);
-    let resources = read_process_resources(pid, &mut resource_sample);
+    let resources = read_process_resources(resource_pid, &mut resource_sample);
     if let Ok(mut guard) = manager.process.try_lock() {
         if let Some(process) = guard.as_mut().filter(|process| process.child.id() == pid) {
             process.resource_sample = resource_sample;
@@ -1440,6 +1474,8 @@ fn spawn_exit_monitor(manager: &FxserverManager, pid: u32) {
             }
             Err(error) => {
                 log::warn!("FXServer exit monitoring failed: {error}");
+                #[cfg(target_os = "linux")]
+                break;
             }
         }
     });
@@ -1499,11 +1535,6 @@ fn create_process_cleanup_job(child: &Child) -> Result<Arc<ProcessCleanupJob>, S
     }
 
     Ok(Arc::new(ProcessCleanupJob(job as isize)))
-}
-
-#[cfg(target_os = "linux")]
-fn create_process_cleanup_job(child: &Child) -> Result<Arc<ProcessCleanupJob>, String> {
-    Ok(Arc::new(ProcessCleanupJob::new(child)?))
 }
 
 #[cfg(not(any(target_os = "windows", target_os = "linux")))]
@@ -1650,7 +1681,7 @@ pub(crate) fn terminate_process_tree(root_pid: u32) -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
 pub(crate) fn terminate_process_tree(_: u32) -> Result<(), String> {
     Err("Process termination requires an owned FXServer process group on this platform.".into())
 }
@@ -1674,6 +1705,7 @@ fn request_graceful_fxserver_stop(process: &mut ManagedFxserverProcess) -> Resul
     Ok(true)
 }
 
+#[cfg(not(target_os = "linux"))]
 fn force_stop_fxserver_process(child: &mut Child, pid: u32) -> Result<(), String> {
     let _ = terminate_process_tree(pid);
     if !wait_for_child_exit(child, FORCE_STOP_WAIT_TIMEOUT) {
@@ -3262,6 +3294,32 @@ mod tests {
                 break;
             }
             thread::sleep(Duration::from_millis(20));
+        }
+        let status = manager.status().unwrap();
+        assert_eq!(status.pid, Some(result.pid));
+        assert!(status
+            .resources
+            .is_some_and(|resources| resources.memory_bytes > 0));
+        let server_pid = resource_process_id(manager.process.lock().unwrap().as_ref().unwrap());
+        assert_ne!(
+            server_pid, result.pid,
+            "sampling must use the server child, not the supervisor"
+        );
+        let sample = manager
+            .sample_health(&mut HealthResourceSampler::default(), true)
+            .unwrap()
+            .unwrap();
+        assert!(sample.running);
+        assert_eq!(sample.pid, Some(result.pid));
+        assert!(sample
+            .resources
+            .is_some_and(|resources| resources.memory_bytes > 0));
+        #[cfg(feature = "desktop")]
+        {
+            let token = maintenance_launch::prepare(&manager, request(), result.pid).unwrap();
+            maintenance_launch::validate(&manager, &token).unwrap();
+            maintenance_launch::discard(&manager, &token).unwrap();
+            assert!(maintenance_launch::prepare(&manager, request(), server_pid).is_err());
         }
         manager.stop().unwrap();
         assert!(found);

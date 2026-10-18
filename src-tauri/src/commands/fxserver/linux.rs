@@ -1,15 +1,17 @@
-//! Linux children own a fresh process group. Keep its leader waitable until cleanup
-//! finishes: reaping it first would allow its PID (and our group ID) to be reused.
-//! This is not a cgroup or external watchdog: SIGKILL/abort of the manager bypasses
-//! Drop, and descendants that deliberately leave the group are not contained.
-//! Explicit application shutdown must call the shared manager stop path.
+//! A separate supervisor owns the server group and artifact lease. Its private
+//! socket closes when the manager dies; the unreaped leader pins the group ID
+//! until cleanup finishes. Deliberately detached descendants require a cgroup.
 use super::{FxserverResources, ResourceSample};
 use std::{
     collections::HashSet,
-    fs, io,
-    os::{fd::AsRawFd, unix::process::CommandExt},
+    fs,
+    io::{self, Read, Write},
+    os::{
+        fd::{AsRawFd, FromRawFd},
+        unix::{net::UnixStream, process::CommandExt},
+    },
     path::Path,
-    process::{Child, ChildStdin, Command},
+    process::{Child, ChildStdin, Command, Stdio},
     sync::{
         atomic::{AtomicBool, Ordering},
         OnceLock,
@@ -18,10 +20,343 @@ use std::{
     time::{Duration, Instant},
 };
 
-pub(super) fn launch_command(launcher: &Path) -> Command {
-    let mut command = Command::new("/bin/bash");
-    command.arg(launcher).process_group(0);
+const SUPERVISOR_ARG: &str = "--fxserver-linux-supervisor";
+const START_TIMEOUT: Duration = Duration::from_secs(10);
+static SUPERVISOR_STOP: AtomicBool = AtomicBool::new(false);
+
+pub(super) struct PendingSupervisor {
+    manager: UnixStream,
+    inherited: UnixStream,
+}
+
+pub(super) fn launch_command(launcher: &Path) -> Result<(Command, PendingSupervisor), String> {
+    let (manager, inherited) = UnixStream::pair().map_err(|e| e.to_string())?;
+    let fd = inherited.as_raw_fd();
+    let mut command = Command::new(std::env::current_exe().map_err(|e| e.to_string())?);
+    #[cfg(not(test))]
     command
+        .arg(SUPERVISOR_ARG)
+        .arg(fd.to_string())
+        .arg(launcher);
+    #[cfg(test)]
+    command
+        .args([
+            "--exact",
+            "commands::fxserver::linux::tests::supervisor_entry",
+            "--nocapture",
+        ])
+        .env("FXI_TEST_SUPERVISOR_FD", fd.to_string())
+        .env("FXI_TEST_SUPERVISOR_LAUNCHER", launcher);
+    // Only async-signal-safe syscalls run between fork and exec.
+    unsafe {
+        command.pre_exec(move || {
+            if libc::setsid() < 0 || libc::fcntl(fd, libc::F_SETFD, 0) < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    Ok((command, PendingSupervisor { manager, inherited }))
+}
+
+pub(super) fn set_profile(command: &mut Command, profile: &str) {
+    #[cfg(not(test))]
+    command.args(["+set", "serverProfile", profile]);
+    #[cfg(test)]
+    command.env("FXI_TEST_SUPERVISOR_PROFILE", profile);
+}
+
+impl PendingSupervisor {
+    pub(super) fn connect(self, child: &mut Child) -> Result<Supervisor, String> {
+        let Self {
+            mut manager,
+            inherited,
+        } = self;
+        drop(inherited);
+        let result = (|| {
+            manager
+                .set_read_timeout(Some(START_TIMEOUT))
+                .map_err(|e| e.to_string())?;
+            manager
+                .set_write_timeout(Some(Duration::from_millis(250)))
+                .map_err(|e| e.to_string())?;
+            let mut header = [0; 1];
+            manager
+                .read_exact(&mut header)
+                .map_err(|e| format!("FXServer supervisor did not start: {e}"))?;
+            match header[0] {
+                b'R' => {
+                    let mut pid = [0; 4];
+                    manager.read_exact(&mut pid).map_err(|e| e.to_string())?;
+                    let pid = u32::from_le_bytes(pid);
+                    if pid <= 1 {
+                        return Err("Invalid FXServer supervisor response.".into());
+                    }
+                    Ok(pid)
+                }
+                b'E' => {
+                    let mut size = [0; 2];
+                    manager.read_exact(&mut size).map_err(|e| e.to_string())?;
+                    let size = usize::from(u16::from_le_bytes(size));
+                    if size > 1024 {
+                        return Err("Invalid FXServer supervisor error.".into());
+                    }
+                    let mut message = vec![0; size];
+                    manager
+                        .read_exact(&mut message)
+                        .map_err(|e| e.to_string())?;
+                    Err(String::from_utf8_lossy(&message).into_owned())
+                }
+                _ => Err("Invalid FXServer supervisor response.".into()),
+            }
+        })();
+        match result {
+            Ok(pid) => Ok(Supervisor {
+                control: manager,
+                server_pid: pid,
+                cleanup_confirmed: AtomicBool::new(false),
+            }),
+            Err(error) => {
+                // EOF requests cleanup even if startup completed after our timeout.
+                drop(manager);
+                let _ = super::wait_for_child_exit(
+                    child,
+                    super::GRACEFUL_STOP_TIMEOUT + super::FORCE_STOP_WAIT_TIMEOUT,
+                );
+                Err(error)
+            }
+        }
+    }
+}
+
+pub(super) struct Supervisor {
+    control: UnixStream,
+    pub(super) server_pid: u32,
+    cleanup_confirmed: AtomicBool,
+}
+
+impl Supervisor {
+    pub(super) fn graceful_stop(&self, _: Option<&mut ChildStdin>) -> Result<(), String> {
+        self.send(b'Q')
+    }
+
+    fn send(&self, byte: u8) -> Result<(), String> {
+        let mut socket = &self.control;
+        socket
+            .write_all(&[byte])
+            .map_err(|e| format!("FXServer supervisor is unavailable: {e}"))
+    }
+
+    pub(super) fn is_running(&self, child: &mut Child) -> Result<bool, String> {
+        if child.try_wait().map_err(|e| e.to_string())?.is_none() {
+            return Ok(true);
+        }
+        if !self.cleanup_confirmed.load(Ordering::Acquire) {
+            let mut message = 0u8;
+            let received = unsafe {
+                libc::recv(
+                    self.control.as_raw_fd(),
+                    &mut message as *mut _ as *mut _,
+                    1,
+                    libc::MSG_DONTWAIT,
+                )
+            };
+            if received == 1 && message == b'C' {
+                self.cleanup_confirmed.store(true, Ordering::Release);
+            }
+        }
+        if self.cleanup_confirmed.load(Ordering::Acquire) {
+            Ok(false)
+        } else {
+            Err("The FXServer supervisor exited without confirming cleanup. The server may still be running; automatic recovery and operations requiring a stopped server are blocked.".into())
+        }
+    }
+
+    pub(super) fn wait_for_exit(
+        &self,
+        child: &mut Child,
+        timeout: Duration,
+    ) -> Result<bool, String> {
+        let deadline = Instant::now() + timeout;
+        while self.is_running(child)? {
+            if Instant::now() >= deadline {
+                return Ok(false);
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        Ok(true)
+    }
+
+    pub(super) fn force_stop(&self, child: &mut Child, timeout: Duration) -> Result<(), String> {
+        if !self.is_running(child)? {
+            return Ok(());
+        }
+        // Never kill the supervisor: it must keep the lease until cleanup finishes.
+        let _ = self.send(b'K');
+        if self.wait_for_exit(child, timeout)? {
+            Ok(())
+        } else {
+            Err("FXServer cleanup is still running. Its supervisor retains the artifact lock; retry Stop.".into())
+        }
+    }
+}
+
+pub(crate) fn run_supervisor_from_args() -> bool {
+    let mut args = std::env::args_os().skip(1);
+    if args.next().as_deref() != Some(std::ffi::OsStr::new(SUPERVISOR_ARG)) {
+        return false;
+    }
+    let fd = args.next().and_then(|s| s.to_str()?.parse::<i32>().ok());
+    let launcher = args.next();
+    let (Some(fd), Some(launcher)) = (fd, launcher) else {
+        std::process::exit(2);
+    };
+    let code = supervisor_main(fd, Path::new(&launcher), args.collect());
+    std::process::exit(code);
+}
+
+extern "C" fn supervisor_signal(_: libc::c_int) {
+    SUPERVISOR_STOP.store(true, Ordering::Release);
+}
+
+fn supervisor_socket(fd: i32) -> Result<UnixStream, String> {
+    if fd <= 2 {
+        return Err("Missing private supervisor socket.".into());
+    }
+    let mut peer: libc::ucred = unsafe { std::mem::zeroed() };
+    let mut size = std::mem::size_of_val(&peer) as libc::socklen_t;
+    if unsafe {
+        libc::getsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            &mut peer as *mut _ as *mut _,
+            &mut size,
+        )
+    } != 0
+        || peer.pid != unsafe { libc::getppid() }
+        || peer.uid != unsafe { libc::geteuid() }
+        || unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } < 0
+    {
+        return Err("Invalid private supervisor socket.".into());
+    }
+    // The descriptor is validated, exclusively inherited, and closed on server exec.
+    let socket = unsafe { UnixStream::from_raw_fd(fd) };
+    socket
+        .set_read_timeout(Some(Duration::from_millis(50)))
+        .map_err(|e| e.to_string())?;
+    socket
+        .set_write_timeout(Some(Duration::from_millis(250)))
+        .map_err(|e| e.to_string())?;
+    Ok(socket)
+}
+
+fn supervisor_main(fd: i32, launcher: &Path, args: Vec<std::ffi::OsString>) -> i32 {
+    let Ok(mut socket) = supervisor_socket(fd) else {
+        return 2;
+    };
+    match supervise(&mut socket, launcher, args) {
+        Ok(code) => code,
+        Err(error) => {
+            let message = error.as_bytes();
+            let message = &message[..message.len().min(1024)];
+            let _ = socket.write_all(b"E");
+            let _ = socket.write_all(&(message.len() as u16).to_le_bytes());
+            let _ = socket.write_all(message);
+            1
+        }
+    }
+}
+
+fn supervise(
+    socket: &mut UnixStream,
+    launcher: &Path,
+    args: Vec<std::ffi::OsString>,
+) -> Result<i32, String> {
+    let artifact = std::env::current_dir().map_err(|e| e.to_string())?;
+    let _lease = crate::platform::ServerLease::acquire(&artifact)?;
+    if super::server_exe::require_server_executable(&artifact)? != launcher {
+        return Err("FXServer launcher does not match the locked artifact folder.".into());
+    }
+    for signal in [libc::SIGTERM, libc::SIGHUP, libc::SIGINT] {
+        let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
+        action.sa_sigaction = supervisor_signal as *const () as usize;
+        action.sa_flags = libc::SA_RESTART;
+        if unsafe { libc::sigaction(signal, &action, std::ptr::null_mut()) } < 0 {
+            return Err(io::Error::last_os_error().to_string());
+        }
+    }
+    let mut child = Command::new("/bin/bash")
+        .arg(launcher)
+        .args(args)
+        .process_group(0)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .map_err(|e| format!("Failed to start FXServer: {e}"))?;
+    let group = match OwnedProcessGroup::new(&child) {
+        Ok(group) => group,
+        Err(error) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error);
+        }
+    };
+    let mut stop_at = None;
+    let mut force = false;
+    let mut stopping = false;
+    let mut connected = socket
+        .write_all(b"R")
+        .and_then(|_| socket.write_all(&child.id().to_le_bytes()))
+        .is_ok();
+    loop {
+        if group.leader_exited().unwrap_or(true) || force {
+            if group
+                .force_stop(&mut child, super::FORCE_STOP_WAIT_TIMEOUT)
+                .is_ok()
+            {
+                let _ = socket.write_all(b"C");
+                return Ok(child
+                    .try_wait()
+                    .ok()
+                    .flatten()
+                    .and_then(|s| s.code())
+                    .unwrap_or(1));
+            }
+            // An uninterruptible child must not release the lease or its pinned PID.
+            force = true;
+            thread::sleep(Duration::from_millis(100));
+            continue;
+        }
+        let mut command = [0];
+        if connected {
+            match socket.read(&mut command) {
+                Ok(1) if command[0] == b'K' => force = true,
+                Ok(1) if command[0] == b'Q' => stopping = true,
+                Ok(_) => connected = false,
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        io::ErrorKind::WouldBlock
+                            | io::ErrorKind::TimedOut
+                            | io::ErrorKind::Interrupted
+                    ) => {}
+                Err(_) => connected = false,
+            }
+        } else {
+            thread::sleep(Duration::from_millis(50));
+        }
+        if (!connected || stopping || SUPERVISOR_STOP.load(Ordering::Acquire)) && stop_at.is_none()
+        {
+            let _ = group.graceful_stop(child.stdin.as_mut());
+            child.stdin.take();
+            stop_at = Some(Instant::now() + super::GRACEFUL_STOP_TIMEOUT);
+        }
+        if stop_at.is_some_and(|deadline| Instant::now() >= deadline) {
+            force = true;
+        }
+    }
 }
 
 pub(super) struct OwnedProcessGroup {
@@ -113,14 +448,7 @@ impl OwnedProcessGroup {
         self.signal(libc::SIGTERM)
     }
 
-    pub(super) fn is_running(&self, child: &mut Child) -> Result<bool, String> {
-        if !self.leader_exited()? {
-            return Ok(true);
-        }
-        self.force_stop(child, super::FORCE_STOP_WAIT_TIMEOUT)?;
-        Ok(false)
-    }
-
+    #[cfg(test)]
     pub(super) fn wait_for_exit(
         &self,
         child: &mut Child,
@@ -330,8 +658,249 @@ mod tests {
     use super::*;
     use std::{
         io::{BufRead, BufReader},
+        path::PathBuf,
         process::Stdio,
     };
+
+    #[test]
+    fn supervisor_entry() {
+        let Ok(fd) = std::env::var("FXI_TEST_SUPERVISOR_FD") else {
+            return;
+        };
+        let launcher = std::env::var_os("FXI_TEST_SUPERVISOR_LAUNCHER").unwrap();
+        let args = std::env::var_os("FXI_TEST_SUPERVISOR_PROFILE")
+            .map(|profile| vec!["+set".into(), "serverProfile".into(), profile])
+            .unwrap_or_default();
+        std::process::exit(supervisor_main(
+            fd.parse().unwrap(),
+            Path::new(&launcher),
+            args,
+        ));
+    }
+
+    #[test]
+    fn manager_entry() {
+        let Some(root) = std::env::var_os("FXI_TEST_MANAGER_ARTIFACT") else {
+            return;
+        };
+        let root = PathBuf::from(root);
+        let manager = super::super::FxserverManager::default();
+        let result = manager
+            .start(super::super::FxserverLaunchRequest {
+                artifact_path: root.to_string_lossy().into(),
+                environment: vec![],
+                server_profile: None,
+            })
+            .unwrap();
+        fs::write(root.join("manager-ready"), result.pid.to_string()).unwrap();
+        thread::sleep(Duration::from_secs(30));
+        manager.stop().unwrap();
+    }
+
+    struct ManagedFixture {
+        root: PathBuf,
+        manager: Child,
+    }
+
+    impl ManagedFixture {
+        fn new(script: &str) -> Self {
+            let root = std::env::temp_dir().join(format!(
+                "fxi-supervisor-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            fs::create_dir_all(root.join("alpine/opt/cfx-server")).unwrap();
+            fs::write(root.join("alpine/opt/cfx-server/FXServer"), "fixture").unwrap();
+            fs::write(root.join("run.sh"), script).unwrap();
+            let manager = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "commands::fxserver::linux::tests::manager_entry",
+                    "--nocapture",
+                ])
+                .env("FXI_TEST_MANAGER_ARTIFACT", &root)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::inherit())
+                .spawn()
+                .unwrap();
+            let fixture = Self { root, manager };
+            fixture.wait_file("manager-ready");
+            fixture
+        }
+
+        fn wait_file(&self, name: &str) -> String {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                if let Ok(value) = fs::read_to_string(self.root.join(name)) {
+                    if !value.is_empty() {
+                        return value.trim().to_string();
+                    }
+                }
+                assert!(Instant::now() < deadline, "timed out waiting for {name}");
+                thread::sleep(Duration::from_millis(20));
+            }
+        }
+
+        fn kill_manager(&mut self) {
+            self.manager.kill().unwrap();
+            self.manager.wait().unwrap();
+        }
+
+        fn wait_cleanup(&self) -> bool {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while Instant::now() < deadline {
+                if let Ok(lease) = crate::platform::ServerLease::acquire(&self.root) {
+                    drop(lease);
+                    return true;
+                }
+                thread::sleep(Duration::from_millis(20));
+            }
+            false
+        }
+    }
+
+    impl Drop for ManagedFixture {
+        fn drop(&mut self) {
+            let _ = self.manager.kill();
+            let _ = self.manager.wait();
+            if self.wait_cleanup() {
+                let _ = fs::remove_dir_all(&self.root);
+            }
+        }
+    }
+
+    #[test]
+    fn manager_death_requests_quit_before_releasing_artifact_lease() {
+        let mut fixture = ManagedFixture::new("#!/bin/bash\necho $$ > server-pid\nread -r answer\nprintf '%s\\n' \"$answer\" > stopped\n");
+        let pid: u32 = fixture.wait_file("server-pid").parse().unwrap();
+        assert!(crate::platform::ServerLease::acquire(&fixture.root).is_err());
+        for entry in fs::read_dir(format!("/proc/{pid}/fd")).unwrap().flatten() {
+            if let Ok(target) = fs::read_link(entry.path()) {
+                assert!(
+                    !target.to_string_lossy().starts_with("socket:"),
+                    "server inherited a supervisor control socket"
+                );
+            }
+        }
+        fixture.kill_manager();
+        assert_eq!(fixture.wait_file("stopped"), "quit");
+        assert!(fixture.wait_cleanup());
+        assert!(!group_has_live_members(pid).unwrap());
+    }
+
+    #[test]
+    fn manager_sigkill_cleans_stubborn_group_without_touching_unrelated_process() {
+        let mut unrelated = Fixture::new("echo ready; exec sleep 30");
+        unrelated.line();
+        let mut fixture = ManagedFixture::new("#!/bin/bash\ntrap '' TERM\necho $$ > server-pid\nsleep 30 &\necho $! > descendant\nread -r answer\nprintf '%s\\n' \"$answer\" > stopped\nwait\n");
+        let pid: u32 = fixture.wait_file("server-pid").parse().unwrap();
+        let descendant: u32 = fixture.wait_file("descendant").parse().unwrap();
+        let started = Instant::now();
+        fixture.kill_manager();
+        assert_eq!(fixture.wait_file("stopped"), "quit");
+        assert!(
+            crate::platform::ServerLease::acquire(&fixture.root).is_err(),
+            "lease must cover graceful shutdown"
+        );
+        assert!(fixture.wait_cleanup());
+        assert!(started.elapsed() < Duration::from_secs(10));
+        assert!(!group_has_live_members(pid).unwrap());
+        assert!(stat(descendant).is_none_or(|s| matches!(s.state, b'Z' | b'X')));
+        assert!(unrelated.child.try_wait().unwrap().is_none());
+    }
+
+    #[test]
+    fn supervisor_rejects_untrusted_descriptor_before_launch() {
+        assert!(supervisor_socket(0).is_err());
+        let (left, _right) = UnixStream::pair().unwrap();
+        // A socket from this process is not an inherited parent connection.
+        assert!(supervisor_socket(left.as_raw_fd()).is_err());
+    }
+
+    #[test]
+    fn unconfirmed_supervisor_exit_blocks_recovery_and_file_changes() {
+        use super::super::{
+            FxserverManager, HealthResourceSampler, ManagedFxserverProcess, RecoveryOutcome,
+            SavedLaunch,
+        };
+        let mut unrelated = Fixture::new("echo ready; exec sleep 30");
+        unrelated.line();
+        let mut child = Command::new("/bin/sh")
+            .args(["-c", "exit 1"])
+            .spawn()
+            .unwrap();
+        child.wait().unwrap();
+        let (control, peer) = UnixStream::pair().unwrap();
+        drop(peer);
+        let manager = FxserverManager::default();
+        *manager.process.lock().unwrap() = Some(ManagedFxserverProcess {
+            child,
+            stdin: None,
+            artifact_path: PathBuf::from("unused"),
+            started_at: std::time::SystemTime::now(),
+            resource_sample: None,
+            _cleanup_job: Some(std::sync::Arc::new(Supervisor {
+                control,
+                server_pid: unrelated.child.id(),
+                cleanup_confirmed: AtomicBool::new(false),
+            })),
+        });
+        assert!(manager
+            .status()
+            .unwrap_err()
+            .contains("without confirming cleanup"));
+        assert!(manager
+            .sample_health(&mut HealthResourceSampler::default(), true)
+            .is_err());
+        assert!(manager
+            .with_stopped_server(|| -> Result<(), String> {
+                panic!("unconfirmed cleanup must block file changes")
+            })
+            .is_err());
+        let generation = manager.arm_start().unwrap();
+        manager
+            .remember_launch(
+                SavedLaunch {
+                    artifact_path: "unused".into(),
+                    environment: vec![],
+                    server_profile: None,
+                },
+                generation,
+            )
+            .unwrap();
+        assert!(matches!(
+            manager
+                .recover_last_launch(manager.launch_generation().unwrap(), &AtomicBool::new(true)),
+            RecoveryOutcome::Cancelled
+        ));
+        assert!(manager.stop().is_err());
+        assert!(unrelated.child.try_wait().unwrap().is_none());
+        drop(manager);
+        assert!(unrelated.child.try_wait().unwrap().is_none());
+    }
+
+    #[test]
+    fn confirmed_cleanup_accepts_server_failure_exit_status() {
+        let mut child = Command::new("/bin/sh")
+            .args(["-c", "exit 7"])
+            .spawn()
+            .unwrap();
+        child.wait().unwrap();
+        let (control, mut peer) = UnixStream::pair().unwrap();
+        peer.write_all(b"C").unwrap();
+        drop(peer);
+        let supervisor = Supervisor {
+            control,
+            server_pid: child.id(),
+            cleanup_confirmed: AtomicBool::new(false),
+        };
+        assert!(!supervisor.is_running(&mut child).unwrap());
+        assert!(!supervisor.is_running(&mut child).unwrap());
+    }
 
     struct Fixture {
         child: Child,

@@ -42,6 +42,10 @@ pub fn run_elevated_helper_from_args() -> bool {
 }
 
 pub fn run_fxserver_watchdog_from_args() -> bool {
+    #[cfg(target_os = "linux")]
+    if crate::commands::fxserver::run_supervisor_from_args() {
+        return true;
+    }
     let mut args = env::args().skip(1);
     let Some(first) = args.next() else {
         return false;

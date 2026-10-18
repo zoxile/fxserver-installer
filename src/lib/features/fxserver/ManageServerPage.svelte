@@ -983,7 +983,7 @@
 					</div>
 					<div class="min-w-0">
 						<Card.Title>Performance</Card.Title>
-						<Card.Description>{status.running ? `Running as PID ${status.pid}` : "FXServer is not running from this app."}</Card.Description>
+						<Card.Description>{status.running ? `${platform.os === "linux" ? "Managed session PID" : "Running as PID"} ${status.pid}` : "FXServer is not running from this app."}</Card.Description>
 					</div>
 				</div>
 				<div

@@ -191,6 +191,8 @@ pub fn run() {
                 )
                 .map_err(std::io::Error::other)?;
             spawn_activation_signal_watcher(app.handle().clone());
+            #[cfg(target_os = "linux")]
+            watch_shutdown_signals(app.handle().clone())?;
             Ok(())
         })
         .build(tauri::generate_context!())
@@ -300,6 +302,127 @@ fn request_app_quit<R: Runtime>(app: &tauri::AppHandle<R>) {
         }
         app.exit(0);
     });
+}
+
+#[cfg(target_os = "linux")]
+fn watch_shutdown_signals<R: Runtime>(app: tauri::AppHandle<R>) -> std::io::Result<()> {
+    let runtime = tauri::async_runtime::handle();
+    let _context = runtime.inner().enter();
+    let shutdown = shutdown_signal()?;
+    tauri::async_runtime::spawn(async move {
+        shutdown.await;
+        let handle = app.clone();
+        if let Err(error) = app.run_on_main_thread(move || request_app_quit(&handle)) {
+            log::error!("Cannot dispatch application shutdown: {error}");
+            app.state::<commands::fxserver::FxserverManager>()
+                .begin_shutdown();
+            tauri::async_runtime::spawn_blocking(move || {
+                stop_managed_fxserver(&app);
+                app.exit(1);
+            });
+        }
+    });
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn shutdown_signal() -> std::io::Result<impl std::future::Future<Output = ()> + Send> {
+    use tokio::signal::unix::{signal, SignalKind};
+    let mut terminate = signal(SignalKind::terminate())?;
+    let mut hangup = signal(SignalKind::hangup())?;
+    let mut interrupt = signal(SignalKind::interrupt())?;
+    Ok(async move {
+        tokio::select! {
+            _ = terminate.recv() => {},
+            _ = hangup.recv() => {},
+            _ = interrupt.recv() => {},
+        }
+    })
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod signal_tests {
+    use super::shutdown_signal;
+    use std::{
+        fs,
+        process::{Command, Stdio},
+        thread,
+        time::{Duration, Instant},
+    };
+
+    #[test]
+    fn signal_entry() {
+        let Some(ready) = std::env::var_os("FXI_TEST_DESKTOP_SIGNALS") else {
+            return;
+        };
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _context = runtime.enter();
+        let shutdown = shutdown_signal().unwrap();
+        fs::write(ready, "ready").unwrap();
+        runtime.block_on(async {
+            tokio::time::timeout(Duration::from_secs(10), shutdown)
+                .await
+                .unwrap();
+        });
+    }
+
+    #[test]
+    fn desktop_termination_signals_request_shutdown_instead_of_exiting_immediately() {
+        for signal in [libc::SIGTERM, libc::SIGHUP, libc::SIGINT] {
+            let root = std::env::temp_dir().join(format!(
+                "fxi-desktop-signals-{}-{signal}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            fs::create_dir(&root).unwrap();
+            let ready = root.join("ready");
+            let mut child = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "desktop::signal_tests::signal_entry",
+                    "--nocapture",
+                ])
+                .env("FXI_TEST_DESKTOP_SIGNALS", &ready)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::inherit())
+                .spawn()
+                .unwrap();
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !ready.exists() && Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(20));
+            }
+            let registered = ready.exists();
+            // Child is still ours and unreaped, so its PID cannot have been reused.
+            let sent = registered && unsafe { libc::kill(child.id() as i32, signal) } == 0;
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let status = loop {
+                if let Some(status) = child.try_wait().unwrap() {
+                    break Some(status);
+                }
+                if Instant::now() >= deadline {
+                    break None;
+                }
+                thread::sleep(Duration::from_millis(20));
+            };
+            if status.is_none() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+            fs::remove_dir_all(root).unwrap();
+            assert!(registered && sent);
+            assert!(
+                status.is_some_and(|status| status.success()),
+                "signal {signal} did not reach the shutdown listener"
+            );
+        }
+    }
 }
 
 fn hide_tray_icon<R: Runtime>(app: &tauri::AppHandle<R>) {
