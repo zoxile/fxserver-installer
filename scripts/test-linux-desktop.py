@@ -72,6 +72,16 @@ def smoke(binary, output):
                     return result["value"]
 
                 def click(selector):
+                    wait_until(lambda: execute("""
+                        const element = document.querySelector(arguments[0]);
+                        if (!element || element.closest('[inert]') || element.disabled) return false;
+                        element.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+                        const nav = element.closest('nav');
+                        if (nav?.getAnimations({ subtree: true }).some(animation => animation.playState === 'running')) return false;
+                        const rect = element.getBoundingClientRect();
+                        const hit = document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2);
+                        return rect.width > 0 && rect.height > 0 && element.contains(hit);
+                    """, selector))
                     element = request("POST", prefix + "/element", {"using": "css selector", "value": selector})
                     request("POST", prefix + f"/element/{element[ELEMENT]}/click", {})
 
@@ -109,6 +119,14 @@ def smoke(binary, output):
                 screenshot("client-logs")
                 assert execute("return !!document.querySelector('[title=\"Quit application\"]')")
                 print(json.dumps({"platform": info, "pages": ["home", "artifacts", "mariadb", "server", "client-logs"], "nativeIpc": True}))
+            except Exception:
+                if session:
+                    try:
+                        screenshot("failure")
+                        (output / "failure.txt").write_text(execute("return document.body.innerText"), encoding="utf-8")
+                    except (OSError, URLError, RuntimeError):
+                        pass
+                raise
             finally:
                 if session:
                     try:
