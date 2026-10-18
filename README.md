@@ -5,7 +5,7 @@ FXServer Installer is a Windows desktop app for setting up, configuring, and mai
 The app is built with Svelte, TypeScript, Tauri, Tailwind CSS v4, shadcn-svelte, Vite, Rust, and npm.
 
 > [!IMPORTANT]
-> The `codex/linux-terminal-support` development branch adds Linux desktop support and a standalone terminal manager for Windows and Linux. This work is not part of the published Windows release and is still undergoing native validation. See [Linux and Terminal Builds](docs/linux-terminal.md) for commands, prerequisites, and current limitations.
+> The `codex/linux-terminal-support` development branch adds Linux desktop support and `fxins`, a standalone terminal manager for Windows and Linux. Run `fxins` for the TUI or `fxins run` for a foreground server. The TUI includes searchable actions, database administration and backups, resource updates, a colored config editor, logs, and performance history. This work is not part of the published Windows release. See [Linux and Terminal Builds](docs/linux-terminal.md) for installation, shortcuts, validation, and current limitations.
 
 Quick note: The main purpose of this app was for me to learn how to build with Tauri and hopefully create something useful along the way. I have really enjoyed making this project, and I hope it helps you too.
 

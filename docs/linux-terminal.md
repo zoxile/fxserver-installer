@@ -1,5 +1,15 @@
 # Linux and Terminal Builds
 
+## Installed Command
+
+`fxins` opens the TUI by default; `fxins tui` is equivalent. Use `fxins run` for a foreground managed server, or `fxins --help` for all subcommands. The existing `fxserver-manager` command remains available as a compatibility binary with the same behavior.
+
+The current-user Windows NSIS installer includes both executables and adds its installation directory to your **user** PATH without elevation. Open a new terminal after installing (restart the terminal application if it still has an old environment), then run `Get-Command fxins` in PowerShell. Uninstall removes only the entry recorded as added by that installation; preexisting entries and unrelated PATH edits are preserved. Ambiguous manually modified entries are left for you to review. Paths containing `;` or `%` cannot be registered safely; the installer reports a warning and the full executable path remains usable.
+
+Linux DEB/RPM packages install `/usr/bin/fxins` and `/usr/bin/fxserver-manager` through the package manager, with no shell-profile edits. Check discovery with `command -v fxins`. An AppImage does **not** install a host PATH command; use the DEB/RPM or the headless source installation below for an installed `fxins`.
+
+Both names retain the existing `com.fxserver.installer` settings namespace and `terminal.json`: `%LOCALAPPDATA%\com.fxserver.installer\terminal.json` on Windows and `$XDG_DATA_HOME/com.fxserver.installer/terminal.json` (default `~/.local/share/com.fxserver.installer/terminal.json`) on Linux. Renaming the command does not migrate, reset, or duplicate settings; `--config` still selects an explicit file.
+
 ## Headless Terminal
 
 Run from the repository root with a current stable Rust toolchain. A headless build does not require Node.js, a display server, GTK, or WebKit. Native TLS and archive dependencies still need a C toolchain, OpenSSL development files, pkg-config, and liblzma development files.
@@ -9,28 +19,80 @@ On Ubuntu/Debian, install build prerequisites explicitly:
 ```sh
 sudo apt-get update
 sudo apt-get install --no-install-recommends build-essential pkg-config libssl-dev liblzma-dev
-cargo build --manifest-path src-tauri/Cargo.toml --no-default-features --features terminal --bin fxserver-manager
+cargo install --path src-tauri --locked --no-default-features --features terminal --bin fxins --bin fxserver-manager
 ```
 
-The debug binary is `src-tauri/target/debug/fxserver-manager` (`fxserver-manager.exe` on Windows). Add `--release` to Cargo for an optimized binary under `src-tauri/target/release/`.
+This [Cargo installation](https://doc.rust-lang.org/cargo/commands/cargo-install.html) builds optimized binaries without the desktop stack. It also works on Windows with a stable Rust MSVC toolchain and its C/C++ build prerequisites. Cargo installs commands into its installation root's `bin` directory, normally `~/.cargo/bin` (`%USERPROFILE%\.cargo\bin` on Windows). Ensure that directory is on your user PATH; a custom `--root` needs its own `bin` directory on PATH. Do not run `cargo install` as root. Existing installed binaries may require an explicit `--force` to replace them after reviewing the checkout. Cargo installation does not change the app's settings location.
+
+To build without installing:
+
+```sh
+cargo build --manifest-path src-tauri/Cargo.toml --locked --no-default-features --features terminal --bin fxins --bin fxserver-manager
+```
+
+The debug binaries are `src-tauri/target/debug/fxins` and `fxserver-manager` (with `.exe` on Windows). Add `--release` to Cargo for optimized binaries under `src-tauri/target/release/`. Substitute the full binary path for `fxins` in the examples below when running an uninstalled build.
 
 Use the binary's `--help` output for the authoritative CLI options. Do not run the desktop or terminal manager as root merely to manage files in a user-owned server directory.
 
 ## Terminal Usage
 
-Run the binary with no subcommand, or with `tui`, to open the interactive interface. F1-F7 select Server, Console, Resources, Database, Artifacts, Checks, and Settings. TUI passwords remain in memory for the session and are not saved to configuration.
+Run the binary with no subcommand, or with `tui`, to open the interactive interface. F1-F9 select Server, Console, Resources, Database, Artifacts, Checks, Settings, Actions, and Config. The minimum size is 50 columns by 14 rows; 100 columns by 30 rows is more comfortable for forms and charts.
+
+Passwords are session-only by default and never written to `terminal.json`. Actions includes explicit remember/load/forget operations using the same OS encryption services as the desktop. Previously remembered credentials load once when the TUI opens, scoped to the configured endpoint and server profile. Linux needs an unlocked Secret Service keyring; failure never falls back to plaintext. Save the non-secret connection settings too so the next session selects the same credential scope. Desktop workspace credentials are not silently imported.
+
+### First Session
+
+1. Run `fxins`, then press F7. Use the arrow keys and Enter to set the artifact folder, txData folder, and connection details. Paths must be absolute.
+2. Press `p` to discover and choose a txAdmin profile. An empty txData path can be discovered from the artifact directory. Press `s` to save non-secret settings.
+3. Open F6 and press `r` to review preflight checks. Resolve blocking findings before starting the server.
+4. Open F1 and press `s` to start, `x` to stop, or `r` to restart. Stop/restart ask for confirmation. Force start is `f`, after reviewing the checks.
+5. Open F2 and press Enter to enter an RCON command. Set the RCON password in Settings first. PgUp/PgDn scroll the bounded console; End follows its latest output.
+
+Server history retains up to an hour of samples while this TUI is running. On F1, keys `1`-`5` select 30 seconds, 5 minutes, 10 minutes, 30 minutes, or one hour. CPU and RAM use separate colors; session lows/highs reset for a new managed process. Small terminals show the numeric summary instead of squeezing in unreadable charts.
+
+### Actions And Forms
+
+Press Ctrl+K or F8 to open Actions. Type to filter by group/title, use Up/Down to select, and Enter to open. Selection wraps and scrolls into view. F1-F9 remain available while work is running. In forms, Tab/Shift+Tab or Up/Down select fields, Left/Right changes choices, and Enter reviews or runs the action. Alt+V reveals/hides the active password field; leaving it masks it again. Esc cancels a form or returns from a result. Ctrl+C quits safely; `q` is searchable text while Actions is focused.
+
+Mutations require explicit confirmation. Some higher-risk operations also require a fresh backend preview and its exact token/target. Read the result, return to Actions with Esc, then choose the corresponding Apply action and enter the displayed values. Stale or mismatched previews fail instead of silently regenerating an approval. Ctrl+O reopens the last result without discarding another form; Esc returns to that form. Result pages support arrows, PgUp/PgDn, Home, and End. Forms accept single-line input up to 8 KiB; use the SQL-file runner or Config editor for multiline content.
+
+| Area | Available in the TUI |
+| --- | --- |
+| MariaDB | Detect installation/service, inspect package versions, install/update/uninstall, service start/stop/restart, validate/change connection, securely remember/load/forget login. Installer messages appear during the operation. |
+| Database browser | List databases/tables, inspect columns/indexes, bounded filtered/sorted row pages, export filtered CSV to a new file. F3 then `d` opens a database picker for the current session. |
+| Administration | Create accounts, change passwords, delete exact accounts, add database-scoped privileges, inspect grants, preview/apply database or table creation and table maintenance. |
+| SQL and diagnostics | F3 Enter opens SQL input; `f` reads a SQL file for review. Actions includes server/database inspection and SQL compatibility checks. SQL runs in the selected database, or global scope if it is empty. |
+| Backups | Database or table dumps, schema/data/full modes, optional routines/triggers/events, and isolated restore-test preview/apply/owned-database cleanup. Back up independently before installer or destructive SQL actions. |
+| Resources | Manifest scanning and RCON start/stop/restart/ensure, version checks, staged update previews, protected files, snapshots, rollback previews and apply. Resource update and rollback operations require the selected server to be stopped. |
+| Artifacts | Host-platform Legacy and Enhanced catalogs and exact-version installation. Enhanced remains early access; health warnings are not a stability guarantee. |
+| Live Bridge | Inspect installation, preview/apply installation or removal, fetch live resources/players, send validated resource actions to a reviewed bridge instance. |
+| Profiler | Capture a bounded recording from the managed running server, retain its result, export to a new file, discard the retained capture. |
+| Configuration | Multiline colored editor, common-value and permission-rule previews, validation, encrypted history and revision-checked restoration. |
+| Logs and utilities | Bounded application/server/client log tails, JSON validation/formatting, and lookups in an already installed offline JOOAT resolver database. Client logs remain Windows-only. |
+
+### Editing Configuration
+
+Press F9, then `r` to load the selected profile's cfg files. Select a file and press Enter. The editor uses line numbers, syntax colors, horizontal scrolling, and Unicode-aware cursor handling. Ctrl+S saves, Ctrl+Z undoes, and Ctrl+Y redoes. Esc returns to the file list when the draft is unchanged; with unsaved edits it shows a warning. Ctrl+W explicitly discards the draft. Switching views retains the draft. Files are bounded to 512 KiB and fewer than 65,535 lines.
+
+Saving checks that the original file still matches and retains encrypted history before replacing it. If another tool changed the file, reload and reconcile the changes; the TUI does not overwrite it blindly. On Linux, saving with encrypted history needs the unlocked keyring described above. File contents and explicitly requested log/history views can contain secrets: avoid screen sharing or terminal recording while viewing them.
+
+### Current Boundaries
+
+This is substantial terminal coverage, not a pixel-for-pixel copy of the desktop. The desktop's scheduled backup/maintenance and crash-recovery controllers, workspace cloning, visual profiler analysis, structured Lua configurator, and command-keybinding editor are not run by the TUI. The terminal can query arbitrary reviewed SQL, but its guided database browser is read-only; use explicit SQL or the desktop's guarded row editor for row mutations. The JOOAT database must already be installed. Multiple terminal settings files can be selected with `--config`; this is not automatic desktop workspace synchronization.
+
+Only one mutating/query job runs at a time. Navigation, console collection, and performance sampling remain independent. A running operation must finish before an ordinary quit; the terminal does not promise transactional cancellation of installers or database changes. `fxins run` and TUI server ownership are foreground sessions, not system services. Leaving the session stops its managed FXServer.
 
 Create a non-secret settings example at an absolute path; `init` refuses to overwrite an existing file:
 
 ```sh
-./src-tauri/target/debug/fxserver-manager --config /home/fivem/manager.json init
-./src-tauri/target/debug/fxserver-manager --config /home/fivem/manager.json
+fxins --config /home/fivem/manager.json init
+fxins --config /home/fivem/manager.json
 ```
 
 Global overrides are `--config`, `--artifact-path`, `--tx-data-path`, and `--profile`. For example:
 
 ```sh
-./src-tauri/target/debug/fxserver-manager \
+fxins \
   --artifact-path /home/fivem/server \
   --tx-data-path /home/fivem/txData \
   --profile default doctor
@@ -91,7 +153,7 @@ For a local desktop build without packaging:
 npm run tauri -- build --no-bundle --config src-tauri/tauri.linux.conf.json
 ```
 
-Desktop packaging enables both `desktop` and `terminal` Cargo features so the bundle contains the application and `fxserver-manager`. The Linux configuration replaces the Windows NSIS bundle targets with `deb`, `rpm`, and `appimage`. The bundled terminal can run without a graphical session but shares the desktop build's library requirements; use the separate headless build above for servers without GTK/WebKit. Building a package is a separate explicit operation; nothing in the Linux check workflow publishes a release. Desktop execution requires a working graphical session. For Fedora/RHEL-family, Arch, or other distributions, use the distribution-specific prerequisites in the official Tauri guide and the same Cargo/npm commands. Ubuntu CI does not establish runtime or packaging support on those distributions.
+Desktop packaging enables both `desktop` and `terminal` Cargo features so the bundle contains the application, `fxins`, and the compatibility binary `fxserver-manager`. The Linux configuration replaces the Windows NSIS bundle targets with `deb`, `rpm`, and `appimage`. The bundled terminal can run without a graphical session but shares the desktop build's library requirements; use the separate headless build above for servers without GTK/WebKit. Building a package is a separate explicit operation; nothing in the Linux check workflow publishes a release. Desktop execution requires a working graphical session. For Fedora/RHEL-family, Arch, or other distributions, use the distribution-specific prerequisites in the official Tauri guide and the same Cargo/npm commands. Ubuntu CI does not establish runtime or packaging support on those distributions.
 
 Closing the Linux desktop window quits the application by default; it does not rely on a tray icon being available in GNOME or another desktop environment. Windows close/tray behavior is unchanged.
 
