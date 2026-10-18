@@ -1,10 +1,12 @@
 """Safety guard checks. No database, package, or service commands are executed."""
 import importlib.util
+import io
+import json
 import os
 from pathlib import Path
 import sys
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 
 spec = importlib.util.spec_from_file_location(
@@ -76,6 +78,73 @@ class GuardTests(unittest.TestCase):
     def test_output_limit_is_bounded(self):
         with self.assertRaisesRegex(RuntimeError, "output limit"):
             harness.run([sys.executable, "-c", "import sys; sys.stdout.write('x' * (5 * 1024 * 1024))"], env=os.environ)
+
+
+class DiagnosticTests(unittest.TestCase):
+    def fixture(self):
+        fixture = object.__new__(harness.Fixture)
+        fixture.password = "a" * 40 + "#'\"\\= space"
+        fixture.reader_password = "b" * 40
+        fixture.root = Path("/tmp/fxi-mariadb-integration-unit")
+        fixture.datadir = fixture.root / "data"
+        fixture.environment = {}
+        fixture.port = 13306
+        fixture.user = object()
+        return fixture
+
+    def test_redaction_covers_raw_option_sql_json_and_hex_encodings(self):
+        fixture = self.fixture()
+        for password in [fixture.password, fixture.reader_password]:
+            for value in [password, harness.option_value(password)[1:-1], json.dumps(password)[1:-1],
+                          password.replace("\\", "\\\\").replace("'", "\\'"), password.encode().hex()]:
+                self.assertEqual(fixture.redact(value), "[redacted]")
+
+    def test_successful_backup_does_not_probe_client_again(self):
+        fixture = self.fixture()
+        fixture.cli_json = Mock(return_value={"path": "fixture.sql"})
+        fixture.backup_diagnostics = Mock()
+        self.assertEqual(fixture.backup(), {"path": "fixture.sql"})
+        fixture.backup_diagnostics.assert_not_called()
+
+    def test_failed_probe_does_not_hide_original_backup_error(self):
+        fixture = self.fixture()
+        fixture.cli_json = Mock(side_effect=RuntimeError("original backup error"))
+        fixture.backup_diagnostics = Mock(side_effect=RuntimeError(fixture.password))
+        with patch.object(sys, "stderr", new_callable=io.StringIO) as output:
+            with self.assertRaisesRegex(RuntimeError, "original backup error"):
+                fixture.backup()
+        fixture.backup_diagnostics.assert_called_once()
+        self.assertNotIn(fixture.password, output.getvalue())
+
+    def test_raw_diagnostics_are_bounded_redacted_and_exclude_dump_stdout(self):
+        fixture = self.fixture()
+        fixture.write_private = Mock()
+        escaped_password = harness.option_value(fixture.password)[1:-1]
+        responses = [(0, "mariadb-dump fixture version", ""),
+                     (1, "PRIVATE SQL CONTENT", escaped_password + " unsupported option " + "x" * 10000)]
+        with patch.object(sys, "platform", "linux"), patch.dict(os.environ, {
+            "GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "github-hosted",
+            "FXI_DISPOSABLE_MARIADB": harness.ACK, "GITHUB_RUN_ID": "123",
+        }, clear=True), patch.object(Path, "resolve", lambda p: p), \
+                patch.object(Path, "is_symlink", return_value=False), \
+                patch.object(Path, "read_text", return_value="123"), \
+                patch.object(Path, "unlink") as unlink, \
+                patch.object(harness.shutil, "which", return_value="/usr/bin/mariadb-dump"), \
+                patch.object(harness, "run", side_effect=responses) as run, \
+                patch.object(sys, "stderr", new_callable=io.StringIO) as output:
+            fixture.backup_diagnostics()
+        lines = output.getvalue().splitlines()
+        self.assertEqual(len(lines), 2)
+        diagnostic = json.loads(lines[1].removeprefix("DIAGNOSTIC "))
+        self.assertEqual(diagnostic["exit"], 1)
+        self.assertLessEqual(len(diagnostic["output"]), 6000)
+        self.assertIn("[redacted] unsupported option", diagnostic["output"])
+        self.assertNotIn("PRIVATE SQL CONTENT", output.getvalue())
+        for call in run.call_args_list:
+            self.assertEqual(call.kwargs["timeout"], 30)
+            self.assertIs(call.kwargs["user"], fixture.user)
+            self.assertNotIn(fixture.password, str(call.args))
+        unlink.assert_called_once()
 
 
 if __name__ == "__main__":

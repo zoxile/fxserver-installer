@@ -238,13 +238,11 @@ pub(super) fn is_upgrade(catalog: &Catalog, target: &str) -> Result<bool, String
 }
 
 fn arch_catalog() -> Result<Catalog, String> {
-    for args in [vec!["SigLevel"], vec!["--repo", "extra", "SigLevel"]] {
-        let policy = runtime::checked_read(&Plan::new("pacman-conf", &args))?;
-        if !arch_signatures_required(&policy) {
-            return Err(
-                "Arch package signatures must be Required and TrustedOnly for extra.".into(),
-            );
-        }
+    let global = runtime::checked_read(&Plan::new("pacman-conf", &["SigLevel"]))?;
+    let repository =
+        runtime::checked_read(&Plan::new("pacman-conf", &["--repo", "extra", "SigLevel"]))?;
+    if !arch_repository_signatures_required(&global, &repository) {
+        return Err("Arch package signatures must be Required and TrustedOnly for extra.".into());
     }
     let source = runtime::checked_read(&Plan::new("pacman", &["-Si", "extra/mariadb"]))?;
     let versions = parse_arch_versions(&source);
@@ -269,20 +267,31 @@ fn parse_arch_versions(source: &str) -> Vec<String> {
     unique(fields.get("Version").map(|v| (*v).to_string()).into_iter())
 }
 
+fn arch_repository_signatures_required(global: &str, repository: &str) -> bool {
+    // pacman-conf emits nothing for ALPM_SIG_USE_DEFAULT, not an unsigned policy.
+    arch_signatures_required(global)
+        && (repository.trim().is_empty() || arch_signatures_required(repository))
+}
+
 fn arch_signatures_required(source: &str) -> bool {
     let tokens: Vec<_> = source.split_whitespace().collect();
     tokens
         .iter()
         .any(|t| matches!(*t, "Required" | "PackageRequired"))
-        && !tokens.iter().any(|t| {
+        && tokens
+            .iter()
+            .any(|t| matches!(*t, "TrustedOnly" | "PackageTrustedOnly"))
+        && tokens.iter().all(|t| {
             matches!(
                 *t,
-                "Never"
-                    | "Optional"
-                    | "PackageNever"
-                    | "PackageOptional"
-                    | "TrustAll"
-                    | "PackageTrustAll"
+                "Required"
+                    | "PackageRequired"
+                    | "TrustedOnly"
+                    | "PackageTrustedOnly"
+                    | "DatabaseRequired"
+                    | "DatabaseOptional"
+                    | "DatabaseNever"
+                    | "DatabaseTrustedOnly"
             )
         })
 }
@@ -420,9 +429,42 @@ mod tests {
         }
         assert!(apt_source_is_secure("deb [signed-by=/usr/share/keyrings/debian-archive-keyring.gpg] https://deb.debian.org/debian stable main"));
         assert!(arch_signatures_required(
-            "PackageRequired\nDatabaseOptional"
+            "PackageRequired\nPackageTrustedOnly\nDatabaseOptional\nDatabaseTrustedOnly"
         ));
         assert!(!arch_signatures_required("Required PackageTrustAll"));
+    }
+    #[test]
+    fn arch_inherited_signatures_require_a_trusted_global_policy() {
+        let global = "PackageRequired\nPackageTrustedOnly\nDatabaseOptional\nDatabaseTrustedOnly";
+        assert!(arch_repository_signatures_required(global, "\n"));
+        assert!(arch_repository_signatures_required(global, global));
+        assert!(arch_repository_signatures_required(
+            "Required TrustedOnly",
+            ""
+        ));
+        for invalid in [
+            "",
+            "PackageRequired",
+            "Optional TrustedOnly",
+            "Never",
+            "Required TrustAll",
+            "PackageOptional PackageTrustedOnly",
+            "PackageNever",
+            "PackageRequired PackageTrustAll",
+            "PackageRequired PackageTrustedOnly DatabaseTrustAll",
+            "PackageRequired PackageTrustedOnly unknown",
+        ] {
+            assert!(
+                !arch_repository_signatures_required(invalid, ""),
+                "{invalid}"
+            );
+            if !invalid.is_empty() {
+                assert!(
+                    !arch_repository_signatures_required(global, invalid),
+                    "{invalid}"
+                );
+            }
+        }
     }
     #[test]
     fn rpm_catalog_filters_third_party_repositories_and_keeps_epoch() {

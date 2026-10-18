@@ -30,6 +30,10 @@ DATABASE = "fxi_ci_fixture"
 OUTPUT_LIMIT = 4 * 1024 * 1024
 
 
+def option_value(value):
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t") + '"'
+
+
 def require(condition, message):
     if not condition:
         raise RuntimeError(message)
@@ -174,18 +178,23 @@ class Fixture:
             output.write(content)
 
     def redact(self, value):
-        return value.replace(self.password, "[redacted]").replace(self.reader_password, "[redacted]")
+        for secret in [self.password, self.reader_password]:
+            for variant in [secret, option_value(secret)[1:-1], json.dumps(secret)[1:-1],
+                            secret.replace("\\", "\\\\").replace("'", "\\'"), secret.encode().hex(), secret[:40]]:
+                if variant:
+                    value = value.replace(variant, "[redacted]")
+        return value
 
     def checked(self, command, **kwargs):
         code, out, err = run(command, env=self.environment, **kwargs)
-        require(code == 0, f"Command failed ({code}): {self.redact((out + err)[-6000:])}")
+        require(code == 0, f"Command failed ({code}): {self.redact(out + err)[-6000:]}")
         return out
 
     def cli(self, *arguments, secret=None, success=True, tty=False, timeout=90):
         code, out, err = run([self.args.binary, "--config", self.config, *arguments],
                              env=self.environment, user=self.user, tty=tty,
                              stdin=(secret + "\n").encode() if secret is not None else None, timeout=timeout)
-        require((code == 0) == success, f"CLI {' '.join(arguments[:2])}: unexpected exit {code}: {self.redact((out + err)[-6000:])}")
+        require((code == 0) == success, f"CLI {' '.join(arguments[:2])}: unexpected exit {code}: {self.redact(out + err)[-6000:]}")
         return out, err
 
     def cli_json(self, *arguments, **kwargs):
@@ -201,6 +210,46 @@ class Fixture:
     def passed(self, name):
         self.results["checks"].append(name)
         print(f"PASS {name}", flush=True)
+
+    def backup_diagnostics(self):
+        require(sys.platform == "linux" and os.environ.get("GITHUB_ACTIONS") == "true"
+                and os.environ.get("RUNNER_ENVIRONMENT") == "github-hosted"
+                and os.environ.get("FXI_DISPOSABLE_MARIADB") == ACK,
+                "Backup diagnostics require disposable Linux CI.")
+        require(self.root.parent == Path("/tmp") and self.root.name.startswith("fxi-mariadb-integration-")
+                and self.root.resolve() == self.root and not self.root.is_symlink(), "Invalid diagnostic directory.")
+        require((self.datadir / ".fxi-ci-owned").read_text() == os.environ["GITHUB_RUN_ID"], "Unowned diagnostic database.")
+        client = shutil.which("mariadb-dump") or shutil.which("mysqldump")
+        require(bool(client), "No dump client for diagnostics.")
+        defaults = self.root / "dump-diagnostic.cnf"
+        self.write_private(defaults, "[client]\nuser=fxi_ci_admin\npassword=" + option_value(self.password) + "\n")
+        try:
+            probes = [
+                ("version", [client, "--no-defaults", "--version"]),
+                ("fixture dump", [client, f"--defaults-file={defaults}", "--protocol=tcp", "--host=127.0.0.1",
+                                  f"--port={self.port}", "--hex-blob", "--default-character-set=utf8mb4",
+                                  "--single-transaction", "--quick", "--routines", "--triggers", "--events", DATABASE]),
+            ]
+            for label, command in probes:
+                code, out, err = run(command, env=self.environment, user=self.user, timeout=30)
+                # Never print dump stdout (SQL), argv or option-file contents.
+                diagnostic = self.redact(err if label == "fixture dump" else out + err)[:6000]
+                print("DIAGNOSTIC " + json.dumps({"probe": label, "exit": code, "output": diagnostic}),
+                      file=sys.stderr, flush=True)
+        finally:
+            defaults.unlink()
+
+    def backup(self):
+        try:
+            return self.cli_json("database", "backup", "--output", str(self.root), "--host", "127.0.0.1",
+                                 "--port", str(self.port), "--user", "fxi_ci_admin", "--database", DATABASE,
+                                 "--password-stdin", secret=self.password)
+        except Exception:
+            try:
+                self.backup_diagnostics()
+            except Exception as error:
+                print("DIAGNOSTIC " + json.dumps({"error": self.redact(str(error))[:6000]}), file=sys.stderr, flush=True)
+            raise
 
     def catalog(self):
         packages = self.cli_json("database", "packages")
@@ -317,9 +366,7 @@ class Fixture:
         require(self.query("SELECT id, label FROM items ORDER BY id;", reader=True)["rows"] == rows, "Reader cannot read fixture.")
         require(not self.query("DELETE FROM items;", reader=True, success=False)["success"], "Read-only account unexpectedly wrote data.")
         self.passed("TCP login, escaped password, wrong-password rejection and read-only grants")
-        backup = self.cli_json("database", "backup", "--output", str(self.root), "--host", "127.0.0.1",
-                              "--port", str(self.port), "--user", "fxi_ci_admin", "--database", DATABASE,
-                              "--password-stdin", secret=self.password)
+        backup = self.backup()
         dump = Path(backup["path"])
         require(dump.resolve().parent == self.root and not dump.is_symlink(), "Backup escaped the fixture.")
         require(stat.S_IMODE(dump.stat().st_mode) == 0o600 and dump.stat().st_size > 0, "Backup is empty or not private.")

@@ -38,9 +38,65 @@ pub fn create_backup(
     let _credentials_file = apply_credentials_args(&mut command, &credentials)?;
     #[cfg(not(target_os = "linux"))]
     command.arg("--result-file").arg(&output_path);
+    configure_dump_args(&mut command, &credentials, &options)?;
+
+    #[cfg(target_os = "linux")]
+    let (stderr, metadata) = {
+        let handles = super::linux::filesystem::pin_directories(
+            output_path.parent().ok_or("Missing backup parent.")?,
+        )?;
+        let file = super::linux::filesystem::create_private_at(
+            handles.last().unwrap(),
+            output_path.file_name().ok_or("Missing backup filename.")?,
+        )?;
+        let stderr = run_client_with_output(
+            &mut command,
+            "MariaDB backup",
+            Duration::from_secs(3600),
+            Some(file.try_clone().map_err(|e| e.to_string())?),
+        )
+        .map_err(|error| {
+            format!(
+                "{} Partial output retained at {}.",
+                super::backup_storage::client_failure(&error),
+                output_path.display()
+            )
+        })?;
+        file.sync_all().map_err(|e| e.to_string())?;
+        (stderr, file.metadata().map_err(|e| e.to_string())?)
+    };
+    #[cfg(not(target_os = "linux"))]
+    let (stderr, metadata) = {
+        reserve_backup_file(&output_path)?;
+        let stderr = match run_backup_client(&mut command, "MariaDB backup") {
+            Ok(stderr) => stderr,
+            Err(error) => {
+                let _ = fs::remove_file(&output_path);
+                return Err(error);
+            }
+        };
+
+        let metadata = fs::metadata(&output_path).map_err(|error| {
+            format!("Backup finished but the output file could not be inspected: {error}")
+        })?;
+        (stderr, metadata)
+    };
+
+    Ok(MariaDBBackupResult {
+        path: output_path.to_string_lossy().to_string(),
+        size_bytes: metadata.len(),
+        stderr,
+    })
+}
+
+fn configure_dump_args(
+    command: &mut Command,
+    credentials: &MariaDBCredentials,
+    options: &MariaDBBackupOptions,
+) -> Result<(), String> {
+    // mariadb-dump does not accept the query client's --connect-timeout option.
     command
         .arg("--hex-blob")
-        .arg("--connect-timeout=10")
         .arg("--default-character-set=utf8mb4");
 
     if options.single_transaction {
@@ -96,53 +152,7 @@ pub fn create_backup(
         }
     }
 
-    #[cfg(target_os = "linux")]
-    let (stderr, metadata) = {
-        let handles = super::linux::filesystem::pin_directories(
-            output_path.parent().ok_or("Missing backup parent.")?,
-        )?;
-        let file = super::linux::filesystem::create_private_at(
-            handles.last().unwrap(),
-            output_path.file_name().ok_or("Missing backup filename.")?,
-        )?;
-        let stderr = run_client_with_output(
-            &mut command,
-            "MariaDB backup",
-            Duration::from_secs(3600),
-            Some(file.try_clone().map_err(|e| e.to_string())?),
-        )
-        .map_err(|error| {
-            format!(
-                "{} Partial output retained at {}.",
-                super::backup_storage::client_failure(&error),
-                output_path.display()
-            )
-        })?;
-        file.sync_all().map_err(|e| e.to_string())?;
-        (stderr, file.metadata().map_err(|e| e.to_string())?)
-    };
-    #[cfg(not(target_os = "linux"))]
-    let (stderr, metadata) = {
-        reserve_backup_file(&output_path)?;
-        let stderr = match run_backup_client(&mut command, "MariaDB backup") {
-            Ok(stderr) => stderr,
-            Err(error) => {
-                let _ = fs::remove_file(&output_path);
-                return Err(error);
-            }
-        };
-
-        let metadata = fs::metadata(&output_path).map_err(|error| {
-            format!("Backup finished but the output file could not be inspected: {error}")
-        })?;
-        (stderr, metadata)
-    };
-
-    Ok(MariaDBBackupResult {
-        path: output_path.to_string_lossy().to_string(),
-        size_bytes: metadata.len(),
-        stderr,
-    })
+    Ok(())
 }
 
 #[cfg(any(not(target_os = "linux"), test))]
@@ -352,6 +362,57 @@ fn timestamp_label() -> String {
 #[cfg(test)]
 mod safety_tests {
     use super::*;
+
+    #[test]
+    fn dump_arguments_exclude_query_only_options_and_keep_requested_scope() {
+        let credentials = MariaDBCredentials {
+            host: "127.0.0.1".into(),
+            port: 3306,
+            username: "fixture".into(),
+            password: "not-an-argument".into(),
+            database: Some("fixture_db".into()),
+        };
+        let mut options = MariaDBBackupOptions {
+            output_dir: String::new(),
+            file_name: None,
+            database: None,
+            tables: vec![],
+            all_databases: false,
+            schema_only: false,
+            data_only: false,
+            include_routines: true,
+            include_triggers: true,
+            include_events: true,
+            single_transaction: true,
+            add_drop_statements: false,
+            where_clause: None,
+        };
+        let mut command = Command::new("unused");
+        configure_dump_args(&mut command, &credentials, &options).unwrap();
+        let args: Vec<_> = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy())
+            .collect();
+        assert_eq!(
+            args,
+            [
+                "--hex-blob",
+                "--default-character-set=utf8mb4",
+                "--single-transaction",
+                "--quick",
+                "--routines",
+                "--triggers",
+                "--events",
+                "fixture_db",
+            ]
+        );
+        options.include_triggers = false;
+        options.tables = vec!["items".into()];
+        let mut command = Command::new("unused");
+        configure_dump_args(&mut command, &credentials, &options).unwrap();
+        assert!(command.get_args().any(|arg| arg == "--skip-triggers"));
+        assert!(command.get_args().any(|arg| arg == "items"));
+    }
 
     #[test]
     fn existing_backup_is_never_overwritten() {
