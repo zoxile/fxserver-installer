@@ -103,7 +103,7 @@ pub fn create_private_at(directory: &File, name: &OsStr) -> Result<File, String>
 
 pub struct PrivateCredential {
     pub path: PathBuf,
-    pub file: File,
+    _file: File,
 }
 
 impl PrivateCredential {
@@ -136,7 +136,7 @@ impl PrivateCredential {
         file.write_all(contents.as_bytes())
             .and_then(|_| file.sync_all())
             .map_err(|_| "Cannot write private MariaDB credentials.")?;
-        Ok(Self { path, file })
+        Ok(Self { path, _file: file })
     }
 }
 
@@ -164,7 +164,9 @@ pub fn available_bytes(path: &Path) -> Result<u64, String> {
         ));
     }
     let stat = unsafe { stat.assume_init() };
-    Ok((stat.f_bavail as u64).saturating_mul(stat.f_frsize as u64))
+    (u128::from(stat.f_bavail) * u128::from(stat.f_frsize))
+        .try_into()
+        .map_err(|_| "Filesystem capacity overflow.".into())
 }
 
 pub fn sealed_snapshot(source: &mut File) -> Result<File, String> {
@@ -240,7 +242,7 @@ mod tests {
     #[test]
     fn credentials_are_private_before_secrets_and_unlinked_while_alive() {
         let guard = PrivateCredential::create("").unwrap();
-        let meta = guard.file.metadata().unwrap();
+        let meta = guard._file.metadata().unwrap();
         assert_eq!(meta.mode() & 0o777, 0o600);
         assert_eq!(meta.nlink(), 0);
         assert_eq!(meta.len(), 0);
@@ -324,7 +326,7 @@ mod tests {
     #[test]
     fn restore_snapshot_cannot_change_after_preflight() {
         let mut source = PrivateCredential::create("fixture").unwrap();
-        let mut sealed = sealed_snapshot(&mut source.file).unwrap();
+        let mut sealed = sealed_snapshot(&mut source._file).unwrap();
         assert!(sealed.write_all(b"changed").is_err());
         assert!(sealed.set_len(0).is_err());
         assert_eq!(

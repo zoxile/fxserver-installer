@@ -4,17 +4,25 @@ use std::{
     net::UdpSocket,
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, Ordering},
         Arc, Mutex,
     },
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant},
+};
+
+#[cfg(any(not(target_os = "linux"), test))]
+use std::{
+    sync::atomic::AtomicU64,
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
 
+#[cfg(not(target_os = "linux"))]
+use super::backup_manager::storage;
 use super::fxserver::{self, FxserverManager};
-use super::{backup_manager::storage, managed_rcon};
+use super::managed_rcon;
 use crate::models::fxserver::{FxserverRconConfig, FxserverStatus};
 
 const MAX_CAPTURE_BYTES: u64 = 16 * 1024 * 1024;
@@ -23,6 +31,7 @@ const SAVE_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_RESPONSE_BYTES: usize = 4096;
 const MAX_RESPONSE_LINE_BYTES: usize = 1024;
 const CANCEL_MESSAGE: &str = "Profiler capture cancelled. No profiler stop was sent; a started frame-bounded recording ends as the server advances.";
+#[cfg(any(not(target_os = "linux"), test))]
 static CAPTURE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Deserialize)]
@@ -210,6 +219,7 @@ fn validate_request(request: &ProfilerCaptureRequest) -> Result<(), String> {
     managed_rcon::validate_local_rcon(&request.rcon)
 }
 
+#[cfg(any(not(target_os = "linux"), test))]
 fn capture_id() -> String {
     format!(
         "fxi-profiler-{:x}-{:x}-{:x}",
@@ -665,11 +675,11 @@ impl CaptureFile {
                 .ok_or("Capture reservation was released.")?;
             // The server opens the reserved inode, not a pathname an attacker can replace.
             // /proc access must be allowed for the managed same-user server; otherwise timeout.
-            return Ok(format!(
+            Ok(format!(
                 "profiler saveJSON \"/proc/{}/fd/{}\"",
                 std::process::id(),
                 file.as_raw_fd()
-            ));
+            ))
         }
         #[cfg(not(target_os = "linux"))]
         Ok(format!(
@@ -738,7 +748,7 @@ impl CaptureFile {
             // Retain the descriptor until verified unlink succeeds, including on failed cleanup.
             self.remove_verified()?;
             self.reserved.take();
-            return Ok(());
+            Ok(())
         }
         #[cfg(not(target_os = "linux"))]
         {

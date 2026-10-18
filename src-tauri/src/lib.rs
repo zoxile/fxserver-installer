@@ -14,6 +14,7 @@ pub use desktop::run;
 mod helpers;
 pub use helpers::{run_elevated_helper_from_args, run_fxserver_watchdog_from_args};
 
+#[cfg(windows)]
 pub(crate) const ELEVATED_SCRIPT_ARG: &str = "--fxi-elevated-script";
 pub(crate) const FXSERVER_WATCHDOG_ARG: &str = "--fxi-watch-fxserver";
 

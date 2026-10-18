@@ -479,6 +479,7 @@ fn decode_batch_cell(value: &str) -> String {
 mod tests {
     use super::*;
 
+    #[cfg(windows)]
     fn fixture(host: &str) -> MariaDBCredentials {
         MariaDBCredentials {
             host: host.into(),

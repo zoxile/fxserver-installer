@@ -315,7 +315,7 @@ fn open_dump(path: &Path) -> Result<File, String> {
         let metadata = file.metadata().map_err(io_error)?;
         let snapshot = crate::services::mariadb::linux::filesystem::sealed_snapshot(&mut file)?;
         super::linux_fs::unchanged(&file, &metadata)?;
-        return Ok(snapshot);
+        Ok(snapshot)
     }
     #[cfg(not(target_os = "linux"))]
     storage::open_snapshot(path)

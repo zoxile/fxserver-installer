@@ -451,7 +451,7 @@ fn replace_file(from: &Path, to: &Path) -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "linux")))]
 fn replace_file(from: &Path, to: &Path) -> Result<(), String> {
     fs::rename(from, to).map_err(|e| e.to_string())
 }

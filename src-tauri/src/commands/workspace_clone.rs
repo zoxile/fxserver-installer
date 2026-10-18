@@ -414,7 +414,6 @@ fn check_no_links(path: &Path) -> Result<(), String> {
 }
 
 fn pin_directories(path: &Path) -> Result<Vec<File>, String> {
-    let mut handles = Vec::new();
     #[cfg(windows)]
     {
         use std::os::windows::fs::OpenOptionsExt;
@@ -422,6 +421,7 @@ fn pin_directories(path: &Path) -> Result<Vec<File>, String> {
             FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_LIST_DIRECTORY,
             FILE_READ_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE,
         };
+        let mut handles = Vec::new();
         for ancestor in path.ancestors().collect::<Vec<_>>().into_iter().rev() {
             // Attribute-only handles do not enforce Windows delete-sharing checks.
             let handle = OpenOptions::new()
@@ -442,10 +442,17 @@ fn pin_directories(path: &Path) -> Result<Vec<File>, String> {
             }
             handles.push(handle);
         }
+        Ok(handles)
     }
     #[cfg(target_os = "linux")]
-    handles.push(linux_fs::directory(path)?);
-    Ok(handles)
+    {
+        Ok(vec![linux_fs::directory(path)?])
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
+    {
+        let _ = path;
+        Ok(Vec::new())
+    }
 }
 
 fn source_root(value: &str) -> Result<PathBuf, String> {
@@ -1524,9 +1531,9 @@ pub(crate) mod linux_fs {
             return Err(error());
         }
         let stats = unsafe { stats.assume_init() };
-        (stats.f_bavail as u64)
-            .checked_mul(stats.f_frsize as u64)
-            .ok_or("Filesystem capacity overflow.".into())
+        (u128::from(stats.f_bavail) * u128::from(stats.f_frsize))
+            .try_into()
+            .map_err(|_| "Filesystem capacity overflow.".into())
     }
     pub(crate) fn rename(from: &Path, to: &Path, replace: bool) -> Result<(), String> {
         let (source, from) = parent(from)?;

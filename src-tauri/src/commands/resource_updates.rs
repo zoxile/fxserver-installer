@@ -3,12 +3,12 @@ use std::{
     fs::{self, File},
     io::{Read, Write},
     path::{Path, PathBuf},
-    sync::{
-        atomic::{AtomicU64, Ordering},
-        Mutex, OnceLock,
-    },
+    sync::{Mutex, OnceLock},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
+
+#[cfg(any(not(target_os = "linux"), test))]
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -23,6 +23,7 @@ const MAX_SNAPSHOTS: usize = 20;
 const MAX_SNAPSHOT_BYTES: u64 = 10 * 1024 * 1024 * 1024;
 static OPERATION: Mutex<()> = Mutex::new(());
 static PREVIEWS: OnceLock<Mutex<HashMap<String, Prepared>>> = OnceLock::new();
+#[cfg(any(not(target_os = "linux"), test))]
 static NEXT_ID: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -1183,7 +1184,7 @@ fn checked_directory_path(path: &Path) -> Result<PathBuf, String> {
     #[cfg(target_os = "linux")]
     {
         super::workspace_clone::linux_fs::directory(path)?;
-        return Ok(path.to_path_buf());
+        Ok(path.to_path_buf())
     }
     #[cfg(not(target_os = "linux"))]
     path.canonicalize().map_err(io_error)
@@ -1230,6 +1231,7 @@ fn now() -> u64 {
         .unwrap_or_default()
         .as_secs()
 }
+#[cfg(any(not(target_os = "linux"), test))]
 fn unique_id() -> String {
     format!(
         "{:x}-{:x}-{:x}",

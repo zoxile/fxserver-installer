@@ -1,11 +1,14 @@
 use std::{
     collections::BTreeMap,
-    fs::{self, File, OpenOptions},
+    fs,
     io::{Read, Write},
     path::{Path, PathBuf},
     sync::Mutex,
     time::{Duration, Instant},
 };
+
+#[cfg(not(target_os = "linux"))]
+use std::fs::{File, OpenOptions};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -584,7 +587,7 @@ fn remove_verified_files(path: &Path, expected: &BTreeMap<String, String>) -> Re
         for (name, hash) in expected {
             linux_fs::remove_file(&path.join(name), Some(hash))?;
         }
-        return linux_fs::remove_empty_directory(path);
+        linux_fs::remove_empty_directory(path)
     }
     #[cfg(not(target_os = "linux"))]
     fs::remove_dir(path).map_err(io_error)
