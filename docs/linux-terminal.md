@@ -91,7 +91,7 @@ For a local desktop build without packaging:
 npm run tauri -- build --no-bundle --config src-tauri/tauri.linux.conf.json
 ```
 
-The Linux configuration enables the `desktop` Cargo feature and replaces the Windows NSIS bundle targets with `deb`, `rpm`, and `appimage`. Building a package is a separate explicit operation; nothing in the Linux check workflow publishes a release. Desktop execution requires a working graphical session. For Fedora/RHEL-family, Arch, or other distributions, use the distribution-specific prerequisites in the official Tauri guide and the same Cargo/npm commands. Ubuntu CI does not establish runtime or packaging support on those distributions.
+Desktop packaging enables both `desktop` and `terminal` Cargo features so the bundle contains the application and `fxserver-manager`. The Linux configuration replaces the Windows NSIS bundle targets with `deb`, `rpm`, and `appimage`. The bundled terminal can run without a graphical session but shares the desktop build's library requirements; use the separate headless build above for servers without GTK/WebKit. Building a package is a separate explicit operation; nothing in the Linux check workflow publishes a release. Desktop execution requires a working graphical session. For Fedora/RHEL-family, Arch, or other distributions, use the distribution-specific prerequisites in the official Tauri guide and the same Cargo/npm commands. Ubuntu CI does not establish runtime or packaging support on those distributions.
 
 Closing the Linux desktop window quits the application by default; it does not rely on a tray icon being available in GNOME or another desktop environment. Windows close/tray behavior is unchanged.
 

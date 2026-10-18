@@ -4,6 +4,14 @@ import { test } from "node:test";
 import vm from "node:vm";
 import ts from "typescript";
 
+test("desktop bundles enable both executable targets", () => {
+  for (const file of ["tauri.conf.json", "tauri.linux.conf.json"]) {
+    const config = JSON.parse(readFileSync(new URL(`../../src-tauri/${file}`, import.meta.url), "utf8"));
+    assert.ok(config.build.features.includes("desktop"), file);
+    assert.ok(config.build.features.includes("terminal"), file);
+  }
+});
+
 function load(relativePath, dependencies = {}, globals = {}) {
   const source = readFileSync(new URL(relativePath, import.meta.url), "utf8");
   const code = ts.transpile(source, { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS });

@@ -1,6 +1,7 @@
 """Validate the packages produced by this checkout, without installing them."""
 
 import configparser
+import os
 from pathlib import Path
 import shlex
 import subprocess
@@ -44,4 +45,10 @@ for kind, package in (("deb", deb), ("rpm", rpm), ("appimage", appimage)):
         assert binaries, f"No application binary in {kind} package"
         assert all(path.stat().st_mode & 0o111 for path in binaries), f"Application is not executable in {kind}"
         assert list(destination.rglob("*.png")), f"No icon in {kind} package"
-print("DEB, RPM, and AppImage package metadata and executable contents passed.")
+        terminals = [path for path in destination.rglob("fxserver-manager") if path.is_file() and "bin" in path.parts]
+        assert len(terminals) == 1, f"Expected one terminal executable in {kind}, found {terminals}"
+        assert terminals[0].stat().st_mode & 0o111, f"Terminal is not executable in {kind}"
+        environment = {key: value for key, value in os.environ.items() if key not in ("DISPLAY", "WAYLAND_DISPLAY", "DBUS_SESSION_BUS_ADDRESS")}
+        result = subprocess.run([str(terminals[0]), "--help"], env=environment, capture_output=True, text=True, check=True, timeout=20)
+        assert "database" in result.stdout and "--help" in result.stdout, f"Missing terminal commands in {kind}"
+print("DEB, RPM, and AppImage metadata, desktop contents, and terminal startup passed.")

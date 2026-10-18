@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "build": {
-    "features": ["desktop"]
+    "features": ["desktop", "terminal"]
   },
   "bundle": {
     "targets": ["deb", "rpm", "appimage"]
