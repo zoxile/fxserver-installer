@@ -80,6 +80,30 @@ pub fn list_users(credentials: MariaDBCredentials) -> Result<Vec<MariaDBUser>, S
         .collect())
 }
 
+/// Strict creation for callers that must never reset an existing account.
+#[cfg(feature = "terminal")]
+pub fn create_user(
+    credentials: MariaDBCredentials,
+    username: String,
+    host: String,
+    password: String,
+    native_password: bool,
+) -> Result<(), String> {
+    validate_user_change(&username, &host, Some(&password), None, &[])?;
+    let user = account(&username, &host);
+    let literal = escape_string(&password);
+    let authentication = if native_password {
+        format!("IDENTIFIED VIA mysql_native_password USING PASSWORD({literal})")
+    } else {
+        format!("IDENTIFIED BY {literal}")
+    };
+    run_password_query(
+        credentials,
+        format!("CREATE USER {user} {authentication};"),
+        &password,
+    )
+}
+
 pub fn create_or_update_user(
     credentials: MariaDBCredentials,
     config: MariaDBUserConfig,

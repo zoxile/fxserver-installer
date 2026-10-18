@@ -1,5 +1,6 @@
 use std::{
     io::Read,
+    path::PathBuf,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
@@ -8,7 +9,8 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter};
+#[cfg(feature = "desktop")]
+use tauri::{AppHandle, Emitter, Manager};
 
 #[path = "live_bridge/install.rs"]
 mod install;
@@ -170,6 +172,7 @@ impl BridgeState {
 }
 
 impl LiveBridge {
+    #[cfg(feature = "desktop")]
     pub fn start(&self, app: AppHandle) {
         let manager = self.clone();
         tauri::async_runtime::spawn(async move {
@@ -191,6 +194,7 @@ impl LiveBridge {
         self.stopped.store(true, Ordering::Release);
     }
 
+    #[cfg(feature = "desktop")]
     fn poll(&self, app: &AppHandle, expected_revision: Option<u64>) -> Result<(), String> {
         let Ok(_transport) = self.transport.try_lock() else {
             return Ok(());
@@ -238,23 +242,35 @@ impl LiveBridge {
     }
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn get_live_bridge_installation(
     app: AppHandle,
     target: BridgeTarget,
 ) -> Result<install::Installation, String> {
-    super::run_blocking(move || install::inspect(&app, &target)).await
+    inspect_at(
+        app.path().app_local_data_dir().map_err(|e| e.to_string())?,
+        target,
+    )
+    .await
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn preview_live_bridge_change(
     app: AppHandle,
     target: BridgeTarget,
     remove: bool,
 ) -> Result<install::ChangePreview, String> {
-    super::run_blocking(move || install::preview(&app, target, remove)).await
+    preview_at(
+        app.path().app_local_data_dir().map_err(|e| e.to_string())?,
+        target,
+        remove,
+    )
+    .await
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn apply_live_bridge_change(
     app: AppHandle,
@@ -264,11 +280,15 @@ pub async fn apply_live_bridge_change(
 ) -> Result<install::Installation, String> {
     let manager = manager.inner().clone();
     let bridge = bridge.inner().clone();
+    let data_root = app.path().app_local_data_dir().map_err(|e| e.to_string())?;
     super::run_blocking(move || {
         manager.with_stopped_server(|| {
             install::with_operation(|| {
                 bridge.disconnect()?;
-                let result = install::apply(&app, &preview_id)?;
+                let result = install::apply(&data_root, &preview_id)?;
+                if let Some(warning) = &result.warning {
+                    super::logs::append_background_log(&app, "warn", "fxserver.bridge", warning);
+                }
                 super::logs::append_background_log(
                     &app,
                     "success",
@@ -286,6 +306,7 @@ pub async fn apply_live_bridge_change(
     .await
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn configure_live_bridge(
     app: AppHandle,
@@ -294,6 +315,7 @@ pub async fn configure_live_bridge(
     bridge: tauri::State<'_, LiveBridge>,
 ) -> Result<BridgeStatus, String> {
     let bridge = bridge.inner().clone();
+    let data_root = app.path().app_local_data_dir().map_err(|e| e.to_string())?;
     if bridge.stopped.load(Ordering::Acquire) {
         return Err("Live bridge is shutting down.".into());
     }
@@ -310,7 +332,7 @@ pub async fn configure_live_bridge(
     };
     super::run_blocking(move || {
         let result = install::with_operation(|| {
-            let token = install::read_token(&app, &target);
+            let token = install::read_token(&data_root, &target);
             let mut state = bridge
                 .state
                 .lock()
@@ -337,6 +359,7 @@ pub async fn configure_live_bridge(
     .await
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn get_live_bridge_status(
     bridge: tauri::State<'_, LiveBridge>,
@@ -349,6 +372,7 @@ pub async fn get_live_bridge_status(
         .clone())
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn send_live_bridge_action(
     app: AppHandle,
@@ -382,13 +406,14 @@ pub async fn send_live_bridge_action(
             .lock()
             .map_err(|_| "Live bridge is unavailable.")?;
         let (port, token) = state.action_connection(revision, &workspace_id)?;
-        let instance_id = &state.status.snapshot.as_ref().ok_or("Refresh bridge status first.")?.instance_id;
-        let body = serde_json::json!({ "action": action, "resource": resource, "instanceId": instance_id }).to_string();
-        let response = request(port, &token, Some(body))?;
+        let instance_id = &state
+            .status
+            .snapshot
+            .as_ref()
+            .ok_or("Refresh bridge status first.")?
+            .instance_id;
+        dispatch_action(port, &token, instance_id, &action, &resource)?;
         drop(state);
-        if response.get("accepted").and_then(|v| v.as_bool()) != Some(true) {
-            return Err("The bridge did not acknowledge the action.".into());
-        }
         super::logs::append_background_log(
             &app,
             "info",
@@ -398,6 +423,103 @@ pub async fn send_live_bridge_action(
         Ok(())
     })
     .await
+}
+
+pub(crate) async fn inspect_at(
+    data_root: PathBuf,
+    target: BridgeTarget,
+) -> Result<install::Installation, String> {
+    super::run_blocking(move || install::inspect(&data_root, &target)).await
+}
+
+pub(crate) async fn preview_at(
+    data_root: PathBuf,
+    target: BridgeTarget,
+    remove: bool,
+) -> Result<install::ChangePreview, String> {
+    super::run_blocking(move || {
+        install::with_operation(|| install::preview(&data_root, target, remove))
+    })
+    .await
+}
+
+#[cfg(feature = "terminal")]
+pub(crate) async fn apply_at(
+    data_root: PathBuf,
+    preview_id: String,
+    target: BridgeTarget,
+    manager: super::fxserver::FxserverManager,
+    lease: Option<crate::platform::ServerLease>,
+) -> Result<install::Installation, String> {
+    super::run_blocking(move || {
+        let _lease = lease;
+        manager.with_stopped_server(|| {
+            install::with_operation(|| {
+                install::apply_for_target(&data_root, &preview_id, Some(&target))
+            })
+        })
+    })
+    .await
+}
+
+#[cfg(feature = "terminal")]
+pub(crate) async fn snapshot_at(
+    data_root: PathBuf,
+    target: BridgeTarget,
+) -> Result<BridgeSnapshot, String> {
+    super::run_blocking(move || {
+        install::with_operation(|| {
+            let token = install::read_token(&data_root, &target)?;
+            fetch_snapshot(target.port, &token)
+        })
+    })
+    .await
+}
+
+#[cfg(feature = "terminal")]
+pub(crate) async fn action_at(
+    data_root: PathBuf,
+    target: BridgeTarget,
+    instance_id: String,
+    action: String,
+    resource: String,
+) -> Result<(), String> {
+    validate_action(&action, &resource)?;
+    if instance_id.is_empty() || instance_id.len() > 128 {
+        return Err("Enter the instance ID from a recent bridge snapshot.".into());
+    }
+    super::run_blocking(move || {
+        install::with_operation(|| {
+            let token = install::read_token(&data_root, &target)?;
+            let snapshot = fetch_snapshot(target.port, &token)?;
+            if snapshot.instance_id != instance_id {
+                return Err(
+                    "Bridge instance changed. Review a new snapshot before sending an action."
+                        .into(),
+                );
+            }
+            dispatch_action(target.port, &token, &instance_id, &action, &resource)
+        })
+    })
+    .await
+}
+
+fn dispatch_action(
+    port: u16,
+    token: &str,
+    instance_id: &str,
+    action: &str,
+    resource: &str,
+) -> Result<(), String> {
+    validate_action(action, resource)?;
+    let body =
+        serde_json::json!({ "action": action, "resource": resource, "instanceId": instance_id })
+            .to_string();
+    let response = request(port, token, Some(body))?;
+    if response.get("accepted").and_then(|value| value.as_bool()) != Some(true) {
+        return Err("The bridge did not acknowledge the action.".into());
+    }
+    Ok(())
 }
 
 fn validate_action(action: &str, resource: &str) -> Result<(), String> {

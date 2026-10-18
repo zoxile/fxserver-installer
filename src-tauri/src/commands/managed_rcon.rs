@@ -1,5 +1,6 @@
 use std::time::{Duration, Instant};
 
+#[cfg(feature = "desktop")]
 use tauri::{AppHandle, Manager};
 
 use super::{
@@ -12,16 +13,30 @@ use crate::models::fxserver::{
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(6);
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn verify_managed_rcon_endpoint(
     expected_pid: u32,
     rcon: FxserverRconConfig,
     app: AppHandle,
 ) -> Result<(), String> {
+    verify_for_manager(
+        expected_pid,
+        rcon,
+        app.state::<FxserverManager>().inner().clone(),
+    )
+    .await
+}
+
+pub(crate) async fn verify_for_manager(
+    expected_pid: u32,
+    rcon: FxserverRconConfig,
+    manager: FxserverManager,
+) -> Result<(), String> {
     validate_local_rcon(&rcon)?;
     let nonce = format!("fxi-rcon-probe-{}", secure_token()?);
     let mut io = ManagedEndpoint {
-        app,
+        manager,
         rcon,
         started: Instant::now(),
     };
@@ -52,20 +67,23 @@ trait EndpointIo {
 }
 
 struct ManagedEndpoint {
-    app: AppHandle,
+    manager: FxserverManager,
     rcon: FxserverRconConfig,
     started: Instant,
 }
 impl EndpointIo for ManagedEndpoint {
     async fn status(&mut self) -> Result<FxserverStatus, String> {
-        fxserver::get_fxserver_status(self.app.state::<FxserverManager>()).await
+        let manager = self.manager.clone();
+        super::run_blocking(move || manager.status()).await
     }
     async fn terminal(&mut self, after: Option<u64>) -> Result<Vec<FxserverTerminalEntry>, String> {
-        Ok(
-            fxserver::get_fxserver_terminal(Some(5000), after, self.app.state::<FxserverManager>())
-                .await?
-                .entries,
-        )
+        let manager = self.manager.clone();
+        super::run_blocking(move || {
+            manager
+                .terminal(Some(5000), after)
+                .map(|result| result.entries)
+        })
+        .await
     }
     async fn echo(&mut self, command: String) -> Result<(), String> {
         // RCON response text is not evidence of managed-process ownership.

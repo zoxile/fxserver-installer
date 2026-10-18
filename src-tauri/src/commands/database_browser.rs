@@ -7,6 +7,7 @@ use std::{
     time::Duration,
 };
 
+#[cfg(feature = "desktop")]
 use super::backup_manager::BackupManager;
 use crate::{
     models::mariadb::MariaDBCredentials,
@@ -15,6 +16,7 @@ use crate::{
     },
 };
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
+#[cfg(feature = "desktop")]
 use tauri::State;
 #[cfg(all(test, windows))]
 use {crate::process::CommandNoWindowExt, std::process::Command};
@@ -82,23 +84,23 @@ pub enum FilterOperator {
 
 #[derive(Clone, Deserialize)]
 pub struct BrowserFilter {
-    column: String,
-    operator: FilterOperator,
-    value: Option<String>,
+    pub(crate) column: String,
+    pub(crate) operator: FilterOperator,
+    pub(crate) value: Option<String>,
 }
 
 #[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BrowserRequest {
-    database: String,
-    table: String,
+    pub(crate) database: String,
+    pub(crate) table: String,
     #[serde(default)]
-    filters: Vec<BrowserFilter>,
-    sort_column: Option<String>,
+    pub(crate) filters: Vec<BrowserFilter>,
+    pub(crate) sort_column: Option<String>,
     #[serde(default)]
-    descending: bool,
-    offset: usize,
-    page_size: usize,
+    pub(crate) descending: bool,
+    pub(crate) offset: usize,
+    pub(crate) page_size: usize,
 }
 
 #[derive(Serialize)]
@@ -640,14 +642,14 @@ fn mutation_sql(
     Ok((sql, locking))
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub async fn preview_database_browser_change(
     credentials: MariaDBCredentials,
     change: BrowserChange,
 ) -> Result<ChangePreview, String> {
     super::run_blocking(move || {
         use super::backup_manager::storage::{now_ms, secure_token, validate_id};
-        let _guard = super::mariadb::database_access()?;
+        let _guard = crate::services::mariadb::access::database_access()?;
         validate_id(&change.workspace_id)?;
         edit_visibility(&credentials)?;
         let schema_hash = read_schema_hash(&credentials, &change.database, &change.table)?;
@@ -693,7 +695,7 @@ pub async fn preview_database_browser_change(
             },
         );
         let token = preview.token.clone();
-        tauri::async_runtime::spawn(async move {
+        tokio::spawn(async move {
             tokio::time::sleep(Duration::from_secs(120)).await;
             if let Ok(mut pending) = changes().lock() {
                 pending.remove(&token);
@@ -704,6 +706,7 @@ pub async fn preview_database_browser_change(
     .await
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn apply_database_browser_change(
     manager: State<'_, BackupManager>,
@@ -720,6 +723,7 @@ pub async fn apply_database_browser_change(
     .await
 }
 
+#[cfg(feature = "desktop")]
 pub(crate) async fn apply_database_browser_change_with_manager(
     manager: BackupManager,
     workspace_id: String,
@@ -727,7 +731,7 @@ pub(crate) async fn apply_database_browser_change_with_manager(
     confirmation: String,
 ) -> Result<u64, String> {
     super::mariadb::run_mutation(manager, move || {
-        let _guard = super::mariadb::maintenance_access()?;
+        let _guard = crate::services::mariadb::access::maintenance_access()?;
         let permit = changes().lock().map_err(|_| "Change preview lock unavailable.")?.remove(&token).ok_or("Change preview expired or was already used.")?;
         validate_change_permit(&permit, &workspace_id, &confirmation, super::backup_manager::storage::now_ms())?;
         let metadata = metadata(&permit.credentials, &permit.change.database, &permit.change.table)?;
@@ -834,26 +838,26 @@ fn select_sql(
     Ok(format!("SET SESSION max_statement_time=20; START TRANSACTION READ ONLY; SELECT JSON_ARRAY({projection}) FROM {}.{}{condition}{ordering} LIMIT {limit} OFFSET {}; ROLLBACK;", quote_identifier(&request.database)?, quote_identifier(&request.table)?, if export { 0 } else { request.offset }))
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub async fn get_database_browser_metadata(
     credentials: MariaDBCredentials,
     database: String,
     table: String,
 ) -> Result<BrowserMetadata, String> {
     super::run_blocking(move || {
-        let _guard = super::mariadb::database_access()?;
+        let _guard = crate::services::mariadb::access::database_access()?;
         metadata(&credentials, &database, &table)
     })
     .await
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub async fn get_database_browser_rows(
     credentials: MariaDBCredentials,
     request: BrowserRequest,
 ) -> Result<BrowserPage, String> {
     super::run_blocking(move || {
-        let _guard = super::mariadb::database_access()?;
+        let _guard = crate::services::mariadb::access::database_access()?;
         let columns = browser_columns(&credentials, &request.database, &request.table)?;
         let page_size = bounded_page_size(request.page_size, columns.len());
         let sql = select_sql(&request, &columns, page_size + 1, false)?;
@@ -893,14 +897,14 @@ fn csv_cell(value: Option<&str>) -> String {
     )
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub async fn export_database_browser_csv(
     credentials: MariaDBCredentials,
     request: BrowserRequest,
     output_path: String,
 ) -> Result<BrowserExport, String> {
     super::run_blocking(move || {
-        let _guard = super::mariadb::database_access()?;
+        let _guard = crate::services::mariadb::access::database_access()?;
         let path = Path::new(&output_path);
         super::backup_manager::storage::validate_local_path(path)?;
         if !path.is_absolute()
@@ -1161,9 +1165,8 @@ mod tests {
         runtime: &tokio::runtime::Runtime,
         credentials: &MariaDBCredentials,
     ) -> Result<(), String> {
-        use crate::commands::database_admin::{
-            apply_database_admin_action_with_manager, preview_database_admin_action, AdminRequest,
-        };
+        use crate::commands::database_admin::{preview_database_admin_action, AdminRequest};
+        #[cfg(feature = "desktop")]
         let manager = BackupManager::default();
         let database = "fxi_admin_fixture";
         let table = "admin_rows";
@@ -1185,13 +1188,24 @@ mod tests {
         let apply = |preview: &serde_json::Value| -> Result<serde_json::Value, String> {
             assert_eq!(preview["host"], "127.0.0.1");
             assert_eq!(preview["port"], credentials.port);
-            serde_json::to_value(runtime.block_on(apply_database_admin_action_with_manager(
-                manager.clone(),
-                "fixture".into(),
-                preview["token"].as_str().unwrap().into(),
-                preview["confirmation"].as_str().unwrap().into(),
-            ))?)
-            .map_err(|e| e.to_string())
+            #[cfg(feature = "desktop")]
+            let result = runtime.block_on(
+                crate::commands::database_admin::apply_database_admin_action_with_manager(
+                    manager.clone(),
+                    "fixture".into(),
+                    preview["token"].as_str().unwrap().into(),
+                    preview["confirmation"].as_str().unwrap().into(),
+                ),
+            )?;
+            #[cfg(not(feature = "desktop"))]
+            let result = runtime.block_on(
+                crate::commands::database_admin::apply_database_admin_action_headless(
+                    "fixture".into(),
+                    preview["token"].as_str().unwrap().into(),
+                    preview["confirmation"].as_str().unwrap().into(),
+                ),
+            )?;
+            serde_json::to_value(result).map_err(|e| e.to_string())
         };
         let created = preview(database, "createDatabase", None, serde_json::json!([]))?;
         assert!(created["sql"]

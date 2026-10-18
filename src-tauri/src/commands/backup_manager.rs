@@ -24,9 +24,8 @@ use crate::{
     },
 };
 
-#[path = "../services/mariadb/owned_restore.rs"]
-pub(crate) mod owned_restore;
 pub(crate) use crate::services::mariadb::backup_storage as storage;
+pub(crate) use crate::services::mariadb::owned_restore;
 use storage::{now_ms, unique_id, validate_database, validate_id};
 
 #[derive(Clone, Deserialize, Serialize)]

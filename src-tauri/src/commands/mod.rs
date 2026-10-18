@@ -8,34 +8,36 @@ pub mod backup_manager;
 pub(crate) mod backup_manager;
 pub mod config_history;
 pub mod config_validation;
-#[cfg(feature = "desktop")]
+#[cfg(any(feature = "desktop", feature = "terminal"))]
 pub mod database_admin;
-#[cfg(feature = "desktop")]
+#[cfg(any(feature = "desktop", feature = "terminal"))]
 pub mod database_browser;
-#[cfg(feature = "desktop")]
+#[cfg(any(feature = "desktop", feature = "terminal"))]
 pub mod database_credentials;
-#[cfg(feature = "desktop")]
+#[cfg(any(feature = "desktop", feature = "terminal"))]
 pub mod database_inspection;
 pub mod diagnostics;
 pub mod fxserver;
 #[cfg(feature = "desktop")]
 pub mod health;
-#[cfg(feature = "desktop")]
+#[cfg(any(feature = "desktop", feature = "terminal"))]
 pub mod jooat;
-#[cfg(feature = "desktop")]
+#[cfg(all(target_os = "linux", any(feature = "desktop", feature = "terminal")))]
+pub(crate) mod linux_fs;
+#[cfg(any(feature = "desktop", feature = "terminal"))]
 pub mod live_bridge;
-#[cfg(feature = "desktop")]
+#[cfg(any(feature = "desktop", feature = "terminal"))]
 pub mod logs;
-#[cfg(feature = "desktop")]
+#[cfg(any(feature = "desktop", feature = "terminal"))]
 pub mod managed_rcon;
 #[cfg(feature = "desktop")]
 pub mod mariadb;
-#[cfg(feature = "desktop")]
+#[cfg(any(feature = "desktop", feature = "terminal"))]
 pub mod profiler_capture;
-#[cfg(feature = "desktop")]
+#[cfg(any(feature = "desktop", feature = "terminal"))]
 pub mod resource_updates;
 pub(crate) mod server_exe;
-#[cfg(feature = "desktop")]
+#[cfg(any(feature = "desktop", feature = "terminal"))]
 pub mod sql_diagnostics;
 pub mod system;
 #[cfg(feature = "desktop")]

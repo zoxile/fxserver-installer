@@ -17,11 +17,12 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "desktop")]
 use tauri::{AppHandle, Manager};
 
 #[cfg(not(target_os = "linux"))]
 use super::backup_manager::storage;
-use super::fxserver::{self, FxserverManager};
+use super::fxserver::FxserverManager;
 use super::managed_rcon;
 use crate::models::fxserver::{FxserverRconConfig, FxserverStatus};
 
@@ -94,10 +95,7 @@ impl ProfilerCaptureManager {
             return Err("A guided profiler capture is already running.".into());
         }
         #[cfg(target_os = "linux")]
-        let id = format!(
-            "fxi-profiler-{}",
-            super::workspace_clone::linux_fs::token()?
-        );
+        let id = format!("fxi-profiler-{}", super::linux_fs::token()?);
         #[cfg(not(target_os = "linux"))]
         let id = capture_id();
         let cancel = Arc::new(AtomicBool::new(false));
@@ -155,24 +153,39 @@ impl Drop for CaptureLease {
     }
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn capture_fxserver_profile(
     request: ProfilerCaptureRequest,
     app: AppHandle,
     manager: tauri::State<'_, ProfilerCaptureManager>,
 ) -> Result<ProfilerCaptureResult, String> {
+    capture_for_manager(
+        request,
+        app.state::<FxserverManager>().inner().clone(),
+        manager.inner().clone(),
+    )
+    .await
+}
+
+pub(crate) async fn capture_for_manager(
+    request: ProfilerCaptureRequest,
+    server: FxserverManager,
+    state: ProfilerCaptureManager,
+) -> Result<ProfilerCaptureResult, String> {
     validate_request(&request)?;
-    let state = manager.inner().clone();
-    let status = fxserver::get_fxserver_status(app.state::<FxserverManager>()).await?;
+    let status_manager = server.clone();
+    let status = super::run_blocking(move || status_manager.status()).await?;
     state.retry_retained_cleanup(&status)?;
     let (id, cancel) = state.begin(request.frames)?;
     let lease = CaptureLease(state.clone());
+    let runtime = tokio::runtime::Handle::current();
     // Use the shared work permit so native workspace switching/shutdown sees this job.
     super::run_blocking(move || {
         let _lease = lease;
-        tauri::async_runtime::block_on(async move {
+        runtime.block_on(async move {
             let mut io = ManagedCaptureIo {
-                app,
+                manager: server,
                 rcon: request.rcon,
                 started: Instant::now(),
             };
@@ -182,34 +195,46 @@ pub async fn capture_fxserver_profile(
     .await
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub fn get_profiler_capture_status(
     manager: tauri::State<'_, ProfilerCaptureManager>,
 ) -> Result<Option<ProfilerCaptureStatus>, String> {
-    Ok(manager
-        .0
-        .lock()
-        .map_err(|_| "Profiler state is unavailable.")?
-        .as_ref()
-        .map(|active| active.status.clone()))
+    manager.status()
 }
 
+impl ProfilerCaptureManager {
+    pub(crate) fn status(&self) -> Result<Option<ProfilerCaptureStatus>, String> {
+        Ok(self
+            .0
+            .lock()
+            .map_err(|_| "Profiler state is unavailable.")?
+            .as_ref()
+            .map(|active| active.status.clone()))
+    }
+
+    pub(crate) fn cancel(&self, id: &str) -> Result<(), String> {
+        let mut active = self
+            .0
+            .lock()
+            .map_err(|_| "Profiler state is unavailable.")?;
+        let active = active
+            .as_mut()
+            .filter(|active| active.status.id == id)
+            .ok_or("That profiler capture is no longer active.")?;
+        active.cancel.store(true, Ordering::SeqCst);
+        active.status.cancel_requested = true;
+        Ok(())
+    }
+}
+
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub fn cancel_profiler_capture(
     id: String,
     manager: tauri::State<'_, ProfilerCaptureManager>,
 ) -> Result<(), String> {
-    let mut active = manager
-        .0
-        .lock()
-        .map_err(|_| "Profiler state is unavailable.")?;
-    let active = active
-        .as_mut()
-        .filter(|active| active.status.id == id)
-        .ok_or("That profiler capture is no longer active.")?;
-    active.cancel.store(true, Ordering::SeqCst);
-    active.status.cancel_requested = true;
-    Ok(())
+    manager.cancel(&id)
 }
 
 fn validate_request(request: &ProfilerCaptureRequest) -> Result<(), String> {
@@ -270,30 +295,27 @@ trait CaptureIo {
 }
 
 struct ManagedCaptureIo {
-    app: AppHandle,
+    manager: FxserverManager,
     rcon: FxserverRconConfig,
     started: Instant,
 }
 
 impl CaptureIo for ManagedCaptureIo {
     async fn verify_endpoint(&mut self, target: &ServerIdentity) -> Result<(), String> {
-        managed_rcon::verify_managed_rcon_endpoint(target.pid, self.rcon.clone(), self.app.clone())
-            .await
+        managed_rcon::verify_for_manager(target.pid, self.rcon.clone(), self.manager.clone()).await
     }
     async fn identity(&mut self) -> Result<ServerIdentity, String> {
-        ServerIdentity::from_status(
-            fxserver::get_fxserver_status(self.app.state::<FxserverManager>()).await?,
-        )
+        ServerIdentity::from_status(self.manager.status()?)
     }
 
     async fn command(&mut self, command: String) -> Result<String, String> {
-        let before =
-            fxserver::get_fxserver_terminal(Some(50), None, self.app.state::<FxserverManager>())
-                .await?
-                .entries
-                .last()
-                .map(|entry| entry.id)
-                .unwrap_or(0);
+        let before = self
+            .manager
+            .terminal(Some(50), None)?
+            .entries
+            .last()
+            .map(|entry| entry.id)
+            .unwrap_or(0);
         // Cfx RconOutOfBand prefixes synchronous output with rcon/; detached saves use cmd.
         // Only those managed stdout channels are evidence. Do not collect UDP replies.
         send_profiler_command(&self.rcon, &command)?;
@@ -301,12 +323,7 @@ impl CaptureIo for ManagedCaptureIo {
         let deadline = Instant::now() + Duration::from_secs(2);
         let mut cursor = before;
         loop {
-            let terminal = fxserver::get_fxserver_terminal(
-                Some(500),
-                Some(cursor),
-                self.app.state::<FxserverManager>(),
-            )
-            .await?;
+            let terminal = self.manager.terminal(Some(500), Some(cursor))?;
             for entry in terminal.entries {
                 cursor = cursor.max(entry.id);
                 append_profiler_response(&mut response, &entry.stream, &entry.plain_line)?;
@@ -605,7 +622,7 @@ impl CaptureFile {
         #[cfg(not(target_os = "linux"))]
         let directory_pins = storage::pin_directories(root)?;
         #[cfg(target_os = "linux")]
-        let directory_pins = vec![super::workspace_clone::linux_fs::directory(root)?];
+        let directory_pins = vec![super::linux_fs::directory(root)?];
         #[cfg(not(target_os = "linux"))]
         let root =
             fs::canonicalize(root).map_err(|_| "Managed capture directory is unavailable.")?;
@@ -627,7 +644,7 @@ impl CaptureFile {
             "Could not reserve a new capture file in the managed server working directory."
         })?;
         #[cfg(target_os = "linux")]
-        let created = super::workspace_clone::linux_fs::create(&path)?;
+        let created = super::linux_fs::create(&path)?;
         let identity = verify_capture_handle(&created, &path)?;
         // Cfx Create requests READ|WRITE but shares only READ. Keep a read-only reservation.
         let reserved = open_capture_file(&path, true)?;
@@ -639,7 +656,7 @@ impl CaptureFile {
         let close_watch = match LinuxCloseWatch::new(&reserved) {
             Ok(watch) => watch,
             Err(error) => {
-                let cleanup = super::workspace_clone::linux_fs::remove_file_identity(
+                let cleanup = super::linux_fs::remove_file_identity(
                     &path,
                     None,
                     Some((identity.0, identity.1)),
@@ -724,7 +741,7 @@ impl CaptureFile {
             .read_to_end(&mut bytes)
             .map_err(|_| "Capture could not be read.")?;
         #[cfg(target_os = "linux")]
-        super::workspace_clone::linux_fs::unchanged(&file, &metadata)?;
+        super::linux_fs::unchanged(&file, &metadata)?;
         if bytes.len() as u64 > MAX_CAPTURE_BYTES {
             return Err("Capture exceeds the 16 MiB limit. Choose fewer frames.".into());
         }
@@ -790,7 +807,7 @@ impl CaptureFile {
 
     #[cfg(target_os = "linux")]
     fn remove_verified(&self) -> Result<(), String> {
-        super::workspace_clone::linux_fs::remove_file_identity(
+        super::linux_fs::remove_file_identity(
             &self.path(),
             None,
             Some((self.identity.0, self.identity.1)),
@@ -945,7 +962,7 @@ fn open_capture_file(path: &Path, allow_writer: bool) -> Result<File, String> {
     #[cfg(not(windows))]
     let _ = allow_writer;
     #[cfg(target_os = "linux")]
-    let file = super::workspace_clone::linux_fs::read(path)?;
+    let file = super::linux_fs::read(path)?;
     #[cfg(not(target_os = "linux"))]
     let file = options
         .open(path)

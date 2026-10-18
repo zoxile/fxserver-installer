@@ -56,14 +56,14 @@ fn column_query(database: &str, table: Option<&str>) -> Result<String, String> {
     Ok(format!("SET SESSION max_statement_time=10; SELECT JSON_OBJECT('table',c.TABLE_NAME,'column',c.COLUMN_NAME,'columnType',LEFT(c.COLUMN_TYPE,1024),'charset',c.CHARACTER_SET_NAME,'collation',c.COLLATION_NAME,'engine',t.ENGINE) FROM information_schema.COLUMNS c JOIN information_schema.TABLES t ON t.TABLE_SCHEMA=c.TABLE_SCHEMA AND t.TABLE_NAME=c.TABLE_NAME WHERE c.TABLE_SCHEMA={} AND t.TABLE_TYPE='BASE TABLE'{table_filter} ORDER BY c.TABLE_NAME,c.ORDINAL_POSITION LIMIT 501;", sql_text(database)))
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub async fn inspect_database_sql(
     credentials: MariaDBCredentials,
     database: String,
     table: Option<String>,
 ) -> Result<SqlInspection, String> {
     super::run_blocking(move || {
-        let _access = super::mariadb::database_access()?;
+        let _access = crate::services::mariadb::access::database_access()?;
         let columns_sql = column_query(&database, table.as_deref())?;
         let mut credentials = credentials;
         credentials.database = None;

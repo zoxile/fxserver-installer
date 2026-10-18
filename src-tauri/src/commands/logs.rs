@@ -1,20 +1,25 @@
+#[cfg(any(feature = "desktop", all(test, unix)))]
+use std::io::Write;
+#[cfg(any(feature = "desktop", test))]
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::{
-    fs::{self, File, OpenOptions},
-    io::{Read, Seek, SeekFrom, Write},
+    fs::{self, OpenOptions},
+    io::{Read, Seek, SeekFrom},
     path::{Path, PathBuf},
-    sync::{
-        atomic::{AtomicU64, Ordering},
-        Mutex,
-    },
-    time::{SystemTime, UNIX_EPOCH},
+    time::UNIX_EPOCH,
 };
+#[cfg(feature = "desktop")]
+use std::{sync::Mutex, time::SystemTime};
 
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "desktop")]
 use tauri::{AppHandle, Emitter, Manager};
 
 const LOG_FOLDER: &str = "logs";
 const LOG_FILE: &str = "fxserver-installer.log";
+#[cfg(feature = "desktop")]
 static LOG_WRITE: Mutex<()> = Mutex::new(());
+#[cfg(any(feature = "desktop", test))]
 static BACKGROUND_LOG_ID: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Serialize)]
@@ -27,9 +32,9 @@ pub struct AppLogFile {
 #[serde(rename_all = "camelCase")]
 #[cfg_attr(not(windows), allow(dead_code))]
 pub struct ClientLogRequest {
-    directory: Option<String>,
-    file_name: Option<String>,
-    max_lines: Option<usize>,
+    pub directory: Option<String>,
+    pub file_name: Option<String>,
+    pub max_lines: Option<usize>,
 }
 
 #[derive(Serialize)]
@@ -53,12 +58,18 @@ pub struct ClientLogResult {
 }
 
 const CLIENT_LOG_MAX_BYTES: u64 = 4 * 1024 * 1024;
+#[cfg(windows)]
+const MAX_LOG_DIRECTORY_ENTRIES: usize = 4096;
+#[cfg(windows)]
+const MAX_LOG_FILES: usize = 256;
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn read_app_logs(app: AppHandle) -> Result<AppLogFile, String> {
     super::run_blocking(move || read_app_logs_blocking(app)).await
 }
 
+#[cfg(feature = "desktop")]
 fn read_app_logs_blocking(app: AppHandle) -> Result<AppLogFile, String> {
     let path = log_path(&app)?;
     if !path.exists() {
@@ -76,11 +87,13 @@ fn read_app_logs_blocking(app: AppHandle) -> Result<AppLogFile, String> {
     })
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn append_app_log(app: AppHandle, entry: String) -> Result<(), String> {
     super::run_blocking(move || append_app_log_blocking(app, entry)).await
 }
 
+#[cfg(feature = "desktop")]
 fn append_app_log_blocking(app: AppHandle, entry: String) -> Result<(), String> {
     let _guard = LOG_WRITE
         .lock()
@@ -95,6 +108,7 @@ fn append_app_log_blocking(app: AppHandle, entry: String) -> Result<(), String> 
         .map_err(|error| format!("Failed to write application log file: {error}"))
 }
 
+#[cfg(feature = "desktop")]
 pub(crate) fn append_background_log(app: &AppHandle, level: &str, scope: &str, message: &str) {
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -114,11 +128,13 @@ pub(crate) fn append_background_log(app: &AppHandle, level: &str, scope: &str, m
     let _ = app.emit("background-app-log", entry);
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn clear_app_logs(app: AppHandle) -> Result<(), String> {
     super::run_blocking(move || clear_app_logs_blocking(app)).await
 }
 
+#[cfg(feature = "desktop")]
 fn clear_app_logs_blocking(app: AppHandle) -> Result<(), String> {
     let _guard = LOG_WRITE
         .lock()
@@ -131,6 +147,7 @@ fn clear_app_logs_blocking(app: AppHandle) -> Result<(), String> {
         .map_err(|error| format!("Failed to clear application log file: {error}"))
 }
 
+#[cfg(any(feature = "desktop", all(test, unix)))]
 fn log_write_options() -> OpenOptions {
     let mut options = OpenOptions::new();
     options.create(true).write(true);
@@ -144,7 +161,7 @@ fn log_write_options() -> OpenOptions {
     options
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub async fn read_client_logs(request: ClientLogRequest) -> Result<ClientLogResult, String> {
     super::run_blocking(move || read_client_logs_blocking(request)).await
 }
@@ -156,19 +173,21 @@ fn read_client_logs_blocking(_request: ClientLogRequest) -> Result<ClientLogResu
 
 #[cfg(windows)]
 fn read_client_logs_blocking(request: ClientLogRequest) -> Result<ClientLogResult, String> {
-    let directory = request
-        .directory
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .map(Ok)
-        .unwrap_or_else(default_client_log_directory)?;
-    let max_lines = request.max_lines.unwrap_or(700).clamp(50, 5000);
+    let directory = client_log_directory(request.directory.as_deref())?;
+    let max_lines = request.max_lines.unwrap_or(700).clamp(1, 5000);
     let files = list_client_log_files(&directory)?;
     let selected = select_client_log_file(&files, request.file_name.as_deref());
 
     let Some(selected_file) = selected else {
+        if request
+            .file_name
+            .as_deref()
+            .is_some_and(|name| !name.trim().is_empty())
+        {
+            return Err(
+                "The selected client log is no longer available. List the log files again.".into(),
+            );
+        }
         return Ok(ClientLogResult {
             directory: directory.to_string_lossy().to_string(),
             files,
@@ -193,6 +212,7 @@ fn read_client_logs_blocking(request: ClientLogRequest) -> Result<ClientLogResul
     })
 }
 
+#[cfg(feature = "desktop")]
 fn log_path(app: &AppHandle) -> Result<PathBuf, String> {
     let directory = app
         .path()
@@ -216,6 +236,91 @@ fn log_path(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(path)
 }
 
+#[cfg(feature = "terminal")]
+pub(crate) fn core_app_log_path() -> Result<PathBuf, String> {
+    // Tauri app_data_dir uses roaming data on Windows, unlike local config history.
+    #[cfg(windows)]
+    let root = std::env::var_os("APPDATA")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .ok_or("The Windows roaming application data directory is unavailable.")?
+        .join("com.fxserver.installer");
+    #[cfg(not(windows))]
+    let root = crate::platform::data_dir()?;
+    Ok(root.join(LOG_FOLDER).join(LOG_FILE))
+}
+
+#[cfg(any(test, feature = "terminal"))]
+pub(crate) fn list_app_logs_at(path: &Path) -> Result<Vec<ClientLogFile>, String> {
+    super::config_history::ensure_unlinked_path(path)?;
+    match fs::metadata(path) {
+        Ok(metadata) if metadata.is_file() => Ok(vec![log_metadata(path, &metadata)]),
+        Ok(_) => Err("Application logs require a regular file.".into()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(_) => Err("The application log cannot be inspected.".into()),
+    }
+}
+
+#[cfg(any(test, feature = "terminal"))]
+pub(crate) fn read_app_logs_at(path: &Path, max_lines: usize) -> Result<AppLogFile, String> {
+    if !(1..=5000).contains(&max_lines) {
+        return Err("Log tails require between 1 and 5000 lines.".into());
+    }
+    let content = tail_file(path, max_lines)?;
+    Ok(AppLogFile {
+        path: path.to_string_lossy().into(),
+        entries: content.lines().map(str::to_string).collect(),
+    })
+}
+
+#[cfg(feature = "terminal")]
+pub(crate) async fn list_client_logs(
+    directory: Option<String>,
+) -> Result<Vec<ClientLogFile>, String> {
+    super::run_blocking(move || {
+        #[cfg(windows)]
+        { list_client_log_files(&client_log_directory(directory.as_deref())?) }
+        #[cfg(not(windows))]
+        {
+            let _ = directory;
+            Err("FiveM client logs are only supported on Windows. Server and application logs remain available on this platform.".into())
+        }
+    }).await
+}
+
+#[cfg(windows)]
+fn client_log_directory(directory: Option<&str>) -> Result<PathBuf, String> {
+    let directory = directory
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .map(Ok)
+        .unwrap_or_else(default_client_log_directory)?;
+    if !directory.is_absolute() {
+        return Err("Choose an absolute FiveM client log directory.".into());
+    }
+    super::config_history::ensure_unlinked_path(&directory)?;
+    Ok(directory)
+}
+
+#[cfg(any(windows, test, feature = "terminal"))]
+fn log_metadata(path: &Path, metadata: &fs::Metadata) -> ClientLogFile {
+    ClientLogFile {
+        name: path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into(),
+        path: path.to_string_lossy().into(),
+        size: metadata.len(),
+        modified: metadata
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+            .map(|duration| duration.as_secs()),
+    }
+}
+
 #[cfg(windows)]
 fn default_client_log_directory() -> Result<PathBuf, String> {
     std::env::var_os("LOCALAPPDATA")
@@ -228,6 +333,7 @@ fn default_client_log_directory() -> Result<PathBuf, String> {
 
 #[cfg(windows)]
 fn list_client_log_files(directory: &Path) -> Result<Vec<ClientLogFile>, String> {
+    super::config_history::ensure_unlinked_path(directory)?;
     if !directory.is_dir() {
         return Err(format!(
             "FiveM client log folder was not found: {}",
@@ -243,27 +349,27 @@ fn list_client_log_files(directory: &Path) -> Result<Vec<ClientLogFile>, String>
     })?;
     let mut files = Vec::new();
 
-    for entry in entries {
+    for (index, entry) in entries.enumerate() {
+        if index >= MAX_LOG_DIRECTORY_ENTRIES {
+            return Err("The client log directory contains more than 4096 entries.".into());
+        }
         let entry = entry.map_err(|error| format!("Failed to inspect client log file: {error}"))?;
         let path = entry.path();
+        if !is_log_like_file(&path) {
+            continue;
+        }
+        super::config_history::ensure_unlinked_path(&path)?;
         let metadata = entry
             .metadata()
             .map_err(|error| format!("Failed to inspect {}: {error}", path.to_string_lossy()))?;
 
-        if !metadata.is_file() || !is_log_like_file(&path) {
+        if !metadata.is_file() {
             continue;
         }
-
-        files.push(ClientLogFile {
-            name: entry.file_name().to_string_lossy().to_string(),
-            path: path.to_string_lossy().to_string(),
-            size: metadata.len(),
-            modified: metadata
-                .modified()
-                .ok()
-                .and_then(|time| time.duration_since(SystemTime::UNIX_EPOCH).ok())
-                .map(|duration| duration.as_secs()),
-        });
+        if files.len() >= MAX_LOG_FILES {
+            return Err("The client log directory contains more than 256 log files.".into());
+        }
+        files.push(log_metadata(&path, &metadata));
     }
 
     files.sort_by(|left, right| {
@@ -294,27 +400,43 @@ fn select_client_log_file(
         .map(str::trim)
         .filter(|value| !value.is_empty());
 
-    requested_file_name
-        .and_then(|file_name| files.iter().find(|file| file.name == file_name))
-        .or_else(|| files.first())
-        .map(|file| ClientLogFile {
-            name: file.name.clone(),
-            path: file.path.clone(),
-            size: file.size,
-            modified: file.modified,
-        })
+    match requested_file_name {
+        Some(name) => files.iter().find(|file| file.name == name),
+        None => files.first(),
+    }
+    .map(|file| ClientLogFile {
+        name: file.name.clone(),
+        path: file.path.clone(),
+        size: file.size,
+        modified: file.modified,
+    })
 }
 
 fn tail_file(path: &Path, max_lines: usize) -> Result<String, String> {
+    if !(1..=5000).contains(&max_lines) {
+        return Err("Log tails require between 1 and 5000 lines.".into());
+    }
+    super::config_history::ensure_unlinked_path(path)?;
     if !path.is_file() {
         return Err("Logs can only be read from regular files.".into());
     }
-    let mut file = File::open(path)
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let mut file = options
+        .open(path)
         .map_err(|error| format!("Failed to open {}: {error}", path.to_string_lossy()))?;
-    let file_size = file
+    let metadata = file
         .metadata()
-        .map_err(|error| format!("Failed to inspect {}: {error}", path.to_string_lossy()))?
-        .len();
+        .map_err(|error| format!("Failed to inspect {}: {error}", path.to_string_lossy()))?;
+    if !metadata.is_file() {
+        return Err("Logs can only be read from regular files.".into());
+    }
+    let file_size = metadata.len();
 
     if file_size == 0 {
         return Ok(String::new());
@@ -322,6 +444,7 @@ fn tail_file(path: &Path, max_lines: usize) -> Result<String, String> {
 
     let mut offset = file_size;
     let mut buffer = Vec::new();
+    let mut newlines = 0;
     let chunk_size = 64 * 1024_u64;
     let target_newlines = max_lines.saturating_add(1);
 
@@ -334,10 +457,11 @@ fn tail_file(path: &Path, max_lines: usize) -> Result<String, String> {
         let mut chunk = vec![0_u8; read_size as usize];
         file.read_exact(&mut chunk)
             .map_err(|error| format!("Failed to read {}: {error}", path.to_string_lossy()))?;
+        newlines += chunk.iter().filter(|byte| **byte == b'\n').count();
         chunk.extend(buffer);
         buffer = chunk;
 
-        if buffer.iter().filter(|byte| **byte == b'\n').count() >= target_newlines {
+        if newlines >= target_newlines {
             break;
         }
     }
@@ -348,9 +472,109 @@ fn tail_file(path: &Path, max_lines: usize) -> Result<String, String> {
     Ok(lines[start..].join("\n"))
 }
 
-#[cfg(all(test, not(windows)))]
+#[cfg(test)]
 mod tests {
     use super::*;
+
+    struct Fixture(PathBuf);
+
+    impl Fixture {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "fxi-log-tools-{}-{}",
+                std::process::id(),
+                BACKGROUND_LOG_ID.fetch_add(1, Ordering::Relaxed),
+            ));
+            fs::create_dir(&path).unwrap();
+            Self(path)
+        }
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn application_listing_does_not_read_contents_or_create_directories() {
+        let fixture = Fixture::new();
+        let missing = fixture.0.join("missing/app.log");
+        assert!(list_app_logs_at(&missing).unwrap().is_empty());
+        assert!(!missing.parent().unwrap().exists());
+        let path = fixture.0.join("app.log");
+        fs::write(&path, b"token=fixture-secret\n").unwrap();
+        let list = list_app_logs_at(&path).unwrap();
+        assert_eq!(list.len(), 1);
+        assert!(!serde_json::to_string(&list)
+            .unwrap()
+            .contains("fixture-secret"));
+    }
+
+    #[test]
+    fn tails_are_line_and_byte_bounded_and_reject_invalid_limits() {
+        let fixture = Fixture::new();
+        let path = fixture.0.join("app.log");
+        fs::write(&path, "one\ntwo\nthree\n").unwrap();
+        assert_eq!(tail_file(&path, 2).unwrap(), "two\nthree");
+        assert_eq!(read_app_logs_at(&path, 1).unwrap().entries, ["three"]);
+        assert!(tail_file(&path, 0).is_err());
+        assert!(tail_file(&path, 5001).is_err());
+        assert!(tail_file(&fixture.0, 1).is_err());
+        fs::write(&path, vec![b'x'; CLIENT_LOG_MAX_BYTES as usize + 100]).unwrap();
+        assert_eq!(
+            tail_file(&path, 1).unwrap().len(),
+            CLIENT_LOG_MAX_BYTES as usize
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn client_listing_is_metadata_only_and_explicit_selection_never_falls_back() {
+        let fixture = Fixture::new();
+        fs::write(fixture.0.join("selected.log"), "fixture-secret").unwrap();
+        fs::write(fixture.0.join("ignored.json"), "{}").unwrap();
+        let files = list_client_log_files(&fixture.0).unwrap();
+        assert_eq!(files.len(), 1);
+        assert!(!serde_json::to_string(&files)
+            .unwrap()
+            .contains("fixture-secret"));
+        assert!(select_client_log_file(&files, Some("missing.log")).is_none());
+        assert!(select_client_log_file(&files, Some("../selected.log")).is_none());
+        assert_eq!(
+            select_client_log_file(&files, None).unwrap().name,
+            "selected.log"
+        );
+        assert!(read_client_logs_blocking(ClientLogRequest {
+            directory: Some(fixture.0.to_string_lossy().into()),
+            file_name: Some("missing.log".into()),
+            max_lines: Some(1),
+        })
+        .is_err());
+        assert!(client_log_directory(Some("relative/logs")).is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn client_log_file_listing_is_bounded() {
+        let fixture = Fixture::new();
+        for index in 0..=MAX_LOG_FILES {
+            fs::write(fixture.0.join(format!("{index}.log")), "").unwrap();
+        }
+        assert!(list_client_log_files(&fixture.0).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn linked_logs_and_directories_are_rejected() {
+        let fixture = Fixture::new();
+        let path = fixture.0.join("app.log");
+        let link = fixture.0.join("linked.log");
+        fs::write(&path, "fixture").unwrap();
+        std::os::unix::fs::symlink(&path, &link).unwrap();
+        assert!(tail_file(&link, 1).is_err());
+        assert!(list_app_logs_at(&link).is_err());
+    }
 
     #[cfg(unix)]
     #[test]
@@ -381,6 +605,7 @@ mod tests {
         fs::remove_file(path).unwrap();
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn client_logs_reject_both_default_and_explicit_directories() {
         for directory in [None, Some("/tmp/FiveM/logs".into())] {

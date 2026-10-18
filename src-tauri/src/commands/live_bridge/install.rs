@@ -12,7 +12,6 @@ use std::fs::{File, OpenOptions};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tauri::{AppHandle, Manager};
 
 use super::{BridgeTarget, RESOURCE_NAME};
 use crate::commands::{
@@ -49,7 +48,7 @@ pub struct Installation {
     version: Option<String>,
     cfg_enabled: bool,
     key_available: bool,
-    warning: Option<String>,
+    pub(super) warning: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -70,6 +69,7 @@ struct Preview {
     config_revision: String,
     inventory: BTreeMap<String, String>,
     created: Instant,
+    data_root: PathBuf,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -173,7 +173,7 @@ fn root(target: &BridgeTarget) -> Result<PathBuf, String> {
         fxserver::resolve_profile_data_path(target.tx_data_path.clone(), target.profile.clone())?;
     no_links(&data)?;
     #[cfg(target_os = "linux")]
-    crate::commands::workspace_clone::linux_fs::directory(&data)?;
+    crate::commands::linux_fs::directory(&data)?;
     #[cfg(not(target_os = "linux"))]
     let data = data.canonicalize().map_err(io_error)?;
     no_links(&data.join("resources"))?;
@@ -184,7 +184,7 @@ fn root(target: &BridgeTarget) -> Result<PathBuf, String> {
     Ok(data)
 }
 
-pub(super) fn inspect(app: &AppHandle, target: &BridgeTarget) -> Result<Installation, String> {
+pub(super) fn inspect(data_root: &Path, target: &BridgeTarget) -> Result<Installation, String> {
     let root = root(target)?;
     let path = root.join("resources").join(RESOURCE_NAME);
     let cfg = config_history::read_bounded_config(&root.join("server.cfg"))?;
@@ -203,7 +203,7 @@ pub(super) fn inspect(app: &AppHandle, target: &BridgeTarget) -> Result<Installa
             Ok(marker) => {
                 result.managed = true;
                 result.version = Some(marker.version);
-                result.key_available = key_path(app, &marker.key_id)?.is_file();
+                result.key_available = key_path(data_root, &marker.key_id)?.is_file();
             }
             Err(error) => result.warning = Some(error),
         }
@@ -212,7 +212,7 @@ pub(super) fn inspect(app: &AppHandle, target: &BridgeTarget) -> Result<Installa
 }
 
 pub(super) fn preview(
-    app: &AppHandle,
+    data_root: &Path,
     target: BridgeTarget,
     remove: bool,
 ) -> Result<ChangePreview, String> {
@@ -227,7 +227,10 @@ pub(super) fn preview(
         owned_marker(&resource)?;
     }
     let inventory = inventory(&resource)?;
-    let _ = app.path().app_local_data_dir().map_err(io_error)?;
+    if !data_root.is_absolute() {
+        return Err("Bridge storage requires an absolute data root.".into());
+    }
+    no_links(data_root)?;
     let id = random_id()?;
     let mut previews = PREVIEWS
         .lock()
@@ -245,6 +248,7 @@ pub(super) fn preview(
             config_revision: digest(config.as_bytes()),
             inventory,
             created: Instant::now(),
+            data_root: data_root.to_path_buf(),
         },
     );
     Ok(ChangePreview {
@@ -262,14 +266,33 @@ pub(super) fn preview(
     })
 }
 
-pub(super) fn apply(app: &AppHandle, id: &str) -> Result<Installation, String> {
+pub(super) fn apply(data_root: &Path, id: &str) -> Result<Installation, String> {
+    apply_for_target(data_root, id, None)
+}
+
+pub(super) fn apply_for_target(
+    data_root: &Path,
+    id: &str,
+    target: Option<&BridgeTarget>,
+) -> Result<Installation, String> {
     let preview = PREVIEWS
         .lock()
         .map_err(|_| "Bridge previews are unavailable.")?
         .remove(id)
         .ok_or("Bridge preview expired. Review the changes again.")?;
+    if let Some(target) = target {
+        if root(target)? != preview.root
+            || target.workspace_id != preview.target.workspace_id
+            || target.port != preview.target.port
+        {
+            return Err(
+                "Bridge preview belongs to another profile or endpoint. Preview again.".into(),
+            );
+        }
+    }
     if preview.created.elapsed() >= Duration::from_secs(600)
         || root(&preview.target)? != preview.root
+        || preview.data_root != data_root
     {
         return Err("Server paths changed or preview expired. Review the changes again.".into());
     }
@@ -302,7 +325,7 @@ pub(super) fn apply(app: &AppHandle, id: &str) -> Result<Installation, String> {
     };
     let staged = if let Some(key_id) = &new_key {
         let token = random_id()?;
-        let key = key_path(app, key_id)?;
+        let key = key_path(data_root, key_id)?;
         create_directories(key.parent().ok_or("Bridge key folder is unavailable.")?)?;
         write_new(&key, &fxserver::encrypt_secret(token.as_bytes())?)?;
         match stage_resource(&stage, key_id, &token) {
@@ -326,6 +349,7 @@ pub(super) fn apply(app: &AppHandle, id: &str) -> Result<Installation, String> {
         promoted: false,
     };
     let mut config_attempted = false;
+    let mut warning = None;
     let replace_result = (|| {
         swap.promote()?;
         no_links(&config_path)?;
@@ -336,7 +360,7 @@ pub(super) fn apply(app: &AppHandle, id: &str) -> Result<Installation, String> {
         };
         config_attempted = true;
         config_history::save_config_with_revision(
-            &config_history::history_root(app)?,
+            &data_root.join("config-history"),
             &request,
             &preview.config_revision,
             &updated,
@@ -358,11 +382,13 @@ pub(super) fn apply(app: &AppHandle, id: &str) -> Result<Installation, String> {
                 )
             })?;
             if let Some(key_id) = new_key {
-                let _ = remove_key(&key_path(app, &key_id)?);
+                let _ = remove_key(&key_path(data_root, &key_id)?);
             }
             return Err(error);
         }
-        crate::commands::logs::append_background_log(app, "warn", "fxserver.bridge", "Bridge files changed, but final configuration history could not be recorded. Review server.cfg before continuing.");
+        let message = "Bridge files changed, but final configuration history could not be recorded. Review server.cfg before continuing.";
+        log::warn!("{message}");
+        warning = Some(message.to_string());
     }
     swap.finish().map_err(|error| {
         format!(
@@ -371,15 +397,19 @@ pub(super) fn apply(app: &AppHandle, id: &str) -> Result<Installation, String> {
         )
     })?;
     if let Some(marker) = previous {
-        let _ = remove_key(&key_path(app, &marker.key_id)?);
+        let _ = remove_key(&key_path(data_root, &marker.key_id)?);
     }
-    inspect(app, &preview.target)
+    let mut result = inspect(data_root, &preview.target)?;
+    if warning.is_some() {
+        result.warning = warning;
+    }
+    Ok(result)
 }
 
-pub(super) fn read_token(app: &AppHandle, target: &BridgeTarget) -> Result<String, String> {
+pub(super) fn read_token(data_root: &Path, target: &BridgeTarget) -> Result<String, String> {
     let resource = root(target)?.join("resources").join(RESOURCE_NAME);
     let marker = owned_marker(&resource)?;
-    let path = key_path(app, &marker.key_id)?;
+    let path = key_path(data_root, &marker.key_id)?;
     no_links(&path)?;
     let bytes = read_bounded(&path, 8192)?;
     let token = String::from_utf8(fxserver::decrypt_secret(&bytes)?)
@@ -432,7 +462,7 @@ fn stage_resource(
 ) -> Result<BTreeMap<String, String>, String> {
     no_links(path)?;
     #[cfg(target_os = "linux")]
-    crate::commands::workspace_clone::linux_fs::mkdir(path)?;
+    crate::commands::linux_fs::mkdir(path)?;
     #[cfg(not(target_os = "linux"))]
     fs::create_dir(path).map_err(io_error)?;
     let mut files = BTreeMap::new();
@@ -583,7 +613,7 @@ fn remove_verified_files(path: &Path, expected: &BTreeMap<String, String>) -> Re
     }
     #[cfg(target_os = "linux")]
     {
-        use crate::commands::workspace_clone::linux_fs;
+        use crate::commands::linux_fs;
         for (name, hash) in expected {
             linux_fs::remove_file(&path.join(name), Some(hash))?;
         }
@@ -600,21 +630,16 @@ fn rename_new(source: &Path, destination: &Path) -> Result<(), String> {
         return Err("Bridge destination already exists. Its files were preserved.".into());
     }
     #[cfg(target_os = "linux")]
-    return crate::commands::workspace_clone::linux_fs::rename(source, destination, false);
+    return crate::commands::linux_fs::rename(source, destination, false);
     #[cfg(not(target_os = "linux"))]
     fs::rename(source, destination).map_err(io_error)
 }
 
-fn key_path(app: &AppHandle, id: &str) -> Result<PathBuf, String> {
+fn key_path(data_root: &Path, id: &str) -> Result<PathBuf, String> {
     if !valid_id(id) {
         return Err("Invalid bridge pairing identifier.".into());
     }
-    let path = app
-        .path()
-        .app_local_data_dir()
-        .map_err(io_error)?
-        .join("live-bridge")
-        .join(format!("{id}.dpapi"));
+    let path = data_root.join("live-bridge").join(format!("{id}.dpapi"));
     no_links(&path)?;
     Ok(path)
 }
@@ -636,7 +661,7 @@ fn read_bounded(path: &Path, limit: usize) -> Result<Vec<u8>, String> {
     no_links(path)?;
     let mut bytes = Vec::new();
     #[cfg(target_os = "linux")]
-    let mut file = crate::commands::workspace_clone::linux_fs::read(path)?;
+    let mut file = crate::commands::linux_fs::read(path)?;
     #[cfg(not(target_os = "linux"))]
     let mut file = File::open(path).map_err(io_error)?;
     #[cfg(target_os = "linux")]
@@ -646,7 +671,7 @@ fn read_bounded(path: &Path, limit: usize) -> Result<Vec<u8>, String> {
         .read_to_end(&mut bytes)
         .map_err(io_error)?;
     #[cfg(target_os = "linux")]
-    crate::commands::workspace_clone::linux_fs::unchanged(&file, &metadata)?;
+    crate::commands::linux_fs::unchanged(&file, &metadata)?;
     if bytes.len() > limit {
         return Err("Bridge file exceeds its size limit.".into());
     }
@@ -662,7 +687,7 @@ fn write_new(path: &Path, bytes: &[u8]) -> Result<(), String> {
         .open(path)
         .map_err(io_error)?;
     #[cfg(target_os = "linux")]
-    let mut file = crate::commands::workspace_clone::linux_fs::create(path)?;
+    let mut file = crate::commands::linux_fs::create(path)?;
     let result = file
         .write_all(bytes)
         .and_then(|_| file.sync_all())
@@ -719,19 +744,19 @@ fn random_id() -> Result<String, String> {
 
 #[cfg(target_os = "linux")]
 fn random_id() -> Result<String, String> {
-    crate::commands::workspace_clone::linux_fs::token()
+    crate::commands::linux_fs::token()
 }
 
 fn create_directories(path: &Path) -> Result<(), String> {
     #[cfg(target_os = "linux")]
-    return crate::commands::workspace_clone::linux_fs::mkdir_all(path);
+    return crate::commands::linux_fs::mkdir_all(path);
     #[cfg(not(target_os = "linux"))]
     fs::create_dir_all(path).map_err(io_error)
 }
 
 fn remove_key(path: &Path) -> Result<(), String> {
     #[cfg(target_os = "linux")]
-    return crate::commands::workspace_clone::linux_fs::remove_file(path, None);
+    return crate::commands::linux_fs::remove_file(path, None);
     #[cfg(not(target_os = "linux"))]
     fs::remove_file(path).map_err(io_error)
 }
@@ -818,6 +843,40 @@ mod tests {
         }
         assert!(edit_config("ensure fxserver_installer_bridge\n", false).is_err());
         assert!(edit_config(&format!("{BEGIN}\ncustom\n{END}"), true).is_err());
+    }
+
+    #[test]
+    fn headless_bridge_preview_is_bound_to_storage_and_config_revision() {
+        let fixture = Fixture::new();
+        let root = fixture.0.join("server");
+        let tx_data = fixture.0.join("txData");
+        fs::create_dir_all(root.join("resources")).unwrap();
+        fs::create_dir_all(tx_data.join("default")).unwrap();
+        fs::write(root.join("server.cfg"), "sv_hostname Fixture\n").unwrap();
+        fs::write(
+            tx_data.join("default/config.json"),
+            serde_json::to_vec(&serde_json::json!({ "server": { "dataPath": root } })).unwrap(),
+        )
+        .unwrap();
+        let target = BridgeTarget {
+            workspace_id: "fixture".into(),
+            tx_data_path: tx_data.to_string_lossy().into(),
+            profile: "default".into(),
+            port: 30120,
+        };
+        let data_root = fixture.0.join("storage");
+        let first = preview(&data_root, target.clone(), false).unwrap();
+        assert!(apply(&fixture.0.join("other"), &first.id).is_err());
+        assert!(!root.join("resources").join(RESOURCE_NAME).exists());
+        let second = preview(&data_root, target, false).unwrap();
+        fs::write(root.join("server.cfg"), "sv_hostname Changed\n").unwrap();
+        assert!(apply(&data_root, &second.id).is_err());
+        assert_eq!(
+            fs::read_to_string(root.join("server.cfg")).unwrap(),
+            "sv_hostname Changed\n"
+        );
+        assert!(!root.join("resources").join(RESOURCE_NAME).exists());
+        assert!(!serde_json::to_string(&second).unwrap().contains("dpapi"));
     }
 
     #[test]

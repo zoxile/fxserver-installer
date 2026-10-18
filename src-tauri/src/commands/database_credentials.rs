@@ -1,11 +1,13 @@
 use std::{
-    fs,
     io::Read,
     path::{Path, PathBuf},
     sync::Mutex,
 };
 
 use serde::{Deserialize, Serialize};
+#[cfg(all(test, windows))]
+use std::fs;
+#[cfg(feature = "desktop")]
 use tauri::{AppHandle, Manager};
 
 use super::{
@@ -34,15 +36,24 @@ fn credential_path(root: &Path, workspace_id: &str) -> Result<PathBuf, String> {
     )))
 }
 
+#[cfg(feature = "desktop")]
 fn root(app: &AppHandle) -> Result<PathBuf, String> {
     let path = app
         .path()
         .app_local_data_dir()
         .map_err(|_| STORAGE_ERROR)?
         .join("database-logins");
-    ensure_unlinked_path(&path).map_err(|_| STORAGE_ERROR)?;
-    fs::create_dir_all(&path).map_err(|_| STORAGE_ERROR)?;
     Ok(path)
+}
+
+#[cfg(feature = "terminal")]
+pub(crate) fn terminal_login_root() -> Result<PathBuf, String> {
+    Ok(crate::platform::data_dir()?.join("database-logins"))
+}
+
+fn prepare_root(root: &Path) -> Result<(), String> {
+    ensure_unlinked_path(root).map_err(|_| STORAGE_ERROR)?;
+    crate::platform::private_directory(root).map_err(|_| STORAGE_ERROR.into())
 }
 
 fn validate_size(credentials: &MariaDBCredentials) -> Result<(), String> {
@@ -115,39 +126,67 @@ fn clear(root: &Path, workspace_id: &str) -> Result<(), String> {
     storage::remove_snapshot(&path, &hash).map_err(|_| STORAGE_ERROR.to_string())
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn save_database_login(
     app: AppHandle,
     workspace_id: String,
     credentials: MariaDBCredentials,
 ) -> Result<(), String> {
+    save_database_login_at(root(&app)?, workspace_id, credentials).await
+}
+
+pub(crate) async fn save_database_login_at(
+    root: PathBuf,
+    workspace_id: String,
+    credentials: MariaDBCredentials,
+) -> Result<(), String> {
     super::run_blocking(move || {
         let _access = CREDENTIAL_ACCESS.lock().map_err(|_| STORAGE_ERROR)?;
-        let _database = super::mariadb::database_access()?;
+        let _database = crate::services::mariadb::access::database_access()?;
         validate_size(&credentials)?;
         crate::services::mariadb::query::validate_connection(credentials.clone())?;
-        save(&root(&app)?, workspace_id, credentials)
+        prepare_root(&root)?;
+        save(&root, workspace_id, credentials)
     })
     .await
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn load_database_login(
     app: AppHandle,
     workspace_id: String,
 ) -> Result<Option<MariaDBCredentials>, String> {
+    load_database_login_at(root(&app)?, workspace_id).await
+}
+
+pub(crate) async fn load_database_login_at(
+    root: PathBuf,
+    workspace_id: String,
+) -> Result<Option<MariaDBCredentials>, String> {
     super::run_blocking(move || {
         let _access = CREDENTIAL_ACCESS.lock().map_err(|_| STORAGE_ERROR)?;
-        load(&root(&app)?, &workspace_id)
+        prepare_root(&root)?;
+        load(&root, &workspace_id)
     })
     .await
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn clear_database_login(app: AppHandle, workspace_id: String) -> Result<(), String> {
+    clear_database_login_at(root(&app)?, workspace_id).await
+}
+
+pub(crate) async fn clear_database_login_at(
+    root: PathBuf,
+    workspace_id: String,
+) -> Result<(), String> {
     super::run_blocking(move || {
         let _access = CREDENTIAL_ACCESS.lock().map_err(|_| STORAGE_ERROR)?;
-        clear(&root(&app)?, &workspace_id)
+        prepare_root(&root)?;
+        clear(&root, &workspace_id)
     })
     .await
 }

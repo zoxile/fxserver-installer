@@ -120,18 +120,21 @@ pub async fn list_config_history(
     app: AppHandle,
     request: ConfigFileRequest,
 ) -> Result<Vec<ConfigHistoryVersion>, String> {
-    super::run_blocking(move || {
-        let _lock = HISTORY_LOCK.lock().map_err(|_| HISTORY_ERROR)?;
-        let target = resolve_target(&request)?;
-        let journal = load_journal(&history_root(&app)?, &target)?;
-        Ok(journal
-            .snapshots
-            .into_iter()
-            .rev()
-            .map(|item| item.metadata)
-            .collect())
-    })
-    .await
+    super::run_blocking(move || list_history_in(&history_root(&app)?, &request)).await
+}
+
+pub(crate) fn list_history_in(
+    store: &Path,
+    request: &ConfigFileRequest,
+) -> Result<Vec<ConfigHistoryVersion>, String> {
+    let _lock = HISTORY_LOCK.lock().map_err(|_| HISTORY_ERROR)?;
+    let target = resolve_target(request)?;
+    Ok(load_journal(store, &target)?
+        .snapshots
+        .into_iter()
+        .rev()
+        .map(|item| item.metadata)
+        .collect())
 }
 
 #[cfg(feature = "desktop")]
@@ -141,15 +144,45 @@ pub async fn read_config_history_version(
     request: ConfigFileRequest,
     version_id: String,
 ) -> Result<ConfigHistoryContent, String> {
-    super::run_blocking(move || {
-        let _lock = HISTORY_LOCK.lock().map_err(|_| HISTORY_ERROR)?;
-        read_version(
-            &history_root(&app)?,
-            &resolve_target(&request)?,
-            &version_id,
-        )
-    })
-    .await
+    super::run_blocking(move || read_history_in(&history_root(&app)?, &request, &version_id)).await
+}
+
+pub(crate) fn read_history_in(
+    store: &Path,
+    request: &ConfigFileRequest,
+    version_id: &str,
+) -> Result<ConfigHistoryContent, String> {
+    let _lock = HISTORY_LOCK.lock().map_err(|_| HISTORY_ERROR)?;
+    read_version(store, &resolve_target(request)?, version_id)
+}
+
+#[cfg(any(test, feature = "terminal"))]
+pub(crate) fn content_revision(content: &str) -> String {
+    digest(content.as_bytes())
+}
+
+#[cfg(any(test, feature = "terminal"))]
+pub(crate) fn restore_history_with_revision(
+    store: &Path,
+    request: &ConfigFileRequest,
+    version_id: &str,
+    expected_revision: &str,
+) -> Result<ServerConfigFile, String> {
+    let _lock = HISTORY_LOCK.lock().map_err(|_| HISTORY_ERROR)?;
+    let target = resolve_target(request)?;
+    let current = read_bounded_config(&target.path)?;
+    if content_revision(&current) != expected_revision {
+        return Err(STALE_ERROR.into());
+    }
+    let version = read_version(store, &target, version_id)?;
+    save_locked(
+        store,
+        request,
+        &target,
+        &current,
+        &version.content,
+        ConfigChangeReason::Restore,
+    )
 }
 
 #[cfg(feature = "desktop")]
@@ -928,6 +961,84 @@ mod tests {
         .contains("CONFIG_CHANGED"));
         assert_eq!(fixture.content(), "external editor change");
         assert!(!fixture.store.exists());
+    }
+
+    #[test]
+    fn revision_restores_reject_stale_content_before_reading_history() {
+        let fixture = Fixture::new();
+        let revision = content_revision(&fixture.content());
+        fs::write(&fixture.request.path, "external change").unwrap();
+        assert!(restore_history_with_revision(
+            &fixture.store,
+            &fixture.request,
+            "unknown-version",
+            &revision,
+        )
+        .unwrap_err()
+        .contains("CONFIG_CHANGED"));
+        assert_eq!(fixture.content(), "external change");
+        assert!(!fixture.store.exists());
+    }
+
+    #[test]
+    fn empty_history_listing_is_read_only_and_missing_versions_are_rejected() {
+        let fixture = Fixture::new();
+        assert!(list_history_in(&fixture.store, &fixture.request)
+            .unwrap()
+            .is_empty());
+        assert!(read_history_in(&fixture.store, &fixture.request, "../missing").is_err());
+        assert!(restore_history_with_revision(
+            &fixture.store,
+            &fixture.request,
+            "missing",
+            &content_revision(&fixture.content()),
+        )
+        .is_err());
+        assert!(!fixture.store.exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn revision_restore_uses_encrypted_history_and_rejects_tampering() {
+        let fixture = Fixture::new();
+        let original = fixture.content();
+        save_config_atomic(
+            &fixture.store,
+            &fixture.request,
+            &original,
+            "ensure fixture",
+            ConfigChangeReason::Save,
+        )
+        .unwrap();
+        let versions = list_history_in(&fixture.store, &fixture.request).unwrap();
+        assert!(!serde_json::to_string(&versions)
+            .unwrap()
+            .contains("fixture-secret"));
+        let id = &versions.last().unwrap().id;
+        assert_eq!(
+            read_history_in(&fixture.store, &fixture.request, id)
+                .unwrap()
+                .content,
+            original
+        );
+        restore_history_with_revision(
+            &fixture.store,
+            &fixture.request,
+            id,
+            &content_revision("ensure fixture"),
+        )
+        .unwrap();
+        assert_eq!(fixture.content(), original);
+        let target = resolve_target(&fixture.request).unwrap();
+        fs::write(journal_path(&fixture.store, &target), b"tampered").unwrap();
+        assert!(restore_history_with_revision(
+            &fixture.store,
+            &fixture.request,
+            id,
+            &content_revision(&original),
+        )
+        .is_err());
+        assert_eq!(fixture.content(), original);
     }
 
     #[test]

@@ -12,6 +12,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+#[cfg(feature = "desktop")]
 use tauri::Manager;
 
 const MAX_ARCHIVE: u64 = 512 * 1024 * 1024;
@@ -23,31 +24,33 @@ const MAX_SNAPSHOTS: usize = 20;
 const MAX_SNAPSHOT_BYTES: u64 = 10 * 1024 * 1024 * 1024;
 static OPERATION: Mutex<()> = Mutex::new(());
 static PREVIEWS: OnceLock<Mutex<HashMap<String, Prepared>>> = OnceLock::new();
+#[cfg(any(feature = "terminal", test))]
+static ROLLBACK_PREVIEWS: Mutex<BTreeMap<String, PreparedRollback>> = Mutex::new(BTreeMap::new());
 #[cfg(any(not(target_os = "linux"), test))]
 static NEXT_ID: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ResourceTarget {
-    workspace_id: String,
-    tx_data_path: String,
-    profile: String,
-    resource_path: String,
+    pub workspace_id: String,
+    pub tx_data_path: String,
+    pub profile: String,
+    pub resource_path: String,
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PreviewRequest {
-    target: ResourceTarget,
-    branch: String,
+    pub target: ResourceTarget,
+    pub branch: String,
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ApplyRequest {
-    target: ResourceTarget,
-    preview_id: String,
-    protected_paths: Vec<String>,
+    pub target: ResourceTarget,
+    pub preview_id: String,
+    pub protected_paths: Vec<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -112,13 +115,142 @@ struct SnapshotRecord {
     files: Inventory,
 }
 
+#[cfg(any(feature = "terminal", test))]
+struct PreparedRollback {
+    target: ResourceTarget,
+    resource: PathBuf,
+    storage: PathBuf,
+    snapshot_id: String,
+    local: Inventory,
+    saved: Inventory,
+    created_at: u64,
+}
+
+#[cfg(any(feature = "terminal", test))]
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RollbackPreview {
+    id: String,
+    snapshot: ResourceSnapshot,
+    changes: Vec<FileChange>,
+}
+
+#[cfg(any(feature = "terminal", test))]
+pub(crate) async fn preview_rollback_at(
+    data_root: PathBuf,
+    target: ResourceTarget,
+    snapshot_id: String,
+) -> Result<RollbackPreview, String> {
+    super::run_blocking(move || {
+        let _operation = OPERATION
+            .try_lock()
+            .map_err(|_| "Another resource operation is in progress.")?;
+        let storage = storage_root(&data_root)?;
+        validate_id(&snapshot_id)?;
+        let resource = resolve_resource(&target)?;
+        let folder = snapshot_folder(&storage, &target, &resource).join(&snapshot_id);
+        let record = read_snapshot(&folder)?;
+        if record.resource_path != resource
+            || record.workspace_id != target.workspace_id
+            || inventory(&folder.join("files"))? != record.files
+        {
+            return Err("Snapshot identity or integrity check failed.".into());
+        }
+        let local = inventory(&resource)?;
+        let mut changes = file_changes(&local, &record.files);
+        for change in &mut changes {
+            change.preserve = false;
+            change.can_preserve = false;
+        }
+        let mut previews = ROLLBACK_PREVIEWS
+            .lock()
+            .map_err(|_| "Resource preview lock failed.")?;
+        previews.retain(|_, preview| now().saturating_sub(preview.created_at) < PREVIEW_LIFETIME);
+        if previews.len() >= 8 {
+            return Err("Too many rollback previews. Retry when a preview expires.".into());
+        }
+        let id = operation_id()?;
+        previews.insert(
+            id.clone(),
+            PreparedRollback {
+                target,
+                resource,
+                storage,
+                snapshot_id,
+                local,
+                saved: record.files,
+                created_at: now(),
+            },
+        );
+        Ok(RollbackPreview {
+            id,
+            snapshot: record.snapshot,
+            changes,
+        })
+    })
+    .await
+}
+
+#[cfg(any(feature = "terminal", test))]
+pub(crate) async fn apply_rollback_preview_at(
+    data_root: PathBuf,
+    target: ResourceTarget,
+    preview_id: String,
+    manager: super::fxserver::FxserverManager,
+    lease: Option<crate::platform::ServerLease>,
+) -> Result<ResourceSnapshot, String> {
+    super::run_blocking(move || {
+        let _lease = lease;
+        let _operation = OPERATION
+            .try_lock()
+            .map_err(|_| "Another resource operation is in progress.")?;
+        let storage = storage_root(&data_root)?;
+        let mut previews = ROLLBACK_PREVIEWS
+            .lock()
+            .map_err(|_| "Resource preview lock failed.")?;
+        let preview = previews
+            .get(&preview_id)
+            .ok_or("Rollback preview expired. Preview again.")?;
+        let result = manager.with_stopped_server(|| {
+            if preview.storage != storage
+                || resolve_resource(&target)? != preview.resource
+                || target.workspace_id != preview.target.workspace_id
+                || now().saturating_sub(preview.created_at) >= PREVIEW_LIFETIME
+            {
+                return Err("Rollback target changed or preview expired. Preview again.".into());
+            }
+            let folder =
+                snapshot_folder(&storage, &target, &preview.resource).join(&preview.snapshot_id);
+            if inventory(&preview.resource)? != preview.local
+                || read_snapshot(&folder)?.files != preview.saved
+            {
+                return Err("Resource or snapshot changed after preview. Preview again.".into());
+            }
+            rollback(&storage, &target, &preview.snapshot_id)
+        });
+        if result.is_ok() {
+            previews.remove(&preview_id);
+        }
+        result
+    })
+    .await
+}
+
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn preview_resource_update(
     app: tauri::AppHandle,
     request: PreviewRequest,
 ) -> Result<ResourcePreview, String> {
-    let storage = storage_root(&app)?;
+    preview_at(app.path().app_local_data_dir().map_err(io_error)?, request).await
+}
+
+pub(crate) async fn preview_at(
+    data_root: PathBuf,
+    request: PreviewRequest,
+) -> Result<ResourcePreview, String> {
     super::run_blocking(move || {
+        let storage = storage_root(&data_root)?;
         let _operation = OPERATION
             .try_lock()
             .map_err(|_| "Another resource operation is in progress.")?;
@@ -127,15 +259,33 @@ pub async fn preview_resource_update(
     .await
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn apply_resource_update(
     app: tauri::AppHandle,
     request: ApplyRequest,
     manager: tauri::State<'_, super::fxserver::FxserverManager>,
 ) -> Result<ResourceSnapshot, String> {
-    let storage = storage_root(&app)?;
-    let manager = manager.inner().clone();
+    apply_at(
+        app.path().app_local_data_dir().map_err(io_error)?,
+        manager.inner().clone(),
+        request,
+        false,
+        None,
+    )
+    .await
+}
+
+pub(crate) async fn apply_at(
+    data_root: PathBuf,
+    manager: super::fxserver::FxserverManager,
+    mut request: ApplyRequest,
+    preserve_defaults: bool,
+    lease: Option<crate::platform::ServerLease>,
+) -> Result<ResourceSnapshot, String> {
     super::run_blocking(move || {
+        let _lease = lease;
+        let storage = storage_root(&data_root)?;
         let _operation = OPERATION
             .try_lock()
             .map_err(|_| "Another resource operation is in progress.")?;
@@ -145,6 +295,17 @@ pub async fn apply_resource_update(
         let prepared = previews
             .get(&request.preview_id)
             .ok_or("Preview expired. Preview the update again.")?;
+        if prepared.directory.parent() != Some(storage.join("previews").as_path()) {
+            return Err("Preview belongs to another storage root. Preview again.".into());
+        }
+        if preserve_defaults {
+            request.protected_paths.extend(
+                file_changes(&prepared.local, &prepared.remote)
+                    .into_iter()
+                    .filter(|change| change.preserve)
+                    .map(|change| change.path),
+            );
+        }
         let result = manager.with_stopped_server(|| apply_prepared(&storage, prepared, &request));
         if result.is_ok() {
             if let Some(prepared) = previews.remove(&request.preview_id) {
@@ -156,13 +317,22 @@ pub async fn apply_resource_update(
     .await
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn discard_resource_preview(
     app: tauri::AppHandle,
     preview_id: String,
 ) -> Result<(), String> {
-    let storage = storage_root(&app)?;
+    discard_at(
+        app.path().app_local_data_dir().map_err(io_error)?,
+        preview_id,
+    )
+    .await
+}
+
+pub(crate) async fn discard_at(data_root: PathBuf, preview_id: String) -> Result<(), String> {
     super::run_blocking(move || {
+        let storage = storage_root(&data_root)?;
         if let Some(prepared) = previews()
             .lock()
             .map_err(|_| "Resource preview lock failed.")?
@@ -175,13 +345,21 @@ pub async fn discard_resource_preview(
     .await
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn list_resource_snapshots(
     app: tauri::AppHandle,
     target: ResourceTarget,
 ) -> Result<Vec<ResourceSnapshot>, String> {
-    let storage = storage_root(&app)?;
+    snapshots_at(app.path().app_local_data_dir().map_err(io_error)?, target).await
+}
+
+pub(crate) async fn snapshots_at(
+    data_root: PathBuf,
+    target: ResourceTarget,
+) -> Result<Vec<ResourceSnapshot>, String> {
     super::run_blocking(move || {
+        let storage = storage_root(&data_root)?;
         let resource = resolve_resource(&target)?;
         let folder = snapshot_folder(&storage, &target, &resource);
         if !folder.exists() {
@@ -206,6 +384,7 @@ pub async fn list_resource_snapshots(
     .await
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn rollback_resource_update(
     app: tauri::AppHandle,
@@ -213,9 +392,23 @@ pub async fn rollback_resource_update(
     snapshot_id: String,
     manager: tauri::State<'_, super::fxserver::FxserverManager>,
 ) -> Result<ResourceSnapshot, String> {
-    let storage = storage_root(&app)?;
-    let manager = manager.inner().clone();
+    rollback_at(
+        app.path().app_local_data_dir().map_err(io_error)?,
+        target,
+        snapshot_id,
+        manager.inner().clone(),
+    )
+    .await
+}
+
+pub(crate) async fn rollback_at(
+    data_root: PathBuf,
+    target: ResourceTarget,
+    snapshot_id: String,
+    manager: super::fxserver::FxserverManager,
+) -> Result<ResourceSnapshot, String> {
     super::run_blocking(move || {
+        let storage = storage_root(&data_root)?;
         let _operation = OPERATION
             .try_lock()
             .map_err(|_| "Another resource operation is in progress.")?;
@@ -224,14 +417,28 @@ pub async fn rollback_resource_update(
     .await
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn delete_resource_snapshot(
     app: tauri::AppHandle,
     target: ResourceTarget,
     snapshot_id: String,
 ) -> Result<(), String> {
-    let storage = storage_root(&app)?;
+    delete_snapshot_at(
+        app.path().app_local_data_dir().map_err(io_error)?,
+        target,
+        snapshot_id,
+    )
+    .await
+}
+
+pub(crate) async fn delete_snapshot_at(
+    data_root: PathBuf,
+    target: ResourceTarget,
+    snapshot_id: String,
+) -> Result<(), String> {
     super::run_blocking(move || {
+        let storage = storage_root(&data_root)?;
         let _operation = OPERATION
             .try_lock()
             .map_err(|_| "Another resource operation is in progress.")?;
@@ -251,12 +458,8 @@ fn previews() -> &'static Mutex<HashMap<String, Prepared>> {
     PREVIEWS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-fn storage_root(app: &tauri::AppHandle) -> Result<PathBuf, String> {
-    let root = app
-        .path()
-        .app_local_data_dir()
-        .map_err(io_error)?
-        .join("resource-updates");
+fn storage_root(data_root: &Path) -> Result<PathBuf, String> {
+    let root = data_root.join("resource-updates");
     create_checked_directory(&root)?;
     checked_directory_path(&root)
 }
@@ -494,7 +697,7 @@ fn replace_resource(
     )?;
     let transaction = parent.join(format!(".fxserver-update-{}", operation_id()?));
     #[cfg(target_os = "linux")]
-    super::workspace_clone::linux_fs::mkdir(&transaction)?;
+    super::linux_fs::mkdir(&transaction)?;
     #[cfg(not(target_os = "linux"))]
     fs::create_dir(&transaction).map_err(io_error)?;
     check_no_links(&transaction)?;
@@ -656,6 +859,10 @@ fn resolve_resource(target: &ResourceTarget) -> Result<PathBuf, String> {
 }
 
 fn manifest_repository(resource: &Path) -> Result<Option<String>, String> {
+    manifest_value(resource, "repository")
+}
+
+fn manifest_value(resource: &Path, key: &str) -> Result<Option<String>, String> {
     let manifest = require_manifest(resource)?;
     let file = read_file(&manifest)?;
     if file.metadata().map_err(io_error)?.len() > 1024 * 1024 {
@@ -668,15 +875,123 @@ fn manifest_repository(resource: &Path) -> Result<Option<String>, String> {
     if content.len() > 1024 * 1024 {
         return Err("Resource manifest grew beyond its size limit.".into());
     }
-    Ok(content.lines().find_map(|line| {
-        let rest = line.trim_start().strip_prefix("repository")?;
+    Ok(parse_manifest_value(&content, key))
+}
+
+fn parse_manifest_value(content: &str, key: &str) -> Option<String> {
+    content.lines().find_map(|line| {
+        let rest = line.trim_start().strip_prefix(key)?;
         if rest.starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_') {
             return None;
         }
         let start = rest.find(['\'', '"'])?;
+        if !matches!(rest[..start].trim(), "" | "(" | "=") {
+            return None;
+        }
         let quote = rest.as_bytes()[start] as char;
-        Some(rest[start + 1..].split(quote).next()?.trim().to_string())
-    }))
+        let (value, tail) = rest[start + 1..].split_once(quote)?;
+        if value.contains('\\') || value.chars().any(char::is_control) {
+            return None;
+        }
+        let tail = tail.trim_start();
+        let tail = if rest[..start].trim() == "(" {
+            tail.strip_prefix(')')?.trim_start()
+        } else {
+            tail
+        };
+        let tail = tail.strip_prefix(';').unwrap_or(tail).trim_start();
+        if !tail.is_empty() && !tail.starts_with("--") {
+            return None;
+        }
+        Some(value.trim().to_string())
+    })
+}
+
+#[cfg(feature = "terminal")]
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct VersionCheck {
+    repository: String,
+    branch: String,
+    local_version: Option<String>,
+    remote_version: Option<String>,
+    status: &'static str,
+}
+
+#[cfg(feature = "terminal")]
+pub(crate) async fn check_version(
+    target: ResourceTarget,
+    branch: String,
+) -> Result<VersionCheck, String> {
+    super::run_blocking(move || {
+        let resource = resolve_resource(&target)?;
+        let (owner, repo) = repository(&resource)?;
+        validate_branch(&branch)?;
+        let local_version = manifest_value(&resource, "version")?;
+        let client = reqwest::blocking::Client::builder()
+            .connect_timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(20))
+            .redirect(reqwest::redirect::Policy::none())
+            .user_agent("FXServer-Installer")
+            .build()
+            .map_err(io_error)?;
+        for name in ["fxmanifest.lua", "__resource.lua"] {
+            let mut url =
+                reqwest::Url::parse("https://raw.githubusercontent.com").map_err(io_error)?;
+            url.path_segments_mut()
+                .map_err(|_| "Invalid manifest URL.")?
+                .extend([owner.as_str(), repo.as_str(), branch.as_str(), name]);
+            let response = client
+                .get(url)
+                .send()
+                .map_err(|_| "GitHub manifest request failed.")?;
+            if response.status() == reqwest::StatusCode::NOT_FOUND {
+                continue;
+            }
+            let response = response.error_for_status().map_err(|_| {
+                "GitHub rejected the manifest request. Check the branch or retry later."
+            })?;
+            let mut content = String::new();
+            response
+                .take(1024 * 1024 + 1)
+                .read_to_string(&mut content)
+                .map_err(io_error)?;
+            if content.len() > 1024 * 1024 {
+                return Err("Remote manifest is too large.".into());
+            }
+            let remote_version = parse_manifest_value(&content, "version");
+            let status = version_status(local_version.as_deref(), remote_version.as_deref());
+            return Ok(VersionCheck {
+                repository: format!("https://github.com/{owner}/{repo}"),
+                branch,
+                local_version,
+                remote_version,
+                status,
+            });
+        }
+        Err("No resource manifest found at the repository root on that branch.".into())
+    })
+    .await
+}
+
+#[cfg(any(feature = "terminal", test))]
+fn version_status(local: Option<&str>, remote: Option<&str>) -> &'static str {
+    let normalize = |value: &str| {
+        value
+            .trim()
+            .trim_start_matches(['v', 'V'])
+            .to_ascii_lowercase()
+    };
+    match (local.map(normalize), remote.map(normalize)) {
+        (Some(local), Some(remote)) if !local.is_empty() && !remote.is_empty() => {
+            if local == remote {
+                "up-to-date"
+            } else {
+                "different-version"
+            }
+        }
+        _ => "unknown",
+    }
 }
 
 fn repository(resource: &Path) -> Result<(String, String), String> {
@@ -907,7 +1222,7 @@ fn check_no_links(path: &Path) -> Result<(), String> {
 
 #[cfg(target_os = "linux")]
 fn create_checked_directory(path: &Path) -> Result<(), String> {
-    super::workspace_clone::linux_fs::mkdir_all(path)
+    super::linux_fs::mkdir_all(path)
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -998,7 +1313,7 @@ fn fingerprint(path: &Path) -> Result<Fingerprint, String> {
         return Err("File changed while hashing.".into());
     }
     #[cfg(target_os = "linux")]
-    super::workspace_clone::linux_fs::unchanged(&input, &metadata)?;
+    super::linux_fs::unchanged(&input, &metadata)?;
     Ok(Fingerprint {
         size,
         sha256: format!("{:x}", hasher.finalize()),
@@ -1150,9 +1465,7 @@ fn ensure_free_space(path: &Path, required: u64) -> Result<(), String> {
         }
     }
     #[cfg(target_os = "linux")]
-    if super::workspace_clone::linux_fs::available_bytes(path)?
-        < required.saturating_add(64 * 1024 * 1024)
-    {
+    if super::linux_fs::available_bytes(path)? < required.saturating_add(64 * 1024 * 1024) {
         return Err("Not enough disk space to stage and snapshot the resource safely.".into());
     }
     Ok(())
@@ -1160,7 +1473,7 @@ fn ensure_free_space(path: &Path, required: u64) -> Result<(), String> {
 
 fn remove_owned(root: &Path, target: &Path) -> Result<(), String> {
     #[cfg(target_os = "linux")]
-    return super::workspace_clone::linux_fs::remove_tree(root, target);
+    return super::linux_fs::remove_tree(root, target);
     #[cfg(not(target_os = "linux"))]
     {
         check_no_links(target)?;
@@ -1175,7 +1488,7 @@ fn remove_owned(root: &Path, target: &Path) -> Result<(), String> {
 
 fn read_file(path: &Path) -> Result<File, String> {
     #[cfg(target_os = "linux")]
-    return super::workspace_clone::linux_fs::read(path);
+    return super::linux_fs::read(path);
     #[cfg(not(target_os = "linux"))]
     File::open(path).map_err(io_error)
 }
@@ -1183,7 +1496,7 @@ fn read_file(path: &Path) -> Result<File, String> {
 fn checked_directory_path(path: &Path) -> Result<PathBuf, String> {
     #[cfg(target_os = "linux")]
     {
-        super::workspace_clone::linux_fs::directory(path)?;
+        super::linux_fs::directory(path)?;
         Ok(path.to_path_buf())
     }
     #[cfg(not(target_os = "linux"))]
@@ -1192,7 +1505,7 @@ fn checked_directory_path(path: &Path) -> Result<PathBuf, String> {
 
 fn create_file(path: &Path) -> Result<File, String> {
     #[cfg(target_os = "linux")]
-    return super::workspace_clone::linux_fs::create(path);
+    return super::linux_fs::create(path);
     #[cfg(not(target_os = "linux"))]
     File::options()
         .write(true)
@@ -1203,14 +1516,14 @@ fn create_file(path: &Path) -> Result<File, String> {
 
 fn copy_file(from: &Path, to: &Path) -> Result<(), String> {
     #[cfg(target_os = "linux")]
-    return super::workspace_clone::linux_fs::copy(from, to);
+    return super::linux_fs::copy(from, to);
     #[cfg(not(target_os = "linux"))]
     fs::copy(from, to).map(|_| ()).map_err(io_error)
 }
 
 fn rename_new(from: &Path, to: &Path) -> Result<(), String> {
     #[cfg(target_os = "linux")]
-    return super::workspace_clone::linux_fs::rename(from, to, false);
+    return super::linux_fs::rename(from, to, false);
     #[cfg(not(target_os = "linux"))]
     fs::rename(from, to).map_err(io_error)
 }
@@ -1246,7 +1559,7 @@ fn unique_id() -> String {
 
 fn operation_id() -> Result<String, String> {
     #[cfg(target_os = "linux")]
-    return super::workspace_clone::linux_fs::token();
+    return super::linux_fs::token();
     #[cfg(not(target_os = "linux"))]
     Ok(unique_id())
 }
@@ -1263,6 +1576,164 @@ fn io_error(error: impl std::fmt::Display) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn version_checks_distinguish_missing_and_different_versions() {
+        assert_eq!(
+            version_status(Some(" v1.2.3 "), Some("1.2.3")),
+            "up-to-date"
+        );
+        assert_eq!(version_status(Some("2"), Some("1")), "different-version");
+        assert_eq!(version_status(None, Some("1")), "unknown");
+        assert_eq!(version_status(Some(""), Some("1")), "unknown");
+        assert_eq!(
+            parse_manifest_value(
+                "-- version 'fake'\nversion_name 'wrong'\nversion '1.2'",
+                "version"
+            ),
+            Some("1.2".into())
+        );
+        for branch in ["../main", "main/..", "main?token=secret", "main\n"] {
+            assert!(validate_branch(branch).is_err());
+        }
+        for source in [
+            "version '1.2'",
+            "version(\"1.2\") -- release",
+            "version = '1.2';",
+        ] {
+            assert_eq!(parse_manifest_value(source, "version"), Some("1.2".into()));
+        }
+        for source in [
+            "version 'unterminated",
+            "version -- 'comment'",
+            "version(get_version('dynamic'))",
+            "version '1' .. suffix",
+            "version('missing-parenthesis'",
+        ] {
+            assert!(
+                parse_manifest_value(source, "version").is_none(),
+                "{source}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn shared_update_services_preserve_defaults_and_require_fresh_rollback_preview() {
+        let mut fixture = Fixture::new();
+        fixture.storage = storage_root(&fixture.root).unwrap();
+        let original = inventory(&fixture.resource).unwrap();
+        let mut prepared = fixture.prepared();
+        let preview_id = operation_id().unwrap();
+        prepared.preview.id = preview_id.clone();
+        previews()
+            .lock()
+            .unwrap()
+            .insert(preview_id.clone(), prepared);
+        let rejected = apply_at(
+            fixture.root.clone(),
+            Default::default(),
+            ApplyRequest {
+                target: fixture.target.clone(),
+                preview_id: preview_id.clone(),
+                protected_paths: vec!["../escape".into()],
+            },
+            true,
+            None,
+        )
+        .await;
+        assert!(rejected.unwrap_err().contains("Unsafe resource path"));
+        assert!(inventory(&fixture.resource).unwrap() == original);
+        let snapshot = apply_at(
+            fixture.root.clone(),
+            Default::default(),
+            ApplyRequest {
+                target: fixture.target.clone(),
+                preview_id,
+                protected_paths: vec![],
+            },
+            true,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            fs::read_to_string(fixture.resource.join("config.lua")).unwrap(),
+            "secret = 'keep me'"
+        );
+        assert_eq!(
+            fs::read_to_string(fixture.resource.join("server.lua")).unwrap(),
+            "new code"
+        );
+        assert_eq!(
+            snapshots_at(fixture.root.clone(), fixture.target.clone())
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+
+        let preview = preview_rollback_at(
+            fixture.root.clone(),
+            fixture.target.clone(),
+            snapshot.id.clone(),
+        )
+        .await
+        .unwrap();
+        assert!(preview
+            .changes
+            .iter()
+            .all(|change| !change.preserve && !change.can_preserve));
+        assert!(!serde_json::to_string(&preview).unwrap().contains("keep me"));
+        fs::write(
+            fixture.resource.join("server.lua"),
+            "subsequent user change",
+        )
+        .unwrap();
+        assert!(apply_rollback_preview_at(
+            fixture.root.clone(),
+            fixture.target.clone(),
+            preview.id.clone(),
+            Default::default(),
+            None
+        )
+        .await
+        .unwrap_err()
+        .contains("changed after preview"));
+        ROLLBACK_PREVIEWS.lock().unwrap().remove(&preview.id);
+        assert_eq!(
+            fs::read_to_string(fixture.resource.join("server.lua")).unwrap(),
+            "subsequent user change"
+        );
+
+        let preview = preview_rollback_at(
+            fixture.root.clone(),
+            fixture.target.clone(),
+            snapshot.id.clone(),
+        )
+        .await
+        .unwrap();
+        let safety = apply_rollback_preview_at(
+            fixture.root.clone(),
+            fixture.target.clone(),
+            preview.id,
+            Default::default(),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(safety.reason, "Before rollback");
+        assert!(inventory(&fixture.resource).unwrap() == original);
+        delete_snapshot_at(fixture.root.clone(), fixture.target.clone(), snapshot.id)
+            .await
+            .unwrap();
+        assert_eq!(
+            snapshots_at(fixture.root.clone(), fixture.target.clone())
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+    }
 
     #[cfg(target_os = "linux")]
     #[test]

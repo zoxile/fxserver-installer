@@ -1,12 +1,10 @@
 use crate::{
-    commands::{
-        backup_manager::storage,
-        database_browser::{query_json, quote_identifier, sql_text},
-    },
+    commands::database_browser::{query_json, quote_identifier, sql_text},
     models::mariadb::MariaDBCredentials,
     process::CommandNoWindowExt,
     services::mariadb::{
         backup::run_backup_client,
+        backup_storage as storage,
         query::{apply_credentials_args, find_mariadb_client},
     },
 };

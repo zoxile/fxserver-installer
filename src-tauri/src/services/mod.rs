@@ -1,3 +1,3 @@
-#[cfg(feature = "desktop")]
+#[cfg(any(feature = "desktop", feature = "terminal"))]
 pub mod jooat;
 pub mod mariadb;

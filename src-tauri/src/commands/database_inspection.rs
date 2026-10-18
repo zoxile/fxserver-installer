@@ -59,14 +59,14 @@ fn inspection_sql(view: InspectionView, database: &str) -> Result<(Vec<String>, 
     ))
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub async fn inspect_database(
     credentials: MariaDBCredentials,
     view: InspectionView,
     database: String,
 ) -> Result<InspectionResult, String> {
     super::run_blocking(move || {
-        let _guard = super::mariadb::database_access()?;
+        let _guard = crate::services::mariadb::access::database_access()?;
         let (columns, sql) = inspection_sql(view, &database)?;
         let mut rows: Vec<Vec<Option<String>>> = query_json(&credentials, &sql)?;
         let has_more = rows.len() > LIMIT;

@@ -2,10 +2,7 @@
 //! table metadata, column definitions, primary/unique keys and default helpers.
 //! Mutations use new single-target, one-shot previews; no FK-check bypass.
 use super::{
-    backup_manager::{
-        storage::{now_ms, secure_token, validate_id},
-        BackupManager,
-    },
+    backup_manager::storage::{now_ms, secure_token, validate_id},
     database_browser::{query_json, quote_identifier, sql_text},
 };
 use crate::{models::mariadb::MariaDBCredentials, services::mariadb::query::execute_query};
@@ -15,7 +12,8 @@ use std::{
     sync::{Mutex, OnceLock},
     time::Duration,
 };
-use tauri::State;
+#[cfg(feature = "desktop")]
+use {super::backup_manager::BackupManager, tauri::State};
 
 const MAX_COLUMNS: usize = 32;
 const MAX_SQL: usize = 8000;
@@ -41,16 +39,16 @@ const INTEGERS: &[&str] = &["TINYINT", "SMALLINT", "INT", "BIGINT"];
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ColumnSpec {
-    name: String,
-    data_type: String,
-    length: Option<String>,
-    unsigned: bool,
-    nullable: bool,
-    default_kind: String,
-    default_value: Option<String>,
-    auto_increment: bool,
-    primary: bool,
-    unique: bool,
+    pub(crate) name: String,
+    pub(crate) data_type: String,
+    pub(crate) length: Option<String>,
+    pub(crate) unsigned: bool,
+    pub(crate) nullable: bool,
+    pub(crate) default_kind: String,
+    pub(crate) default_value: Option<String>,
+    pub(crate) auto_increment: bool,
+    pub(crate) primary: bool,
+    pub(crate) unique: bool,
 }
 
 #[derive(Clone, Deserialize, Serialize, PartialEq, Debug)]
@@ -69,12 +67,12 @@ pub enum AdminAction {
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AdminRequest {
-    workspace_id: String,
-    database: String,
-    table: Option<String>,
-    action: AdminAction,
+    pub(crate) workspace_id: String,
+    pub(crate) database: String,
+    pub(crate) table: Option<String>,
+    pub(crate) action: AdminAction,
     #[serde(default)]
-    columns: Vec<ColumnSpec>,
+    pub(crate) columns: Vec<ColumnSpec>,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -485,13 +483,13 @@ fn execution_sql(permit: &Permit) -> String {
     format!("SET SESSION sql_mode='STRICT_ALL_TABLES,NO_BACKSLASH_ESCAPES',foreign_key_checks=1,group_concat_max_len=262144,lock_wait_timeout=5,max_statement_time=15; SET @fx_admin=IF(({})={}, {}, 'FX_ADMIN_STALE_PREVIEW'); PREPARE fx_admin FROM @fx_admin; EXECUTE fx_admin; DEALLOCATE PREPARE fx_admin;", fingerprint_sql(&permit.request), sql_text(&permit.fingerprint), sql_text(&permit.preview.sql))
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub async fn list_database_admin_tables(
     credentials: MariaDBCredentials,
     database: String,
 ) -> Result<TableInfoPage, String> {
     super::run_blocking(move || {
-        let _guard = super::mariadb::database_access()?;
+        let _guard = crate::services::mariadb::access::database_access()?;
         name(&database)?;
         let mut tables: Vec<TableInfo> = query_json(&credentials, &format!("SET SESSION max_statement_time=10; SELECT JSON_OBJECT('name',TABLE_NAME,'kind',TABLE_TYPE,'engine',ENGINE,'rows',TABLE_ROWS,'collation',TABLE_COLLATION,'dataBytes',COALESCE(DATA_LENGTH,0),'indexBytes',COALESCE(INDEX_LENGTH,0),'freeBytes',COALESCE(DATA_FREE,0)) FROM information_schema.TABLES WHERE TABLE_SCHEMA={} ORDER BY TABLE_NAME LIMIT 501;", sql_text(&database)))?;
         let has_more = tables.len() > 500;
@@ -500,13 +498,13 @@ pub async fn list_database_admin_tables(
     }).await
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub async fn preview_database_admin_action(
     credentials: MariaDBCredentials,
     request: AdminRequest,
 ) -> Result<AdminPreview, String> {
     super::run_blocking(move || {
-        let _guard = super::mariadb::database_access()?;
+        let _guard = crate::services::mariadb::access::database_access()?;
         let sql = action_sql(&request)?;
         visibility(&credentials)?;
         let fingerprint = read_fingerprint(&credentials, &request)?;
@@ -523,7 +521,7 @@ pub async fn preview_database_admin_action(
         if pending.len() >= 8 { return Err("Too many pending previews. Wait for them to expire.".into()); }
         pending.insert(preview.token.clone(), Permit { request, credentials, preview: preview.clone(), fingerprint });
         let token = preview.token.clone();
-        tauri::async_runtime::spawn(async move {
+        tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(TTL)).await;
             if let Ok(mut pending) = permits().lock() { pending.remove(&token); }
         });
@@ -531,6 +529,7 @@ pub async fn preview_database_admin_action(
     }).await
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn apply_database_admin_action(
     manager: State<'_, BackupManager>,
@@ -547,6 +546,7 @@ pub async fn apply_database_admin_action(
     .await
 }
 
+#[cfg(feature = "desktop")]
 pub(crate) async fn apply_database_admin_action_with_manager(
     manager: BackupManager,
     workspace_id: String,
@@ -554,29 +554,80 @@ pub(crate) async fn apply_database_admin_action_with_manager(
     confirmation: String,
 ) -> Result<AdminResult, String> {
     super::mariadb::run_mutation(manager, move || {
-        // Serializes against this application's queries, row edits, backups and restores.
-        let _guard = super::mariadb::maintenance_access()?;
-        let permit = take_permit(&workspace_id, &token, &confirmation)?;
-        unprotected(&permit.request.database)?;
-        visibility(&permit.credentials)?;
-        validate_target(&permit.credentials, &permit.request)?;
-        if read_fingerprint(&permit.credentials, &permit.request)? != permit.fingerprint { return Err("Schema or server changed since preview. No action was sent. Refresh and review again.".into()); }
-        validate_permit(&permit, &workspace_id, &confirmation, now_ms())?;
-        let sql = execution_sql(&permit);
-        let mut credentials = permit.credentials.clone();
-        credentials.database = None;
-        let uncertain = |error: String| {
-            let error = if permit.credentials.password.is_empty() { error } else { error.replace(&permit.credentials.password, "[redacted]") };
-            format!("The action did not return a confirmed success. Nontransactional DDL/maintenance may have completed or partially changed the target; no rollback is promised. Refresh {} before retrying. {}", permit.preview.confirmation, error.chars().take(2000).collect::<String>())
+        apply_reviewed_action(workspace_id, token, confirmation)
+    })
+    .await
+}
+
+#[cfg(feature = "terminal")]
+pub(crate) async fn apply_database_admin_action_headless(
+    workspace_id: String,
+    token: String,
+    confirmation: String,
+) -> Result<AdminResult, String> {
+    super::run_blocking(move || apply_reviewed_action(workspace_id, token, confirmation)).await
+}
+
+fn apply_reviewed_action(
+    workspace_id: String,
+    token: String,
+    confirmation: String,
+) -> Result<AdminResult, String> {
+    // Serializes against this application's queries, row edits, backups and restores.
+    let _guard = crate::services::mariadb::access::maintenance_access()?;
+    let permit = take_permit(&workspace_id, &token, &confirmation)?;
+    unprotected(&permit.request.database)?;
+    visibility(&permit.credentials)?;
+    validate_target(&permit.credentials, &permit.request)?;
+    if read_fingerprint(&permit.credentials, &permit.request)? != permit.fingerprint {
+        return Err(
+            "Schema or server changed since preview. No action was sent. Refresh and review again."
+                .into(),
+        );
+    }
+    validate_permit(&permit, &workspace_id, &confirmation, now_ms())?;
+    let sql = execution_sql(&permit);
+    let mut credentials = permit.credentials.clone();
+    credentials.database = None;
+    let uncertain = |error: String| {
+        let error = if permit.credentials.password.is_empty() {
+            error
+        } else {
+            error.replace(&permit.credentials.password, "[redacted]")
         };
-        let result = execute_query(credentials, sql).map_err(uncertain)?;
-        if !result.success { return Err(uncertain(result.stderr)); }
-        let maintenance = matches!(permit.request.action, AdminAction::Optimize | AdminAction::Analyze | AdminAction::Check | AdminAction::Repair);
-        let issues = !result.stderr.is_empty() || result.rows.len() > 32 || (maintenance && result.rows.is_empty()) || result.rows.iter().any(|row| row.get(2).is_some_and(|kind| matches!(kind.to_ascii_lowercase().as_str(), "error" | "warning")));
-        let mut messages = result.rows.into_iter().take(32).map(|row| row.into_iter().take(4).map(|cell| cell.chars().take(1024).collect()).collect()).collect::<Vec<Vec<String>>>();
-        if !result.stderr.is_empty() { messages.push(vec![result.stderr.chars().take(2000).collect()]); }
-        Ok(AdminResult { message: if issues { "Action returned warnings or errors. Nontransactional changes may already have occurred. Inspect the result before retrying." } else { "Administrative action completed." }.into(), messages, has_issues: issues })
-    }).await
+        format!("The action did not return a confirmed success. Nontransactional DDL/maintenance may have completed or partially changed the target; no rollback is promised. Refresh {} before retrying. {}", permit.preview.confirmation, error.chars().take(2000).collect::<String>())
+    };
+    let result = execute_query(credentials, sql).map_err(uncertain)?;
+    if !result.success {
+        return Err(uncertain(result.stderr));
+    }
+    let maintenance = matches!(
+        permit.request.action,
+        AdminAction::Optimize | AdminAction::Analyze | AdminAction::Check | AdminAction::Repair
+    );
+    let issues = !result.stderr.is_empty()
+        || result.rows.len() > 32
+        || (maintenance && result.rows.is_empty())
+        || result.rows.iter().any(|row| {
+            row.get(2).is_some_and(|kind| {
+                matches!(kind.to_ascii_lowercase().as_str(), "error" | "warning")
+            })
+        });
+    let mut messages = result
+        .rows
+        .into_iter()
+        .take(32)
+        .map(|row| {
+            row.into_iter()
+                .take(4)
+                .map(|cell| cell.chars().take(1024).collect())
+                .collect()
+        })
+        .collect::<Vec<Vec<String>>>();
+    if !result.stderr.is_empty() {
+        messages.push(vec![result.stderr.chars().take(2000).collect()]);
+    }
+    Ok(AdminResult { message: if issues { "Action returned warnings or errors. Nontransactional changes may already have occurred. Inspect the result before retrying." } else { "Administrative action completed." }.into(), messages, has_issues: issues })
 }
 
 #[cfg(test)]

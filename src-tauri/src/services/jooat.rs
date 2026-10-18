@@ -1,9 +1,11 @@
 use std::{
     collections::{HashMap, HashSet},
     fs,
+    io::Read,
     path::{Path, PathBuf},
 };
 
+#[cfg(feature = "desktop")]
 use tauri::{AppHandle, Manager};
 
 use crate::models::jooat::{JooatResolvedHash, JooatResolverManifest, JooatResolverStatus};
@@ -12,7 +14,11 @@ const DATABASE_FOLDER: &str = "jooat-resolver";
 const MANIFEST_FILE: &str = "manifest.json";
 const SHARDS_FOLDER: &str = "shards";
 const COMPLETE_SHARD_COUNT: usize = 256;
+const MAX_MANIFEST_BYTES: u64 = 512 * 1024;
+const MAX_SHARD_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_LOOKUP_BYTES: u64 = 64 * 1024 * 1024;
 
+#[cfg(feature = "desktop")]
 pub fn get_status(app: &AppHandle) -> JooatResolverStatus {
     match database_dir(app) {
         Ok(database_dir) => build_status(database_dir),
@@ -28,6 +34,7 @@ pub fn get_status(app: &AppHandle) -> JooatResolverStatus {
     }
 }
 
+#[cfg(feature = "desktop")]
 pub fn prepare_database(
     app: &AppHandle,
     manifest: JooatResolverManifest,
@@ -46,6 +53,7 @@ pub fn prepare_database(
     Ok(build_status(database_dir))
 }
 
+#[cfg(feature = "desktop")]
 pub fn save_shard(
     app: &AppHandle,
     prefix: String,
@@ -62,6 +70,7 @@ pub fn save_shard(
     Ok(build_status(database_dir))
 }
 
+#[cfg(feature = "desktop")]
 pub fn remove_database(app: &AppHandle) -> Result<JooatResolverStatus, String> {
     let database_dir = database_dir(app)?;
 
@@ -73,11 +82,41 @@ pub fn remove_database(app: &AppHandle) -> Result<JooatResolverStatus, String> {
     Ok(build_status(database_dir))
 }
 
+#[cfg(feature = "desktop")]
 pub fn resolve_hashes(
     app: &AppHandle,
     queries: Vec<String>,
 ) -> Result<Vec<JooatResolvedHash>, String> {
-    let database_dir = database_dir(app)?;
+    resolve_hashes_in(database_dir(app)?, queries)
+}
+
+#[cfg(any(test, feature = "terminal"))]
+pub(crate) fn get_status_in(database_dir: PathBuf) -> Result<JooatResolverStatus, String> {
+    crate::commands::config_history::ensure_unlinked_path(&database_dir)?;
+    Ok(build_status(database_dir))
+}
+
+#[cfg(feature = "terminal")]
+pub(crate) fn core_database_dir() -> Result<PathBuf, String> {
+    #[cfg(windows)]
+    let root = std::env::var_os("APPDATA")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .ok_or("The Windows roaming application data directory is unavailable.")?
+        .join("com.fxserver.installer");
+    #[cfg(not(windows))]
+    let root = crate::platform::data_dir()?;
+    Ok(root.join(DATABASE_FOLDER))
+}
+
+pub(crate) fn resolve_hashes_in(
+    database_dir: PathBuf,
+    queries: Vec<String>,
+) -> Result<Vec<JooatResolvedHash>, String> {
+    if queries.len() > 100 || queries.iter().any(|query| query.len() > 128) {
+        return Err("Resolve at most 100 hashes of at most 128 bytes each.".into());
+    }
+    crate::commands::config_history::ensure_unlinked_path(&database_dir)?;
     let status = build_status(database_dir.clone());
     if !status.available {
         return Err(
@@ -172,6 +211,7 @@ fn build_status(database_dir: PathBuf) -> JooatResolverStatus {
     }
 }
 
+#[cfg(feature = "desktop")]
 fn database_dir(app: &AppHandle) -> Result<PathBuf, String> {
     let app_data = app
         .path()
@@ -193,12 +233,43 @@ fn shard_path(database_dir: &Path, prefix: &str) -> PathBuf {
 }
 
 fn read_manifest(database_dir: &Path) -> Result<JooatResolverManifest, String> {
-    let content = fs::read_to_string(manifest_path(database_dir))
-        .map_err(|error| format!("Failed to read JOOAT manifest: {error}"))?;
-    serde_json::from_str(&content)
-        .map_err(|error| format!("Failed to parse JOOAT manifest: {error}"))
+    let content = read_resolver_file(&manifest_path(database_dir), MAX_MANIFEST_BYTES)?;
+    let manifest = serde_json::from_str(&content)
+        .map_err(|_| "The JOOAT resolver manifest is invalid.".to_string())?;
+    validate_manifest_paths(&manifest)?;
+    Ok(manifest)
 }
 
+fn read_resolver_file(path: &Path, limit: u64) -> Result<String, String> {
+    crate::commands::config_history::ensure_unlinked_path(path)?;
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let file = options
+        .open(path)
+        .map_err(|_| "Cannot open the JOOAT resolver file.")?;
+    if !file
+        .metadata()
+        .map_err(|_| "Cannot inspect the JOOAT resolver file.")?
+        .is_file()
+    {
+        return Err("JOOAT resolver data requires regular files.".into());
+    }
+    let mut content = String::new();
+    file.take(limit + 1)
+        .read_to_string(&mut content)
+        .map_err(|_| "Cannot read the JOOAT resolver file as UTF-8.")?;
+    if content.len() as u64 > limit {
+        return Err("The JOOAT resolver file exceeds the read limit.".into());
+    }
+    Ok(content)
+}
+
+#[cfg(feature = "desktop")]
 fn validate_manifest(manifest: &JooatResolverManifest) -> Result<(), String> {
     if manifest.version.trim().is_empty() {
         return Err("JOOAT manifest version is required.".to_string());
@@ -210,6 +281,13 @@ fn validate_manifest(manifest: &JooatResolverManifest) -> Result<(), String> {
         ));
     }
 
+    validate_manifest_paths(manifest)
+}
+
+fn validate_manifest_paths(manifest: &JooatResolverManifest) -> Result<(), String> {
+    if manifest.shards.len() > COMPLETE_SHARD_COUNT {
+        return Err("JOOAT manifests are limited to 256 prefix shards.".into());
+    }
     for shard in &manifest.shards {
         normalize_prefix(&shard.prefix)?;
         let shard_path = Path::new(&shard.path);
@@ -239,9 +317,13 @@ fn manifest_is_complete(manifest: &JooatResolverManifest) -> bool {
 }
 
 fn installed_shards(database_dir: &Path) -> usize {
+    if crate::commands::config_history::ensure_unlinked_path(&shards_dir(database_dir)).is_err() {
+        return 0;
+    }
     fs::read_dir(shards_dir(database_dir))
         .map(|entries| {
             entries
+                .take(4096)
                 .flatten()
                 .filter(|entry| {
                     entry
@@ -258,26 +340,35 @@ fn installed_manifest_shards(database_dir: &Path, manifest: &JooatResolverManife
     manifest
         .shards
         .iter()
-        .filter(|shard| database_dir.join(&shard.path).exists())
+        .filter(|shard| {
+            let path = database_dir.join(&shard.path);
+            crate::commands::config_history::ensure_unlinked_path(&path).is_ok() && path.is_file()
+        })
         .count()
 }
 
 fn directory_size(path: &Path) -> u64 {
-    let mut total = 0;
+    let mut total: u64 = 0;
+    let mut remaining = 4096;
     let mut stack = vec![path.to_path_buf()];
 
     while let Some(current) = stack.pop() {
-        let Ok(metadata) = fs::metadata(&current) else {
+        let Ok(metadata) = fs::symlink_metadata(&current) else {
             continue;
         };
 
+        if crate::commands::config_history::ensure_unlinked_path(&current).is_err() {
+            continue;
+        }
+
         if metadata.is_file() {
-            total += metadata.len();
+            total = total.saturating_add(metadata.len());
             continue;
         }
 
         if let Ok(entries) = fs::read_dir(current) {
-            for entry in entries.flatten() {
+            for entry in entries.take(remaining).flatten() {
+                remaining -= 1;
                 stack.push(entry.path());
             }
         }
@@ -304,6 +395,8 @@ fn load_matches(
     hashes_by_prefix: HashMap<String, HashSet<u32>>,
 ) -> Result<HashMap<u32, Vec<String>>, String> {
     let mut matches_by_hash: HashMap<u32, Vec<String>> = HashMap::new();
+    let mut total_bytes = 0;
+    let mut total_matches = 0;
 
     for (prefix, targets) in hashes_by_prefix {
         let path = manifest_lookup
@@ -315,11 +408,16 @@ fn load_matches(
             continue;
         }
 
-        let content = fs::read_to_string(&path)
-            .map_err(|error| format!("Failed to read JOOAT shard {prefix}: {error}"))?;
+        let content =
+            read_resolver_file(&path, MAX_SHARD_BYTES.min(MAX_LOOKUP_BYTES - total_bytes))?;
+        total_bytes += content.len() as u64;
         for line in content.lines() {
             if let Some((hash, name)) = parse_shard_line(line) {
                 if targets.contains(&hash) {
+                    total_matches += 1;
+                    if total_matches > 1000 || name.len() > 4096 {
+                        return Err("JOOAT resolver matches exceed the output limit.".into());
+                    }
                     matches_by_hash.entry(hash).or_default().push(name);
                 }
             }
@@ -410,4 +508,133 @@ fn format_hash(value: u32) -> String {
 
 fn signed_hash(value: u32) -> i32 {
     value as i32
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::jooat::JooatShardManifest;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+    struct Fixture(PathBuf);
+
+    impl Fixture {
+        fn new() -> Self {
+            let root = std::env::temp_dir().join(format!(
+                "fxi-jooat-{}-{}",
+                std::process::id(),
+                SEQUENCE.fetch_add(1, Ordering::Relaxed),
+            ));
+            fs::create_dir(&root).unwrap();
+            Self(root)
+        }
+
+        fn install(&self) -> JooatResolverManifest {
+            fs::create_dir(shards_dir(&self.0)).unwrap();
+            let manifest = JooatResolverManifest {
+                version: "fixture".into(),
+                source: None,
+                generated_at: None,
+                total_hashes: None,
+                total_names: None,
+                size_bytes: None,
+                shards: (0..=u8::MAX)
+                    .map(|prefix| {
+                        let prefix = format!("{prefix:02x}");
+                        let path = format!("shards/{prefix}.tsv");
+                        fs::write(self.0.join(&path), "").unwrap();
+                        JooatShardManifest {
+                            prefix,
+                            path,
+                            hashes: None,
+                            bytes: None,
+                        }
+                    })
+                    .collect(),
+            };
+            fs::write(
+                manifest_path(&self.0),
+                serde_json::to_vec(&manifest).unwrap(),
+            )
+            .unwrap();
+            manifest
+        }
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn missing_database_status_is_read_only() {
+        let fixture = Fixture::new();
+        let path = fixture.0.join("not-installed");
+        assert!(!get_status_in(path.clone()).unwrap().available);
+        assert!(resolve_hashes_in(path.clone(), vec!["1".into()]).is_err());
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn core_resolver_reuses_signed_unsigned_hex_parsing_and_deduplicates_matches() {
+        let fixture = Fixture::new();
+        fixture.install();
+        fs::write(
+            shard_path(&fixture.0, "ff"),
+            "0xFFFFFFFF\tfixture_name\n-1 fixture_name\n",
+        )
+        .unwrap();
+        let result = resolve_hashes_in(
+            fixture.0.clone(),
+            vec![
+                "-1".into(),
+                "4294967295".into(),
+                "hash_ffffffff".into(),
+                "invalid".into(),
+            ],
+        )
+        .unwrap();
+        for item in &result[..3] {
+            assert_eq!(item.value, Some(u32::MAX));
+            assert_eq!(item.signed.as_deref(), Some("-1"));
+            assert_eq!(item.matches, ["fixture_name"]);
+        }
+        assert!(result[3].error.is_some());
+        assert!(resolve_hashes_in(fixture.0.clone(), vec!["1".into(); 101]).is_err());
+    }
+
+    #[test]
+    fn resolver_rejects_unsafe_manifests_and_bounded_file_reads() {
+        let fixture = Fixture::new();
+        let mut manifest = fixture.install();
+        manifest.shards[0].path = "../outside.tsv".into();
+        fs::write(
+            manifest_path(&fixture.0),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        assert!(read_manifest(&fixture.0).is_err());
+        assert!(!get_status_in(fixture.0.clone()).unwrap().available);
+        let path = fixture.0.join("bounded.tsv");
+        fs::write(&path, "12345").unwrap();
+        assert_eq!(read_resolver_file(&path, 5).unwrap(), "12345");
+        assert!(read_resolver_file(&path, 4).is_err());
+        assert!(read_resolver_file(&fixture.0, 10).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolver_rejects_linked_files_and_does_not_follow_directory_cycles() {
+        let fixture = Fixture::new();
+        let path = fixture.0.join("data.tsv");
+        fs::write(&path, "fixture").unwrap();
+        let link = fixture.0.join("linked.tsv");
+        std::os::unix::fs::symlink(&path, &link).unwrap();
+        assert!(read_resolver_file(&link, 100).is_err());
+        std::os::unix::fs::symlink(&fixture.0, fixture.0.join("cycle")).unwrap();
+        assert_eq!(directory_size(&fixture.0), 7);
+    }
 }
