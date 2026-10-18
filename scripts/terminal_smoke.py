@@ -187,10 +187,103 @@ def config_fixture(root):
     data = root / "server-data"
     (data / "resources").mkdir(parents=True)
     cfg = data / "server.cfg"
-    cfg.write_bytes(b'# inert-pty-fixture\nset fixture_marker "original"\n')
+    cfg.write_bytes(
+        b'# inert-pty-fixture\nset fixture_marker "original"\n'
+        b'# literal[.] first\n# literal. decoy\n# literal[.] last\n'
+    )
     (profile / "config.json").write_text(json.dumps({"version": 2, "server": {"dataPath": str(data)}}), encoding="utf-8")
+    tracked = [cfg, profile / "config.json"]
+    for name, version in (("fixture_alpha", "1.0.0"), ("fixture_beta", "2.0.0"), ("fixture_gamma", "1.0.0")):
+        resource = data / "resources" / name
+        resource.mkdir()
+        manifest = resource / "fxmanifest.lua"
+        manifest.write_bytes(f"fx_version 'cerulean'\ngame 'gta5'\nversion '{version}'\n".encode())
+        tracked.append(manifest)
     arguments = ["--config", str(root / "terminal.json"), "--artifact-path", str(artifact), "--tx-data-path", str(txdata), "--profile", "default"]
-    return arguments, {path: path.read_bytes() for path in (cfg, profile / "config.json")}
+    return arguments, {path: path.read_bytes() for path in tracked}
+
+
+def result_search(probe):
+    # Separated matches make navigation observable without depending on SGR colors.
+    first, last = "needle[.] first", "needle[.] last"
+    probe.send(b"\x06")  # Ctrl+F
+    probe.contains("Find (exact) | Enter: find")
+    probe.send(b"needle[.]")
+    probe.send(b"\r")
+    probe.expect(lambda text: "Find (exact) | Enter/Shift+Enter" in text and first in text and last not in text, "first literal result match")
+
+    # Result arrows scroll; next/previous match are Enter, Ctrl+N, and Ctrl+P.
+    probe.send(b"\x1b[B")
+    probe.expect(lambda text: "Find (exact) | Enter/Shift+Enter" in text and first not in text and last not in text, "Down scrolls past the first result match")
+    probe.send(b"\x1b[A")
+    probe.contains(first)
+    for key, visible, hidden in ((b"\r", last, first), (b"\r", first, last), (b"\x10", last, first), (b"\x0e", first, last)):
+        probe.send(key)
+        probe.expect(lambda text: visible in text and hidden not in text, f"result search reveals {visible!r}")
+
+    probe.send(b"\x06")
+    probe.contains("Find (exact) | Enter: find")
+    probe.send(b"\x15")  # Ctrl+U clears only the search field.
+    probe.send(b"absent-result-match")
+    probe.send(b"\r")
+    probe.contains("Find (exact): no matches")
+    probe.send(b"\x06")
+    probe.contains("Find (exact) | Enter: find")
+    probe.send(b"\x1b")
+    probe.expect(lambda text: "Result |" in text and "Find (exact): no matches" in text, "Esc closes result search without leaving the result")
+
+
+def config_navigation(probe):
+    def clean(text):
+        return "inert-pty-fixture" in text and "server.cfg" in text and "server.cfg *" not in text
+
+    probe.send(b"\x06")
+    probe.expect(lambda text: clean(text) and "Find:" in text, "clean cfg find prompt")
+    probe.send(b"literal[.]")
+    for key, match in ((b"\r", "Match 3:3"), (b"\r", "Match 5:3"), (b"\x1b[A", "Match 3:3"), (b"\x1b[A", "Match 5:3 (wrapped)"), (b"\x1b[B", "Match 3:3 (wrapped)")):
+        probe.send(key)
+        probe.expect(lambda text: clean(text) and "Find: literal[.]" in text and match in text, f"clean cfg literal find: {match}")
+    probe.send(b"\x1b")
+    probe.expect(lambda text: clean(text) and "Find:" not in text, "Esc closes find without closing or dirtying the cfg")
+
+    for line in (5, 1):
+        probe.send(b"\x07")  # Ctrl+G; return to line 1 before the edit/undo scenario.
+        probe.expect(lambda text: clean(text) and "Line:" in text, "clean cfg go-to-line prompt")
+        probe.send(str(line).encode())
+        probe.send(b"\r")
+        probe.expect(lambda text: clean(text) and f"Line {line}." in text and "Line:" not in text, f"go to line {line} without dirtying the cfg")
+
+
+def resource_filter(probe):
+    probe.send(b"\x1bOR")  # F3 (SS3), recognized by crossterm and ConPTY.
+    probe.contains("No resources loaded.")
+    probe.send(b"r")  # Read-only manifest scan, not a resource/server command.
+    probe.expect(lambda text: "Filter 3/3" in text and all(name in text for name in ("fixture_alpha", "fixture_beta", "fixture_gamma")), "three inert resources scanned")
+    probe.selected("fixture_alpha")
+    probe.send(b"/")
+    probe.send(b"FIXTURE 2.0.0")
+    probe.expect(lambda text: "Filter 1/3" in text and "FIXTURE 2.0.0" in text and "fixture_beta" in text and "fixture_alpha" not in text and "fixture_gamma" not in text, "case-insensitive name/version resource filter")
+    probe.selected("fixture_beta")
+    probe.send(b"\r")  # Finish filtering, retaining the query and selection.
+    probe.send(b"\x1b")  # Clear only after Enter has left the filter prompt.
+    probe.expect(lambda text: "Filter 3/3" in text and "FIXTURE" not in text and "fixture_gamma" in text, "Enter finishes resource filtering and Esc clears it")
+    probe.selected("fixture_alpha")
+
+
+def confirmation_batch_guard(probe):
+    title, message = "Confirm Y | Cancel N/Esc", "Stop the managed server?"
+    # One write must not approve an unseen confirmation. This disposable profile
+    # has no managed server; never use start/install/SQL as the batching probe.
+    probe.send(b"xy")
+    probe.expect(lambda text: title in text and message in text, "batched x/y leaves the stop confirmation open")
+    settled = time.monotonic() + 0.3
+    probe.expect(
+        lambda text: time.monotonic() >= settled and title in text and message in text,
+        "stop confirmation remains open after queued input drains",
+        timeout=2,
+    )
+    probe.send(b"N")
+    probe.expect(lambda text: "S: start" in text and title not in text and message not in text, "N cancels the stop confirmation")
 
 
 def actions_and_config(probe, paste_undo_limit=1):
@@ -217,13 +310,14 @@ def actions_and_config(probe, paste_undo_limit=1):
     probe.contains("JSON text")
     probe.send(b"\r")
     probe.contains("JSON text is required.")
-    value = b'{"fixture_pty":314159,"items":[1,2]}'
+    value = json.dumps({"fixture_pty": 314159, "items": ["needle[.] first", *range(32), "needle[.] last"]}, separators=(",", ":")).encode()
     probe.send(value)
-    probe.contains("*" * len(value))
-    assert "fixture_pty" not in probe.screen.text, "Secret-marked JSON field leaked before submission"
+    probe.contains("*" * 16)
+    assert "fixture_pty" not in probe.screen.text and "needle[.]" not in probe.screen.text, "Secret-marked JSON field leaked before submission"
     probe.send(b"\r")
-    probe.contains("Result | Esc:")
+    probe.contains("Result |")
     probe.contains('"fixture_pty": 314159')
+    result_search(probe)
 
     probe.send(b"\x1b[20~")  # F9, load only the disposable profile's cfg files.
     probe.contains("No config files loaded.")
@@ -232,6 +326,7 @@ def actions_and_config(probe, paste_undo_limit=1):
     probe.contains("server.cfg")
     probe.send(b"\r")
     probe.contains("inert-pty-fixture")
+    config_navigation(probe)
     probe.send(b"\x1b[F")  # End of first line; type and undo one edit.
     probe.send(b"T")
     probe.contains("inert-pty-fixtureT")
@@ -264,8 +359,12 @@ def actions_and_config(probe, paste_undo_limit=1):
     probe.send(b"\r")
     probe.contains('set fixture_marker "original"')
     assert "paste-two" not in probe.screen.text and "server.cfg *" not in probe.screen.text
+    probe.send(b"\x1b")
+    probe.expect(lambda text: "server.cfg" in text and "bytes)" in text and "inert-pty-fixture" not in text, "clean cfg closes without an unsaved warning")
+    resource_filter(probe)
     probe.send(b"\x1bOP")  # F1: q must quit, not type into an Actions form/editor.
     probe.contains("S: start")
+    confirmation_batch_guard(probe)
 
 
 def assert_unchanged(files):
