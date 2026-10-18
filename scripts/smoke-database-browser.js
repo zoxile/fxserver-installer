@@ -88,9 +88,16 @@ async (page) => {
   });
   await page.reload({ waitUntil: "domcontentloaded", timeout: 120000 });
   const nav = page.getByRole("navigation", { name: "Workspace navigation" });
-  const parent = nav.getByTitle("MariaDB", { exact: true });
-  if (await parent.getAttribute("aria-expanded") !== "true") await parent.click();
-  await nav.getByTitle("Database Browser", { exact: true }).click();
+  const navigate = async (title) => {
+    if (title !== "Home") {
+      const parent = nav.getByTitle("MariaDB", { exact: true });
+      if (await parent.getAttribute("aria-expanded") !== "true") await parent.click();
+    }
+    const target = nav.getByTitle(title, { exact: true });
+    await target.click();
+    await target.and(nav.locator('[aria-current="page"]')).waitFor();
+  };
+  await navigate("Database Browser");
   await page.getByRole("heading", { name: "Database Browser", exact: true }).waitFor();
   const coldStart = Date.now();
   await page.getByRole("button", { name: "Change Credentials", exact: true }).click();
@@ -98,9 +105,8 @@ async (page) => {
   const coldMs = Date.now() - coldStart;
   const reads = () => page.evaluate(() => window.testDatabaseBrowser.calls.filter(({ command }) => ["list_mariadb_databases", "list_mariadb_tables", "get_database_browser_metadata", "get_database_browser_rows"].includes(command)).length);
   const revisit = async () => {
-    await nav.getByTitle("Home", { exact: true }).click();
-    if (await parent.getAttribute("aria-expanded") !== "true") await parent.click();
-    await nav.getByTitle("Database Browser", { exact: true }).click();
+    await navigate("Home");
+    await navigate("Database Browser");
   };
   if (await page.getByRole("button", { name: "Edit this row", exact: true }).count()) throw new Error("Browser did not default to read-only");
   await page.getByRole("button", { name: "Next page", exact: true }).click();
@@ -200,7 +206,7 @@ async (page) => {
   await page.getByText("1-31 rows", { exact: true }).waitFor();
   const renderedCells = await page.locator('[role="tabpanel"] tbody td').count();
   if (renderedCells !== 31 * 128 || renderedCells > 4000) throw new Error(`Wide row page rendered ${renderedCells} cells; expected 3,968 within the 4,000-cell budget`);
-  await nav.getByTitle("Backups & Restore", { exact: true }).click();
+  await navigate("Backups & Restore");
   await page.getByRole("button", { name: "Test Restore", exact: true }).waitFor();
   await page.getByRole("button", { name: "Test Restore", exact: true }).click();
   await page.getByRole("heading", { name: "Isolated Restore Test", exact: true }).waitFor();
@@ -211,9 +217,9 @@ async (page) => {
   await page.getByRole("checkbox", { name: /Confirm automatic cleanup/ }).check();
   await test.click();
   await page.waitForFunction(() => Boolean(window.testDatabaseBrowser.pending));
-  await nav.getByTitle("Home", { exact: true }).click();
+  await navigate("Home");
   await page.evaluate(() => window.testDatabaseBrowser.finishRestore());
-  await nav.getByTitle("Backups & Restore", { exact: true }).click();
+  await navigate("Backups & Restore");
   await page.getByRole("heading", { name: "Restore Test Evidence", exact: true }).waitFor();
   await page.locator('section[aria-label="Restore test evidence"] summary').filter({ hasText: /passed.*Cleaned up/i }).waitFor();
   await page.evaluate(() => { window.testDatabaseBrowser.refuseTest = true; });

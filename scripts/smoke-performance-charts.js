@@ -41,10 +41,17 @@ async (page) => {
   });
   await page.reload({ waitUntil: "domcontentloaded" });
   const nav = page.getByRole("navigation", { name: "Workspace navigation" });
+  const navigate = async (title) => {
+    if (title !== "Home") {
+      const parent = nav.getByTitle("FXServer", { exact: true });
+      if (await parent.getAttribute("aria-expanded") !== "true") await parent.click();
+    }
+    const target = nav.getByTitle(title, { exact: true });
+    await target.click();
+    await target.and(nav.locator('[aria-current="page"]')).waitFor();
+  };
   const manage = async () => {
-    const parent = nav.getByTitle("FXServer", { exact: true });
-    if (await parent.getAttribute("aria-expanded") !== "true") await parent.click();
-    await nav.getByTitle("Manage Server", { exact: true }).click();
+    await navigate("Manage Server");
     await page.getByText("Performance", { exact: true }).waitFor();
   };
   await manage();
@@ -133,7 +140,7 @@ async (page) => {
     if (await page.evaluate(() => document.documentElement.scrollWidth > innerWidth + 1)) throw new Error("Charts overflow the window");
   }
 
-  await nav.getByTitle("Home", { exact: true }).click();
+  await navigate("Home");
   await manage();
   await page.getByTitle("Show the last 1h", { exact: true }).click();
   const counts = await sampleCounts();

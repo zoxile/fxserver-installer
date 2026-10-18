@@ -93,6 +93,10 @@ async (page) => {
     await nav.getByTitle("Profiler", { exact: true }).click();
     await page.getByRole("heading", { name: "Profiler Analyzer", exact: true }).waitFor();
   };
+  const openTaskCenter = async () => {
+    await page.getByTitle(/^Task Center/).click();
+    await page.getByRole("heading", { name: "Task Center", exact: true }).waitFor();
+  };
   await openProfiler();
   check(await page.evaluate(() => !window.profilerTest.calls.some((call) => call.command === "capture_fxserver_profile")), "Capture started without explicit consent");
   const controls = page.getByRole("region", { name: "Guided performance recording" });
@@ -116,8 +120,7 @@ async (page) => {
   await waitPending();
   await controls.getByText("Recording: 12 / 100 frames", { exact: true }).waitFor();
   check(await controls.getByLabel("Frames", { exact: true }).isDisabled(), "Frame count was editable during capture");
-  await page.getByTitle(/^Task Center/).click();
-  await page.getByRole("heading", { name: "Task Center", exact: true }).waitFor();
+  await openTaskCenter();
   await page.getByText("Record FXServer performance", { exact: true }).waitFor();
   await page.getByText("1 running", { exact: true }).waitFor();
   check(await page.evaluate(() => window.profilerTest.active !== null), "Navigation cancelled the recording");
@@ -141,7 +144,7 @@ async (page) => {
   const baseline = (await baselineOption.innerText()).trim();
   await baselineOption.click();
   check(await selectedCapture() === baseline, "Capture selection did not change the viewer");
-  await page.getByTitle(/^Task Center/).click();
+  await openTaskCenter();
   await openProfiler();
   check(await selectedCapture() === baseline, "Navigation lost selected capture");
 
@@ -186,7 +189,7 @@ async (page) => {
   await waitPending();
   await page.evaluate(() => window.profilerTest.complete());
   await controls.getByText("Analyzing capture", { exact: true }).waitFor();
-  await page.getByTitle(/^Task Center/).click();
+  await openTaskCenter();
   await page.getByText("1 running", { exact: true }).waitFor();
   check(await page.evaluate(() => window.profilerTest.workersActive === 1), "Navigation disposed a guided background analysis");
   await openProfiler();
@@ -204,7 +207,7 @@ async (page) => {
   check(await page.evaluate(() => window.profilerTest.workersActive === 0), "Cancelled import worker remained active");
   await upload();
   await page.getByRole("button", { name: "Cancel profiler import", exact: true }).waitFor();
-  await page.getByTitle(/^Task Center/).click();
+  await openTaskCenter();
   await page.waitForFunction(() => window.profilerTest.workersActive === 0);
   await openProfiler();
   check(await selectedCapture() === selectedBeforeImport, "Disposed import changed the viewer");

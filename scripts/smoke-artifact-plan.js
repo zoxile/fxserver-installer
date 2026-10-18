@@ -58,12 +58,17 @@ async (page) => {
   });
   await page.reload({ waitUntil: "domcontentloaded" });
   const nav = page.getByRole("navigation", { name: "Workspace navigation" });
-  const navigate = async (parent, child) => {
-    const toggle = nav.getByTitle(parent, { exact: true });
-    if (await toggle.getAttribute("aria-expanded") !== "true") await toggle.click();
-    await nav.getByTitle(child, { exact: true }).click();
+  const navigate = async (title, section) => {
+    if (section) {
+      const toggle = nav.getByTitle(section, { exact: true });
+      if (await toggle.getAttribute("aria-expanded") !== "true") await toggle.click();
+    }
+    const target = nav.getByTitle(title, { exact: true });
+    await target.click();
+    // Click completion can precede the route's animation-frame commit.
+    await target.and(nav.locator('[aria-current="page"]')).waitFor();
   };
-  await navigate("Artifacts", "Install Artifact");
+  await navigate("Install Artifact", "Artifacts");
   const browser = page.getByRole("region", { name: "Official Windows artifact browser" });
   await browser.getByText("60 builds", { exact: false }).waitFor();
   await browser.getByRole("button", { name: "Next artifact page" }).click();
@@ -84,7 +89,7 @@ async (page) => {
   if (await browser.getByText("Healthy (JG)", { exact: true }).count()) throw new Error("Unknown filter contains healthy builds");
   await browser.getByRole("button", { name: "Refresh artifact catalog" }).click();
 
-  await navigate("FXServer", "Resource Manager");
+  await navigate("Resource Manager", "FXServer");
   const resource = (name) => page.locator("article").filter({ has: page.getByText(name, { exact: true }) });
   await resource("alpha").waitFor();
   await resource("gamma").getByRole("button", { name: "Pin gamma", exact: true }).click();
@@ -107,15 +112,15 @@ async (page) => {
     await review.getByRole("checkbox", { name: "Acknowledge dependency impact", exact: true }).check();
     await review.getByRole("button", { name: "Confirm Queue Update", exact: true }).click();
   }
-  await nav.getByTitle("Home", { exact: true }).click();
-  await navigate("FXServer", "Resource Manager");
+  await navigate("Home");
+  await navigate("Resource Manager", "FXServer");
   const queue = page.getByRole("region", { name: "Reviewed resource update queue" });
   await queue.getByText("2 ready / idle", { exact: true }).waitFor();
   if (await page.evaluate(() => window.artifactPlanFixture.calls.filter((entry) => entry.command === "discard_resource_preview").length)) throw new Error("Navigation discarded queued previews");
   await queue.getByRole("button", { name: "Apply Reviewed", exact: true }).click();
   await page.waitForFunction(() => !!window.artifactPlanFixture.pending);
-  await nav.getByTitle("Home", { exact: true }).click();
-  await navigate("FXServer", "Resource Manager");
+  await navigate("Home");
+  await navigate("Resource Manager", "FXServer");
   await queue.getByText("applying: Applying reviewed archive", { exact: true }).waitFor();
   await page.evaluate(() => { window.artifactPlanFixture.pending.reject(new Error("Fixture failure; no files changed")); window.artifactPlanFixture.pending = null; });
   await queue.getByText("1 ready / paused", { exact: true }).waitFor();
