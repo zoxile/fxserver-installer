@@ -17,7 +17,10 @@ use crate::{
     },
     services::mariadb,
 };
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyEventKind,
+    KeyModifiers,
+};
 use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Color, Style, Stylize},
@@ -142,6 +145,16 @@ impl App {
             started: Instant::now(),
         }
     }
+    fn paste(&mut self, value: &str) {
+        if self.edit.is_none() || self.confirm.is_some() || self.quitting {
+            return;
+        }
+        if let Err(error) = self.input.paste(value) {
+            self.notice = error.into();
+            self.error = true;
+        }
+    }
+
     fn credentials(&self) -> MariaDBCredentials {
         MariaDBCredentials {
             host: self.settings.database_host.clone(),
@@ -599,6 +612,7 @@ fn worker(runtime: Runtime, jobs: Receiver<Job>, updates: SyncSender<Update>) {
 struct TerminalGuard;
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
+        let _ = crossterm::execute!(io::stdout(), DisableBracketedPaste);
         ratatui::restore();
     }
 }
@@ -637,6 +651,7 @@ pub(super) fn run(config: Settings, path: PathBuf, runtime: Runtime) -> Result<(
     }
     let mut terminal = ratatui::try_init().map_err(|e| e.to_string())?;
     let guard = TerminalGuard;
+    crossterm::execute!(io::stdout(), EnableBracketedPaste).map_err(|e| e.to_string())?;
     let (send, jobs) = mpsc::sync_channel(1);
     let (updates, receive) = mpsc::sync_channel(16);
     let worker = thread::spawn(move || worker(runtime, jobs, updates));
@@ -661,6 +676,10 @@ pub(super) fn run(config: Settings, path: PathBuf, runtime: Runtime) -> Result<(
             match event::read().map_err(|e| e.to_string())? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
                     app.key(key, &send);
+                    dirty = true;
+                }
+                Event::Paste(value) => {
+                    app.paste(&value);
                     dirty = true;
                 }
                 Event::Resize(_, _) => dirty = true,
@@ -871,10 +890,15 @@ fn draw(frame: &mut Frame, app: &mut App) {
             Edit::Setting(i) => FIELDS[*i],
             Edit::SqlFile => "SQL file path",
         };
-        let input = Block::default()
+        let mut input = Block::default()
             .borders(Borders::ALL)
             .title(label)
             .border_style(Style::new().fg(Color::Cyan));
+        if app.error {
+            input = input
+                .border_style(Style::new().fg(Color::Red))
+                .title_bottom(app.notice.as_str());
+        }
         let inner = input.inner(layout[3]);
         frame.render_widget(input, layout[3]);
         let (value, cursor) = app
@@ -959,6 +983,26 @@ fn render_output<'a>(
 mod tests {
     use super::*;
     use ratatui::{backend::TestBackend, Terminal};
+
+    #[test]
+    fn paste_never_submits_commands_or_accepts_a_confirmation() {
+        let mut app = App::new(Settings::default(), PathBuf::new());
+        app.paste("sxq");
+        assert!(app.input.value.is_empty());
+        assert!(!app.quitting);
+        app.edit = Some(Edit::Query);
+        app.paste("SELECT 'hello';");
+        assert_eq!(app.input.value, "SELECT 'hello';");
+        app.paste("\ny\n");
+        assert_eq!(app.input.value, "SELECT 'hello';");
+        assert!(app.confirm.is_none());
+        assert!(!app.busy);
+        app.edit = None;
+        app.require_confirmation("Stop?".into(), Job::Stop);
+        app.paste("y");
+        assert!(app.confirm.is_some());
+        assert!(!app.busy);
+    }
     #[test]
     fn text_editing_uses_characters_and_visible_cell_width() {
         let mut input = Input::new("a界b".into());

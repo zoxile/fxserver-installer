@@ -36,6 +36,18 @@ impl Input {
                 .map_or(0, char::len_utf8)
     }
 
+    pub(super) fn paste(&mut self, value: &str) -> Result<(), &'static str> {
+        if value.chars().any(char::is_control) {
+            return Err("Paste one line at a time. Use SQL File for multiline SQL.");
+        }
+        if self.value.len().saturating_add(value.len()) > 8192 {
+            return Err("Input is limited to 8 KiB.");
+        }
+        self.value.insert_str(self.cursor, value);
+        self.cursor += value.len();
+        Ok(())
+    }
+
     pub(super) fn key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {

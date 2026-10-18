@@ -58,6 +58,8 @@ def smoke(binary: Path, config: Path) -> None:
 
     try:
         wait_for(b"FXServer Installer")
+        assert b"\x1b[?2004h" in output, "Bracketed paste was not enabled"
+        os.write(master, b"\x1b[200~q\x1b[201~")
         os.write(master, b"\t" * 6)
         wait_for(b"password")
         os.write(master, b"q")
