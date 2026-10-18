@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { platformLabel } from "$lib/core/platform.svelte";
 	import AlertTriangleIcon from "@lucide/svelte/icons/alert-triangle";
 	import ArchiveIcon from "@lucide/svelte/icons/archive";
 	import CheckCircle2Icon from "@lucide/svelte/icons/check-circle-2";
@@ -70,7 +71,7 @@
 				</div>
 				<div class="min-w-0">
 					<Card.Title>Installed Artifact</Card.Title>
-					<Card.Description class="mt-1">Current Windows artifact health for the selected server folder.</Card.Description>
+					<Card.Description class="mt-1">Current {platformLabel()} artifact health for the selected server folder.</Card.Description>
 				</div>
 			</div>
 			<Button variant="ghost" size="icon-sm" onclick={refresh} disabled={busy} title="Refresh installed artifact status">

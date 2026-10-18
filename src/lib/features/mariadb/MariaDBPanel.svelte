@@ -8,6 +8,7 @@
 </script>
 
 <script lang="ts">
+	import { platform } from "$lib/core/platform.svelte";
 	import { onMount, tick } from "svelte";
 	import LoaderCircleIcon from "@lucide/svelte/icons/loader-circle";
 	import ConnectionCard from "./ConnectionCard.svelte";
@@ -79,8 +80,8 @@
 		allowRemoteRootAccess: false,
 		createAnonymousUser: false,
 		skipNetworking: false,
-		optimizeForTransactions: true,
-		useUtf8: true,
+		optimizeForTransactions: platform.os === "windows",
+		useUtf8: platform.os === "windows",
 		pageSize: "",
 		bufferPoolSize: "",
 		installHeidiSql: false,
@@ -156,13 +157,13 @@
 
 	async function install() {
 		invalidateDatabaseSession();
-		setStage(`Preparing MariaDB ${installOptions.version ?? DEFAULT_MARIADB_SERIES} package. Approve the Windows administrator prompt if it appears.`);
+		setStage(`Preparing MariaDB ${installOptions.version ?? DEFAULT_MARIADB_SERIES} package. ${platform.os === "linux" ? "System administrator authorization may be required." : "Approve the Windows administrator prompt if it appears."}`);
 		const result = await runTask(() => installMariaDB(installOptions), "MariaDB installer completed.");
 		if (result !== undefined) {
 			setStage("Installer finished. Verifying MariaDB service and package details.");
 			await refreshStatus(true);
 			await refreshPackageInfo();
-			message = status?.installed ? "MariaDB installer completed and the installation was detected." : result;
+			message = platform.os === "linux" ? result : status?.installed ? "MariaDB installer completed and the installation was detected." : result;
 		}
 		setStage("");
 	}
@@ -175,7 +176,7 @@
 			return;
 		}
 
-		setStage("Preparing MariaDB uninstall. Windows will ask for administrator permission; press Yes to remove the service while preserving databases and data files.");
+		setStage(platform.os === "linux" ? "Preparing MariaDB package removal. System administrator authorization may be required; database files are preserved." : "Preparing MariaDB uninstall. Windows will ask for administrator permission; press Yes to remove the service while preserving databases and data files.");
 		invalidateDatabaseSession();
 		const result = await runTask(() => uninstallMariaDB(), "MariaDB uninstalled.");
 		if (result !== undefined) {
@@ -194,7 +195,7 @@
 	async function update() {
 		if (!status?.installed) return;
 		invalidateDatabaseSession();
-		setStage(`Preparing MariaDB update to ${packageInfo?.latestVersion ?? "the recommended version"}. Approve the Windows administrator prompt if it appears.`);
+		setStage(`Preparing MariaDB update to ${packageInfo?.latestVersion ?? "the recommended version"}. ${platform.os === "linux" ? "System administrator authorization may be required." : "Approve the Windows administrator prompt if it appears."}`);
 		const result = await runTask(() => updateMariaDB(), "MariaDB update completed.");
 		if (result !== undefined) {
 			setStage("Update finished. Verifying MariaDB status and package details.");
@@ -372,7 +373,7 @@
 		<div>
 			<p class="text-xs font-semibold tracking-wide text-muted-foreground uppercase">MariaDB</p>
 			<h1 class="mt-2 text-3xl font-semibold tracking-normal text-foreground">Manage MariaDB</h1>
-			<p class="mt-2 max-w-2xl text-sm text-muted-foreground">Install MariaDB, inspect the local Windows service, and manage database users.</p>
+			<p class="mt-2 max-w-2xl text-sm text-muted-foreground">Install MariaDB, inspect the local {platform.os === "linux" ? "systemd" : "Windows"} service, and manage database users.</p>
 		</div>
 		<div class="inline-flex items-center gap-2 rounded-sm border border-border bg-card px-3 py-2 text-xs text-muted-foreground">
 			{#if busy}

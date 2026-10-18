@@ -1,4 +1,5 @@
 <script lang="ts">
+    import { platform } from "$lib/core/platform.svelte";
     import { onDestroy, untrack } from "svelte";
     import HistoryIcon from "@lucide/svelte/icons/history";
     import RefreshCwIcon from "@lucide/svelte/icons/refresh-cw";
@@ -32,6 +33,7 @@
     $effect(() => { currentContent; selectedId; revealed; reviewed = false; });
 
     async function refresh() {
+        if (!platform.secureStorageSupported) return;
         const id = ++generation;
         busy = true;
         selected = null;
@@ -73,10 +75,10 @@
 <section class="min-w-0 space-y-3 border-t border-border pt-4" aria-label="Configuration history">
     <div class="flex flex-wrap items-center justify-between gap-2">
         <h3 class="flex items-center gap-2 text-sm font-semibold"><HistoryIcon class="size-4" />Configuration History</h3>
-        <Button variant="ghost" size="icon-sm" title="Refresh history" aria-label="Refresh history" onclick={refresh} disabled={busy || disabled || restoring}><RefreshCwIcon /></Button>
+        <Button variant="ghost" size="icon-sm" title="Refresh history" aria-label="Refresh history" onclick={refresh} disabled={!platform.secureStorageSupported || busy || disabled || restoring}><RefreshCwIcon /></Button>
     </div>
     {#if error}<Notice tone="error" message={error} onDismiss={() => error = ""} />{/if}
-    <p class="text-xs text-muted-foreground">Encrypted on this Windows account. Up to 20 versions / 4 MiB per file. Restore requires FXServer to be stopped.</p>
+    <p class="text-xs text-muted-foreground">{platform.secureStorageSupported ? "Encrypted for your operating system account. Up to 20 versions / 4 MiB per file. Restore requires FXServer to be stopped." : "Encrypted configuration history requires secure storage. Enable an unlocked system keyring before saving or restoring configurations."}</p>
     {#if versions.length}
         <Select.Root type="single" value={selectedId} onValueChange={choose} disabled={busy || disabled || restoring}>
             <Select.Trigger class="w-full min-w-0" aria-label="Configuration version"><span class="truncate">{selected ? label(selected.version) : "Select a version"}</span></Select.Trigger>
@@ -89,5 +91,5 @@
             <label class="flex items-center gap-2 text-xs"><Checkbox bind:checked={reviewed} disabled={!revealed || hasDraft || restoring} />I reviewed this file replacement.</label>
             <Button size="sm" variant="outline" onclick={restore} disabled={!reviewed || !revealed || hasDraft || disabled || restoring || selected.content === currentContent}><RotateCcwIcon />{restoring ? "Restoring" : "Restore selected file"}</Button>
         {/if}
-    {:else}<p class="text-xs text-muted-foreground">{busy ? "Loading versions..." : "No saved versions for this file yet."}</p>{/if}
+    {:else if platform.secureStorageSupported}<p class="text-xs text-muted-foreground">{busy ? "Loading versions..." : "No saved versions for this file yet."}</p>{/if}
 </section>

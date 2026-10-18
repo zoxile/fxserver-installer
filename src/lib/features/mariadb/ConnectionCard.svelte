@@ -7,6 +7,7 @@
 	import PasswordInput from "$lib/components/ui/password-input.svelte";
 	import { Checkbox } from "$lib/components/ui/checkbox/index.js";
 	import { databaseSession, setRememberDatabaseLogin } from "$lib/core/databaseSession.svelte";
+	import { platform } from "$lib/core/platform.svelte";
 	import type { MariaDBCredentials } from "$lib/modules/mariadb";
 
 	type Props = {
@@ -59,10 +60,10 @@
 			</label>
 		</div>
 		<label class="flex items-center gap-2 text-sm">
-			<Checkbox checked={databaseSession.rememberLogin} onCheckedChange={(checked) => setRememberDatabaseLogin(checked === true, credentials)} disabled={databaseSession.restoringLogin} />
+			<Checkbox checked={platform.secureStorageSupported && databaseSession.rememberLogin} onCheckedChange={(checked) => setRememberDatabaseLogin(checked === true, credentials)} disabled={!platform.secureStorageSupported || databaseSession.restoringLogin} />
 			Remember login for this workspace
 		</label>
-		<p class="text-xs text-muted-foreground">{databaseSession.savingLogin ? "Updating saved login..." : "Saved logins are protected by your Windows account. Uncheck to forget."}</p>
+		<p class="text-xs text-muted-foreground">{!platform.secureStorageSupported ? "Secure login storage is unavailable on this platform. Credentials stay in memory for this session only." : databaseSession.savingLogin ? "Updating saved login..." : "Saved logins are protected by your operating system account. Uncheck to forget."}</p>
 		{#if databaseSession.loginError}
 			<div role="alert" class="flex items-center gap-2 text-xs text-destructive">
 				<span class="min-w-0 flex-1">{databaseSession.loginError}</span>

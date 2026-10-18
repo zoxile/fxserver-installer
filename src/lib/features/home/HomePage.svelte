@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { platform, platformLabel } from "$lib/core/platform.svelte";
 	import ArchiveIcon from "@lucide/svelte/icons/archive";
 	import CheckCircle2Icon from "@lucide/svelte/icons/check-circle-2";
 	import DatabaseIcon from "@lucide/svelte/icons/database";
@@ -41,9 +42,9 @@
 	const latestVersion = $derived(latestRelease?.version ?? "");
 	const updateAvailable = $derived(Boolean(latestRelease && compareVersions(latestRelease.version, currentVersion) > 0));
 	const projectStatus = $derived(
-		releaseError ? "Check failed" : checkingRelease ? "Checking..." : !latestRelease ? "Unknown" : updateAvailable ? `Update ${latestVersion} available` : "Up to date",
+		platform.os === "linux" ? "Source build" : releaseError ? "Check failed" : checkingRelease ? "Checking..." : !latestRelease ? "Unknown" : updateAvailable ? `Update ${latestVersion} available` : "Up to date",
 	);
-	const projectStatusTone = $derived(releaseError ? "text-red-300" : checkingRelease ? "text-muted-foreground" : updateAvailable ? "text-amber-400" : "text-emerald-400");
+	const projectStatusTone = $derived(platform.os === "linux" ? "text-muted-foreground" : releaseError ? "text-red-300" : checkingRelease ? "text-muted-foreground" : updateAvailable ? "text-amber-400" : "text-emerald-400");
 	const projectDetails = $derived([
 		{ label: "App", value: "FXServer Installer", icon: PackageIcon },
 		{ label: "Version", value: currentVersion, icon: GaugeIcon },
@@ -59,6 +60,10 @@
 		releaseError = "";
 
 		try {
+			if (platform.os === "linux") {
+				currentVersion = await getCurrentAppVersion();
+				return;
+			}
 			const [version, release] = await Promise.all([getCurrentAppVersion(), fetchLatestAppRelease(force)]);
 			currentVersion = version;
 			latestRelease = release;
@@ -71,6 +76,10 @@
 	}
 
 	function openLatestInstaller() {
+		if (platform.os === "linux") {
+			void openExternalUrl("https://github.com/zoxile/fxserver-installer/releases");
+			return;
+		}
 		const url = latestRelease?.installerUrl || latestRelease?.htmlUrl || "https://github.com/zoxile/fxserver-installer/releases/latest";
 		void openExternalUrl(url);
 	}
@@ -121,9 +130,9 @@
 					<p class="rounded-sm border border-red-400/20 bg-red-400/10 px-3 py-2 text-xs text-red-100">{releaseError}</p>
 				{/if}
 				<div class="mt-auto flex flex-wrap gap-2">
-					<Button variant={updateAvailable ? "default" : "outline"} size="sm" class="rounded-sm" onclick={openLatestInstaller} title="Open the latest installer download">
+					<Button variant={updateAvailable ? "default" : "outline"} size="sm" class="rounded-sm" onclick={openLatestInstaller} title={platform.os === "linux" ? "Open project releases" : "Open the latest installer download"}>
 						<DownloadIcon class="size-3.5" />
-						{updateAvailable ? "Update" : "Installer"}
+						{platform.os === "linux" ? "Releases" : updateAvailable ? "Update" : "Installer"}
 					</Button>
 					<Button
 						variant="outline"
@@ -156,13 +165,13 @@
 	<div class="bento-grid grid gap-4">
 		<HomeBentoCard
 			title="MariaDB"
-			description="Install, update, or uninstall MariaDB while preserving data, with visible installer stages, service controls, user grants, SQL tools, and database backups."
+			description={platform.os === "linux" ? "Manage MariaDB distribution packages, inspect the service, manage database users, run SQL, and back up databases." : "Install, update, or uninstall MariaDB while preserving data, with visible installer stages, service controls, user grants, SQL tools, and database backups."}
 			icon={DatabaseIcon}
 			size="hero"
 			className="md:[grid-area:db]"
 			kicker="Database layer"
 			highlights={[
-				"Install and update details",
+				platform.os === "linux" ? "System package management" : "Install and update details",
 				"Preserve databases",
 				"Backup warning",
 				"Service controls",
@@ -196,7 +205,7 @@
 		/>
 		<HomeBentoCard
 			title="Artifacts"
-			description="Browse official Windows builds with JG Scripts recommendations and reported issues."
+			description={`Browse official ${platformLabel()} builds with JG Scripts recommendations and reported issues.`}
 			icon={ArchiveIcon}
 			size="feature"
 			className="md:[grid-area:artifacts]"
@@ -207,12 +216,12 @@
 		/>
 		<HomeBentoCard
 			title="FXServer"
-			description="Start FXServer with TXHOST variables, send RCON commands, save the RCON password securely, and track CPU, RAM, uptime, threads, and handles."
+			description={platform.secureStorageSupported ? "Start FXServer with TXHOST variables, send RCON commands, save the RCON password securely, and track CPU, RAM, uptime, threads, and handles." : "Start FXServer with TXHOST variables, send RCON commands with session credentials, and track server performance."}
 			icon={ServerCogIcon}
 			size="wide"
 			className="md:[grid-area:server]"
 			kicker="Server core"
-			highlights={["Live console", "Resource dependencies", "Secure RCON password", "Reviewed maintenance"]}
+			highlights={["Live console", "Resource dependencies", platform.secureStorageSupported ? "Secure RCON password" : "Session RCON password", "Reviewed maintenance"]}
 			actions={[
 				{ label: "Manage", onclick: () => onNavigate("server-manage") },
 				{ label: "Resources", onclick: () => onNavigate("resource-manager") },
@@ -228,7 +237,7 @@
 			size="compact"
 			className="md:[grid-area:config]"
 			kicker="Configuration"
-			highlights={["Colored cfg editor", "Change validation", "Encrypted version history", "Permission helpers"]}
+			highlights={["Colored cfg editor", "Change validation", platform.secureStorageSupported ? "Encrypted version history" : "Configuration review", "Permission helpers"]}
 			actionLabel="Configure"
 			onclick={() => onNavigate("server-configure")}
 		/>

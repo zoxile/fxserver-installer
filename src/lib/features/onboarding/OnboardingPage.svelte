@@ -29,7 +29,7 @@
 
 	const steps: { id: string; title: string; description: string; page: PageId; action: string }[] = [
 		{ id: "mariadb", title: "Prepare MariaDB", description: "Install MariaDB, start the service, and create or validate a database user.", page: "mariadb", action: "Open MariaDB" },
-		{ id: "artifact", title: "Install FXServer artifact", description: "Download a recommended Windows artifact and choose the server folder.", page: "artifact-install", action: "Install Artifact" },
+		{ id: "artifact", title: "Install FXServer artifact", description: "Download a recommended artifact for your operating system and choose the server folder.", page: "artifact-install", action: "Install Artifact" },
 		{ id: "profile", title: "Choose txData profile", description: "Load your txAdmin profile and resolve the dataPath from config.json.", page: "server-configure", action: "Configure Server" },
 		{ id: "database-string", title: "Set database string", description: "Validate credentials, choose a database, and write the connection string into cfg.", page: "server-configure", action: "Open Connection Tools" },
 		{ id: "rcon", title: "Enable RCON", description: "Ensure rconlog and rcon_password are present before using console and resource tools.", page: "server-configure", action: "Configure RCON" },

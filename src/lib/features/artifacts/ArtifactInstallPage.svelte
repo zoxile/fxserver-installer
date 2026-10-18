@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { platformLabel, serverPathPlaceholder } from "$lib/core/platform.svelte";
 	import AlertCircleIcon from "@lucide/svelte/icons/alert-circle";
 	import CheckCircle2Icon from "@lucide/svelte/icons/check-circle-2";
 	import DownloadIcon from "@lucide/svelte/icons/download";
@@ -68,7 +69,7 @@
 			if (nextInstalled.status === "rejected") throw nextInstalled.reason;
 			if (nextMetadata.status === "rejected") throw nextMetadata.reason;
 			metadata = nextMetadata.value;
-			if (edition === "legacy") message = `Artifact ${metadata.recommendedArtifact} is ready to install for Windows.`;
+			if (edition === "legacy") message = `Artifact ${metadata.recommendedArtifact} is ready to install for ${platformLabel()}.`;
 		} catch (caught) {
 			error = caught instanceof Error ? caught.message : String(caught);
 			log("Artifact install page could not refresh metadata.", { level: "error", scope: "artifacts.install-page", detail: error });
@@ -119,12 +120,12 @@
 		}
 
 		if (!installPath.trim()) {
-			error = "Choose the FXServer folder where the Windows artifact should be extracted.";
+			error = "Choose the FXServer folder where the artifact should be extracted.";
 			return;
 		}
 
 		error = "";
-		message = "Downloading and extracting the Windows artifact. This can take a moment.";
+		message = `Downloading and extracting the ${platformLabel()} artifact. This can take a moment.`;
 		result = null;
 
 		try {
@@ -150,9 +151,9 @@
 		<div>
 			<p class="text-xs font-semibold tracking-wide text-muted-foreground uppercase">Artifacts</p>
 			<h1 class="mt-2 text-3xl font-semibold tracking-normal text-foreground">Install Artifact</h1>
-			<p class="mt-2 max-w-2xl text-sm leading-6 text-muted-foreground">Windows server artifacts for FiveM Legacy and GTAV Enhanced.</p>
+			<p class="mt-2 max-w-2xl text-sm leading-6 text-muted-foreground">{platformLabel()} server artifacts for FiveM. Enhanced builds depend on official platform availability.</p>
 		</div>
-		<Button variant="outline" onclick={refreshMetadata} disabled={busy || installing} title="Refresh the recommended Windows artifact from JG Scripts">
+		<Button variant="outline" onclick={refreshMetadata} disabled={busy || installing} title={`Refresh the recommended ${platformLabel()} artifact from JG Scripts`}>
 			<RefreshCwIcon class={busy ? "animate-spin" : undefined} />
 			Refresh
 		</Button>
@@ -169,7 +170,7 @@
 		<ToggleGroup.Item value="enhanced">Enhanced</ToggleGroup.Item>
 	</ToggleGroup.Root>
 	<div class="grid items-end gap-3 sm:grid-cols-[minmax(0,1fr)_auto]">
-		<label class="grid min-w-0 gap-2"><span class="text-xs font-medium text-muted-foreground">Install Folder</span><Input value={installPath} disabled={installing} oninput={updateInstallPath} placeholder="C:\FXServer\server" class="font-mono" /></label>
+		<label class="grid min-w-0 gap-2"><span class="text-xs font-medium text-muted-foreground">Install Folder</span><Input value={installPath} disabled={installing} oninput={updateInstallPath} placeholder={serverPathPlaceholder()} class="font-mono" /></label>
 		<Button variant="outline" onclick={chooseFolder} disabled={installing}><FolderOpenIcon />Browse</Button>
 	</div>
 	{#if edition === "enhanced"}
@@ -186,8 +187,8 @@
 						<HardDriveDownloadIcon class="size-4" />
 					</div>
 					<div>
-						<Card.Title>Windows Artifact Install</Card.Title>
-						<Card.Description>Choose the server folder and extract the latest healthy Windows build into it.</Card.Description>
+						<Card.Title>{platformLabel()} Artifact Install</Card.Title>
+						<Card.Description>Choose the server folder and extract the latest healthy {platformLabel()} build into it.</Card.Description>
 					</div>
 				</div>
 			</Card.Header>
@@ -213,18 +214,18 @@
 
 				{#if metadata}
 					<div class="rounded-sm border border-border bg-background/60 p-3">
-						<p class="text-xs font-medium text-muted-foreground">Windows Download URL</p>
-						<p class="mt-2 break-all font-mono text-xs text-muted-foreground">{metadata.windowsDownloadLink}</p>
+						<p class="text-xs font-medium text-muted-foreground">{platformLabel()} Download URL</p>
+						<p class="mt-2 break-all font-mono text-xs text-muted-foreground">{metadata.downloadLink}</p>
 					</div>
 				{/if}
 
-				<Button class="w-full rounded-sm" onclick={install} disabled={installing || busy || !metadata || !installPath.trim() || installed?.edition === "enhanced"} title="Download and extract the recommended Windows artifact">
+				<Button class="w-full rounded-sm" onclick={install} disabled={installing || busy || !metadata || !installPath.trim() || installed?.edition === "enhanced"} title={`Download and extract the recommended ${platformLabel()} artifact`}>
 					{#if installing}
 						<LoaderCircleIcon class="animate-spin" />
 						Installing...
 					{:else}
 						<DownloadIcon />
-						{installed?.installed ? "Update Windows Artifact" : "Install Windows Artifact"}
+						{installed?.installed ? `Update ${platformLabel()} Artifact` : `Install ${platformLabel()} Artifact`}
 					{/if}
 				</Button>
 			</Card.Content>

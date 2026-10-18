@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { platform } from "$lib/core/platform.svelte";
 	import ClipboardCheckIcon from "@lucide/svelte/icons/clipboard-check";
 	import DownloadIcon from "@lucide/svelte/icons/download";
 	import EyeIcon from "@lucide/svelte/icons/eye";
@@ -96,6 +97,7 @@
 	}
 
 	async function applyPatch() {
+		if (!platform.secureStorageSupported) return;
 		if (!active || !patch || !patchReviewed || !patchRevealed || patchBusy || patchContext !== context) return;
 		const reviewed = patch;
 		patchBusy = true;
@@ -176,12 +178,13 @@
 			<div class="flex items-center justify-between gap-3"><h2 class="text-base font-semibold">Review rconlog startup patch</h2><Button variant="ghost" size="icon-sm" aria-label="Discard patch" title="Discard patch" disabled={patchBusy} onclick={() => patch = null}><XIcon /></Button></div>
 			<p class="font-mono text-xs wrap-anywhere text-muted-foreground">{patch.path}</p>
 			<p class="text-xs leading-5 text-muted-foreground">Adds only <code>ensure rconlog</code>. FXServer must be stopped. Credentials and services remain unchanged. Previous content is saved to encrypted configuration history.</p>
+			{#if !platform.secureStorageSupported}<Notice tone="warn" message="Applying this patch requires encrypted history. Enable an unlocked system keyring and restart the app." />{/if}
 			<label class="flex items-center gap-2 text-xs"><Checkbox bind:checked={patchRevealed} disabled={patchBusy} />Reveal config contents, including secrets</label>
 			{#if patchRevealed}<ConfigDiff before={patch.before} after={patch.after} beforeLabel="Current file" afterLabel="Reviewed repair" />{/if}
 			<label class="flex items-center gap-2 text-xs"><Checkbox bind:checked={patchReviewed} disabled={!patchRevealed || patchBusy} />I reviewed this exact file change.</label>
 			<div class="flex flex-wrap items-center justify-between gap-3">
 				<span class="text-xs text-muted-foreground">Review expires at {new Date(patch.expiresAt * 1000).toLocaleTimeString()}</span>
-				<Button onclick={applyPatch} disabled={!patchReviewed || !patchRevealed || patchBusy}>{#if patchBusy}<LoaderCircleIcon class="animate-spin" />{:else}<FileCheck2Icon />{/if}Apply reviewed patch</Button>
+				<Button onclick={applyPatch} disabled={!platform.secureStorageSupported || !patchReviewed || !patchRevealed || patchBusy}>{#if patchBusy}<LoaderCircleIcon class="animate-spin" />{:else}<FileCheck2Icon />{/if}Apply reviewed patch</Button>
 			</div>
 		</section>
 	{/if}

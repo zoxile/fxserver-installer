@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { platform, txDataPathPlaceholder } from "$lib/core/platform.svelte";
 	import AlertCircleIcon from "@lucide/svelte/icons/alert-circle";
 	import ClipboardIcon from "@lucide/svelte/icons/clipboard";
 	import EyeIcon from "@lucide/svelte/icons/eye";
@@ -299,6 +300,7 @@
 	}
 
 	async function saveFile() {
+		if (!platform.secureStorageSupported) return;
 		if (!active || !selectedFile || !historyRequest || !dirty || saving || validating || busy || externalFile) return;
 		const generation = ++validationGeneration;
 		const snapshot = { target: { ...historyRequest }, before: selectedFile.content, after: editorContent };
@@ -318,6 +320,7 @@
 	}
 
 	async function saveReviewedFile(diffReviewed: boolean, warningsReviewed: boolean) {
+		if (!platform.secureStorageSupported) return;
 		const review = changeReview;
 		if (!active || !review || !selectedFile || saving || validating || busy || externalFile
 			|| !canSaveReview(review.report, diffReviewed, warningsReviewed)
@@ -717,7 +720,7 @@
 					</Card.Description>
 				</div>
 				<div class="grid gap-2 sm:grid-cols-[minmax(0,22rem)_auto]">
-					<Input bind:value={dataPath} onchange={handleTxDataChange} disabled={busy || saving} placeholder="C:\FiveM\txData" title="Folder containing txAdmin profile folders." class="rounded-sm font-mono text-xs" />
+					<Input bind:value={dataPath} onchange={handleTxDataChange} disabled={busy || saving} placeholder={txDataPathPlaceholder()} title="Folder containing txAdmin profile folders." class="rounded-sm font-mono text-xs" />
 					<Button variant="outline" onclick={chooseTxDataFolder} disabled={busy || saving} title="Browse for the txData folder">
 						<FolderOpenIcon />
 						Browse
@@ -930,7 +933,7 @@
 								<Undo2Icon />
 								Revert
 							</Button>
-							<Button onclick={saveFile} disabled={!selectedFile || !dirty || saving || validating || busy || Boolean(externalFile)} title="Validate and review this config change">
+							<Button onclick={saveFile} disabled={!platform.secureStorageSupported || !selectedFile || !dirty || saving || validating || busy || Boolean(externalFile)} title="Validate and review this config change">
 								<SaveIcon />
 								{saving ? "Saving" : validating ? "Validating" : "Save"}
 							</Button>
@@ -951,6 +954,7 @@
 							<span class="rounded-sm border border-emerald-400/30 bg-emerald-400/10 px-2 py-1 text-emerald-100">rconlog line {rconlogLineInSelectedFile}</span>
 						{/if}
 					</div>
+					{#if !platform.secureStorageSupported}<Notice tone="warn" message="Saving configuration requires encrypted history. Enable an unlocked system keyring and restart the app; you can still inspect and edit a draft here." />{/if}
 					{#if changeReview}
 						<ConfigChangeReviewPanel review={changeReview} {saving} onSave={saveReviewedFile} onCancel={() => changeReview = null} />
 					{/if}

@@ -2,11 +2,12 @@ import { mount } from "svelte";
 import "@fontsource/jetbrains-mono/400.css";
 import "./app.css";
 import App from "./App.svelte";
+import { initializePlatform } from "./lib/core/platform.svelte";
 
 document.documentElement.classList.add("dark");
 
-const app = mount(App, {
+const app = initializePlatform().then(() => mount(App, {
 	target: document.getElementById("app")!,
-});
+}));
 
 export default app;

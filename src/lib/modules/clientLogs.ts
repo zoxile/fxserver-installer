@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { platform } from "$lib/core/platform.svelte";
 
 export interface ClientLogRequest {
 	directory?: string | null;
@@ -27,6 +28,7 @@ function hasTauriRuntime() {
 }
 
 export async function readClientLogs(request: ClientLogRequest) {
+	if (!platform.clientLogsSupported) throw new Error("FiveM client log discovery is unavailable on this platform.");
 	if (!hasTauriRuntime()) {
 		return {
 			directory: "%LOCALAPPDATA%\\FiveM\\FiveM.app\\logs",

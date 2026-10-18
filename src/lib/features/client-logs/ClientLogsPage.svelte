@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { platform } from "$lib/core/platform.svelte";
 	import ClipboardIcon from "@lucide/svelte/icons/clipboard";
 	import FileTextIcon from "@lucide/svelte/icons/file-text";
 	import FolderOpenIcon from "@lucide/svelte/icons/folder-open";
@@ -54,6 +55,7 @@
 	const pathPreview = $derived(result?.path ?? `${displayedDirectory}\\${selectedFile || "latest log file"}`);
 
 	onMount(() => {
+		if (!platform.clientLogsSupported) return;
 		void refresh(false);
 		refreshTimer = window.setInterval(() => {
 			if (autoRefresh && !busy) {
@@ -67,6 +69,7 @@
 	});
 
 	async function refresh(showNotice = true) {
+		if (!platform.clientLogsSupported) return;
 		busy = true;
 		if (showNotice) notice = "";
 
@@ -170,7 +173,7 @@
 		<div>
 			<p class="text-xs font-semibold tracking-wide text-muted-foreground uppercase">Tools</p>
 			<h1 class="mt-2 text-3xl font-semibold tracking-normal text-foreground">Client Logs</h1>
-			<p class="mt-2 max-w-2xl text-sm text-muted-foreground">Inspect FiveM client logs from the local FiveM.app logs folder as they update.</p>
+			<p class="mt-2 max-w-2xl text-sm text-muted-foreground">{platform.clientLogsSupported ? "Inspect FiveM client logs from the local FiveM.app logs folder as they update." : "FiveM client log discovery is unavailable on this platform. Server Logs remain available for your FXServer workspace."}</p>
 		</div>
 		<div class="inline-flex items-center gap-2 rounded-sm border border-border bg-card px-3 py-2 text-xs text-muted-foreground">
 			<ScrollTextIcon class="size-3.5" />
@@ -178,6 +181,7 @@
 		</div>
 	</div>
 
+	{#if platform.clientLogsSupported}
 	<Card.Root class="overflow-hidden rounded-sm border-border bg-card shadow-sm">
 		<Card.Header class="border-b border-border pb-4">
 			<div class="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
@@ -280,4 +284,5 @@
 			</div>
 		</Card.Content>
 	</Card.Root>
+	{/if}
 </section>

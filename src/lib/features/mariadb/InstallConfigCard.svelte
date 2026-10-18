@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { platform } from "$lib/core/platform.svelte";
 	import DownloadIcon from "@lucide/svelte/icons/download";
 	import SlidersHorizontalIcon from "@lucide/svelte/icons/sliders-horizontal";
 	import * as Card from "$lib/components/ui/card/index.js";
@@ -25,24 +26,26 @@
 	let versionsError = $state("");
 	let preset = $state("recommended");
 	let requestId = 0;
-	let intendedVersion = $derived(installOptions.version?.split(".").length === 3 ? installOptions.version : releases[0]?.version);
+	let intendedVersion = $derived(platform.os === "linux"
+		? installOptions.version && installOptions.version !== series ? installOptions.version : releases[0]?.version
+		: installOptions.version?.split(".").length === 3 ? installOptions.version : releases[0]?.version);
 	let validSelection = $derived(!!intendedVersion && releases.some((release) => release.version === intendedVersion));
 	const presetItems = [
 		{ value: "recommended", label: "Recommended LTS (11.4)" },
 		{ value: "legacy", label: "Legacy application (10.11 LTS)" },
 		{ value: "custom", label: "Custom" },
 	];
-	let seriesItems = $derived(seriesList.length ? seriesList.map((item) => ({ value: item.series, label: `${item.series} (until ${item.eol})` })) : [{ value: series, label: series }]);
+	let seriesItems = $derived(seriesList.length ? seriesList.map((item) => ({ value: item.series, label: item.eol ? `${item.series} (until ${item.eol})` : `${item.series} (${item.support})` })) : [{ value: series, label: series }]);
 	let releaseItems = $derived([
 		{ value: series, label: `Latest in ${series}${releases[0] ? ` (${releases[0].version})` : ""}` },
-		...releases.map((release) => ({ value: release.version, label: `${release.version} (${release.date})` })),
+		...releases.map((release) => ({ value: release.version, label: release.date ? `${release.version} (${release.date})` : release.version })),
 	]);
 
 	onMount(() => { void loadVersions(true); return () => { requestId += 1; }; });
 
 	async function loadVersions(loadSeries = false) {
 		const id = ++requestId;
-		const selectedSeries = series;
+		let selectedSeries = series;
 		loadingVersions = true;
 		versionsError = "";
 		releases = [];
@@ -51,11 +54,16 @@
 				const values = await listMariaDBSeries();
 				if (id !== requestId) return;
 				seriesList = values;
+				if (platform.os === "linux" && !values.some((item) => item.series === selectedSeries) && values[0]) {
+					selectedSeries = values[0].series;
+					series = selectedSeries;
+					installOptions.version = selectedSeries;
+				}
 			}
 			const values = await listMariaDBReleases(selectedSeries);
 			if (id !== requestId) return;
 			releases = values;
-			if (!values.length) versionsError = "No supported Windows x64 releases are available for this series.";
+			if (!values.length) versionsError = platform.os === "linux" ? "No releases are available in the configured distribution package cache for this series." : "No supported Windows x64 releases are available for this series.";
 		} catch (caught) {
 			if (id === requestId) versionsError = String(caught);
 		} finally {
@@ -103,7 +111,7 @@
 				<div class="min-w-0">
 					<Card.Title>Install Configuration</Card.Title>
 					<Card.Description>
-						MariaDB {intendedVersion || `${series} series`} - official Windows x64 MSI.
+						MariaDB {intendedVersion || `${series} series`} - {platform.os === "linux" ? "signed distribution package" : "official Windows x64 MSI"}.
 					</Card.Description>
 				</div>
 			</div>
@@ -116,6 +124,7 @@
 
 	<Card.Content class="space-y-4">
 		<div class="grid gap-3 md:grid-cols-3">
+			{#if platform.os === "windows"}
 			<div class="grid min-w-0 gap-1.5 text-sm">
 				<label for="mariadb-preset">Preset</label>
 				<Select.Root type="single" value={preset} items={presetItems} disabled={busy || loadingVersions} onValueChange={applyPreset}>
@@ -123,10 +132,11 @@
 					<Select.Content>{#each presetItems as item}<Select.Item value={item.value} label={item.label}>{item.label}</Select.Item>{/each}</Select.Content>
 				</Select.Root>
 			</div>
+			{/if}
 			<div class="grid min-w-0 gap-1.5 text-sm">
-				<label for="mariadb-series">Supported LTS Series</label>
+				<label for="mariadb-series">{platform.os === "linux" ? "Available Series" : "Supported LTS Series"}</label>
 				<Select.Root type="single" value={series} items={seriesItems} disabled={busy || loadingVersions} onValueChange={(value) => { preset = "custom"; chooseSeries(value); }}>
-					<Select.Trigger id="mariadb-series" aria-label="Supported LTS Series" class="w-full min-w-0"><span class="truncate">{seriesItems.find((item) => item.value === series)?.label || series}</span></Select.Trigger>
+					<Select.Trigger id="mariadb-series" aria-label={platform.os === "linux" ? "Available Series" : "Supported LTS Series"} class="w-full min-w-0"><span class="truncate">{seriesItems.find((item) => item.value === series)?.label || series}</span></Select.Trigger>
 					<Select.Content>{#each seriesItems as item}<Select.Item value={item.value} label={item.label}>{item.label}</Select.Item>{/each}</Select.Content>
 				</Select.Root>
 			</div>
@@ -155,10 +165,11 @@
 
 		{#if busy && installStage}
 			<p class="rounded-sm border border-primary/30 bg-primary/10 px-3 py-2 text-xs text-primary">
-				If Windows asks for administrator permission, press Yes to allow the MariaDB MSI to register the service.
+				{platform.os === "linux" ? "Package actions require system administrator authorization. No repository or module stream will be added." : "If Windows asks for administrator permission, press Yes to allow the MariaDB MSI to register the service."}
 			</p>
 		{/if}
 
+		{#if platform.os === "windows"}
 		<div class="grid gap-3 md:grid-cols-3">
 			<label class="grid gap-1.5">
 				<span class="text-xs font-medium text-muted-foreground">Root Password</span>
@@ -220,9 +231,12 @@
 				Skip networking disables TCP/IP. The service can install and run, but this app's MariaDB connection tools expect localhost TCP access.
 			</p>
 		{/if}
+		{:else}
+			<p class="text-xs text-muted-foreground">Distribution defaults only: mariadb service, port 3306, and /var/lib/mysql. No root password is set or validated. Configure a dedicated database login separately; socket-only root authentication is not a TCP login.</p>
+		{/if}
 
 		<p class="rounded-sm border border-border bg-background/70 px-3 py-2 text-xs text-muted-foreground">
-			Preserved databases require a known version in the same series and an equal or newer server. Existing passwords remain unchanged. Cross-series changes require a backed-up migration.
+			{platform.os === "linux" ? "Installation refuses a non-empty or unreadable /var/lib/mysql directory. Preserved-data reinstalls and cross-series migrations must be managed externally after an independent backup. Package scripts may initialize, start, or restart MariaDB." : "Preserved databases require a known version in the same series and an equal or newer server. Existing passwords remain unchanged. Cross-series changes require a backed-up migration."}
 		</p>
 	</Card.Content>
 </Card.Root>

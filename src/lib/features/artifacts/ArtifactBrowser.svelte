@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { artifactListingUrl, platformLabel } from "$lib/core/platform.svelte";
 	import { onMount } from "svelte";
 	import { Dialog } from "bits-ui";
 	import ChevronLeftIcon from "@lucide/svelte/icons/chevron-left";
@@ -57,11 +58,11 @@
 	}
 </script>
 
-<section class="min-w-0 space-y-4 border-t border-border pt-6" aria-label="Official Windows artifact browser">
+<section class="min-w-0 space-y-4 border-t border-border pt-6" aria-label={`Official ${platformLabel()} artifact browser`}>
 	<div class="flex flex-wrap items-center justify-between gap-3">
-		<h2 class="text-lg font-semibold">Official Windows Builds</h2>
+		<h2 class="text-lg font-semibold">Official {platformLabel()} Builds</h2>
 		<div class="flex gap-2">
-			<Button variant="outline" size="sm" onclick={() => openExternalUrl("https://docs.fivem.net/docs/server-download/?platform=legacy&os=windows")}><ExternalLinkIcon />Official Listing</Button>
+			<Button variant="outline" size="sm" onclick={() => openExternalUrl(artifactListingUrl())}><ExternalLinkIcon />Official Listing</Button>
 			<Button variant="outline" size="icon" title="Refresh official builds and JG issue metadata" aria-label="Refresh artifact catalog" disabled={loading || disabled} onclick={() => refresh(true)}><RefreshCwIcon class={loading ? "animate-spin" : undefined} /></Button>
 		</div>
 	</div>
@@ -106,7 +107,7 @@
 	<Dialog.Portal>
 		<Dialog.Overlay class="fixed inset-0 z-[119] bg-black/65" />
 		<Dialog.Content class="fixed top-1/2 left-1/2 z-[120] max-h-[85vh] w-[calc(100vw-2rem)] max-w-lg -translate-x-1/2 -translate-y-1/2 space-y-4 overflow-y-auto rounded-md border border-border bg-background p-5 shadow-xl">
-			<div class="flex items-start justify-between gap-3"><Dialog.Title class="text-lg font-semibold">Install Windows Build {selected?.version}</Dialog.Title><Button variant="ghost" size="icon" title="Cancel install" aria-label="Cancel install" onclick={() => (open = false)}><XIcon /></Button></div>
+			<div class="flex items-start justify-between gap-3"><Dialog.Title class="text-lg font-semibold">Install {platformLabel()} Build {selected?.version}</Dialog.Title><Button variant="ghost" size="icon" title="Cancel install" aria-label="Cancel install" onclick={() => (open = false)}><XIcon /></Button></div>
 			<Dialog.Description class="break-all text-sm text-muted-foreground">Artifact files will be replaced in {selectedDestination}. Stop FXServer and txAdmin first. Keep an independent backup.</Dialog.Description>
 			{#if selected?.issues.length}<Notice tone="error" title="Known issues reported by JG Scripts" message={selected.issues.map((issue) => issue.reason).join("\n")} />
 			{:else if selected?.health !== "healthy" || catalog?.stale}<Notice tone="warn" title="Health unknown" message="This build is not a verified current JG recommendation. An empty issue list does not establish that it is healthy." />{/if}

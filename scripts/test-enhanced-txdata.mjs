@@ -73,6 +73,7 @@ globalThis.enhancedTest.track = async (command, label, action) => {
 };
 globalThis.enhancedTest.invoke = () => new Promise((resolve) => { finishInstall = resolve; });
 const artifact = await import(build("modules/artifact.ts", {
+  "$lib/core/platform.svelte": url('export const platform = { os: "windows", arch: "x86_64", artifactPlatform: "windows", clientLogsSupported: true, secureStorageSupported: true }; export const initializePlatform = async () => platform; export const platformLabel = () => "Windows";'),
   "$lib/core/logger.svelte": logger,
   "$lib/core/paths.svelte": url("export const getInstallPath = () => 'C:/fixture/artifacts';"),
   "$lib/core/tasks.svelte": url("export const taskInvoke = () => {}; export const trackTask = (...args) => globalThis.enhancedTest.track(...args);"),

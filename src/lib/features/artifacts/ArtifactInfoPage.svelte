@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { platformLabel } from "$lib/core/platform.svelte";
 	import AlertCircleIcon from "@lucide/svelte/icons/alert-circle";
 	import ArchiveIcon from "@lucide/svelte/icons/archive";
 	import CheckCircle2Icon from "@lucide/svelte/icons/check-circle-2";
@@ -77,7 +78,7 @@
 			<p class="text-xs font-semibold tracking-wide text-muted-foreground uppercase">Artifacts</p>
 			<h1 class="mt-2 text-3xl font-semibold tracking-normal text-foreground">Artifact Information</h1>
 			<p class="mt-2 max-w-2xl text-sm leading-6 text-muted-foreground">
-				Inspect the Windows FXServer artifact JG Scripts currently considers healthy, plus known versions and ranges with reported issues.
+				Inspect the {platformLabel()} FXServer artifact JG Scripts currently considers healthy, plus known versions and ranges with reported issues.
 			</p>
 		</div>
 		<div class="flex flex-wrap gap-2">
@@ -106,13 +107,13 @@
 				tone={health.urgency === "needed" ? "error" : health.urgency === "recommended" ? "warn" : health.urgency === "none" ? "success" : "info"}
 			/>
 			<ArtifactStatCard
-				label="Healthy Windows Build"
+				label={`Healthy ${platformLabel()} Build`}
 				value={metadata.recommendedArtifact}
 				description={recommendedIsFlagged ? "This build appears in the reported issue list." : "Latest artifact with no reported issues according to JG Scripts."}
 				icon={ShieldCheckIcon}
 				tone={recommendedIsFlagged ? "warn" : "success"}
 			/>
-			<ArtifactStatCard label="Platform" value="Windows" description="Linux artifacts are intentionally hidden until the app supports Linux installs." icon={MonitorDownIcon} tone="info" />
+			<ArtifactStatCard label="Platform" value={platformLabel()} description="Artifacts match the operating system running this app." icon={MonitorDownIcon} tone="info" />
 			<ArtifactStatCard
 				label="Reported Issues"
 				value={String(metadata.brokenArtifacts.length)}
@@ -128,7 +129,7 @@
 			></div>
 			<Card.Header class="border-b border-border pb-4">
 				<Card.Title>Installed Artifact Status</Card.Title>
-				<Card.Description>Compared against the current healthy Windows recommendation from JG Scripts.</Card.Description>
+				<Card.Description>Compared against the current healthy {platformLabel()} recommendation from JG Scripts.</Card.Description>
 			</Card.Header>
 			<Card.Content class="grid gap-3 md:grid-cols-3">
 				<div class={`rounded-sm border px-3 py-2 ${artifactUrgencyClass(health.urgency)}`}>
@@ -164,12 +165,12 @@
 				class="pointer-events-none absolute inset-x-4 top-0 h-px bg-linear-to-r from-transparent via-primary/70 to-transparent opacity-0 transition-opacity duration-300 group-hover:opacity-100"
 			></div>
 			<Card.Header class="border-b border-border pb-4">
-				<Card.Title>Windows Download</Card.Title>
-				<Card.Description>The install page uses this Windows artifact link. Linux output from the API is ignored for now.</Card.Description>
+				<Card.Title>{platformLabel()} Download</Card.Title>
+				<Card.Description>The install page uses this artifact link for {platformLabel()}.</Card.Description>
 			</Card.Header>
 			<Card.Content class="space-y-3">
 				<div class="rounded-sm border border-border bg-background/70 p-3 font-mono text-xs text-muted-foreground break-all">
-					{metadata.windowsDownloadLink}
+					{metadata.downloadLink}
 				</div>
 				<div class="flex items-center gap-2 text-xs text-muted-foreground">
 					<CheckCircle2Icon class={["size-3.5", recommendedIsFlagged ? "text-amber-400" : "text-emerald-400"]} />

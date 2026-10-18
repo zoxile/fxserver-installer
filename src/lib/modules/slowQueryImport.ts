@@ -3,8 +3,10 @@ import { readTextFile } from "./system";
 import { SLOW_QUERY_LIMITS } from "./slowQueries";
 
 export function isLocalSlowLogPath(path: string) {
-	// Reject UNC/device paths, URLs, alternate data streams and relative paths.
-	return /^[a-z]:[\\/]/i.test(path) && !/[\u0000-\u001f\u007f]/.test(path) && !path.slice(2).includes(":") && /\.log$/i.test(path);
+	// Accept local POSIX paths without weakening Windows UNC/device/ADS checks.
+	const absolute = path.startsWith("/") && !path.startsWith("//")
+		|| /^[a-z]:[\\/]/i.test(path) && !path.slice(2).includes(":");
+	return absolute && !/[\u0000-\u001f\u007f]/.test(path) && /\.log$/i.test(path);
 }
 
 export async function readSelectedSlowLog(isCurrent: () => boolean): Promise<string | null> {

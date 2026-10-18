@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { validateMariaDBCredentials, type MariaDBCredentials } from "$lib/modules/mariadb";
+import { initializePlatform, platform } from "./platform.svelte";
 import { resetDatabaseBrowserCache } from "./databaseBrowserCache";
 
 let storageQueue: Promise<unknown> = Promise.resolve();
@@ -112,11 +113,14 @@ function serializeStorage<T>(action: () => Promise<T>): Promise<T> {
 }
 
 export async function forgetDatabaseLogin(workspaceId: string) {
+	await initializePlatform();
+	if (!platform.secureStorageSupported) return;
 	if (!("__TAURI_INTERNALS__" in window)) return;
 	await serializeStorage(() => invoke("clear_database_login", { workspaceId }));
 }
 
 async function persistDatabaseLogin(credentials?: MariaDBCredentials) {
+	if (!platform.secureStorageSupported) return;
 	const workspaceId = databaseSession.workspaceId;
 	const revision = databaseSession.revision;
 	const request = ++storageRevision;
@@ -140,6 +144,7 @@ async function persistDatabaseLogin(credentials?: MariaDBCredentials) {
 }
 
 export function setRememberDatabaseLogin(enabled: boolean, current?: MariaDBCredentials) {
+	if (!platform.secureStorageSupported) return;
 	databaseSession.rememberLogin = enabled;
 	pendingRemember = enabled && (!current || !isDatabaseSessionValidated(current));
 	databaseSession.loginError = "";
@@ -168,6 +173,8 @@ export async function restoreDatabaseLogin(workspaceId: string) {
 	if (!("__TAURI_INTERNALS__" in window)) return;
 	databaseSession.restoringLogin = true;
 	try {
+		await initializePlatform();
+		if (!platform.secureStorageSupported || revision !== databaseSession.revision) return;
 		const credentials = await serializeStorage(() => invoke<MariaDBCredentials | null>("load_database_login", { workspaceId }));
 		if (revision !== databaseSession.revision) return;
 		if (credentials) {

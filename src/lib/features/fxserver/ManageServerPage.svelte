@@ -51,6 +51,7 @@
 </script>
 
 <script lang="ts">
+	import { platform, serverPathPlaceholder, txDataPathPlaceholder } from "$lib/core/platform.svelte";
 	import BarChart3Icon from "@lucide/svelte/icons/bar-chart-3";
 	import FolderOpenIcon from "@lucide/svelte/icons/folder-open";
 	import LoaderCircleIcon from "@lucide/svelte/icons/loader-circle";
@@ -342,6 +343,7 @@
 	}
 
 	async function loadSecureRconPassword() {
+		if (!platform.secureStorageSupported) { rconPasswordLoaded = true; return; }
 		try {
 			const password = await getSavedFxserverRconPassword(workspaceId);
 			if (!pageIsCurrent()) return;
@@ -372,6 +374,7 @@
 	}
 
 	function scheduleRconPasswordSave(delayMs = 400) {
+		if (!platform.secureStorageSupported) return;
 		if (rconPassword === lastSavedRconPassword) return;
 		if (rconPasswordSaveTimer) window.clearTimeout(rconPasswordSaveTimer);
 		rconPasswordSaveTimer = window.setTimeout(async () => {
@@ -380,6 +383,7 @@
 	}
 
 	async function persistRconPassword(password = rconPassword) {
+		if (!platform.secureStorageSupported) return;
 		if (!rconPasswordLoaded || password === lastSavedRconPassword) return;
 		const revision = actionRevision;
 		if (rconPasswordSaveTimer) {
@@ -927,7 +931,7 @@
 					</div>
 					<div>
 						<Card.Title>Artifact Path</Card.Title>
-						<Card.Description>Server executable: {artifact?.edition === "enhanced" ? "cfx-server.exe (Enhanced)" : "FXServer.exe (Legacy) or cfx-server.exe (Enhanced)"}.</Card.Description>
+						<Card.Description>Server launcher: {platform.os === "linux" ? "run.sh (Legacy) or the official Enhanced launcher" : artifact?.edition === "enhanced" ? "cfx-server.exe (Enhanced)" : "FXServer.exe (Legacy) or cfx-server.exe (Enhanced)"}.</Card.Description>
 					</div>
 				</div>
 			</Card.Header>
@@ -935,7 +939,7 @@
 				<div class="grid gap-3 md:grid-cols-[1fr_auto]">
 					<label class="grid gap-2">
 						<span class="text-xs font-medium text-muted-foreground">Artifact Folder</span>
-						<Input value={artifactPath} oninput={updateArtifactPath} placeholder="C:\FXServer\server" title="Folder containing FXServer.exe or cfx-server.exe" class="rounded-sm font-mono" />
+						<Input value={artifactPath} oninput={updateArtifactPath} placeholder={serverPathPlaceholder()} title={platform.os === "linux" ? "Folder containing the FXServer launcher" : "Folder containing FXServer.exe or cfx-server.exe"} class="rounded-sm font-mono" />
 					</label>
 					<div class="flex items-end">
 						<Button variant="outline" onclick={chooseFolder} disabled={starting || stopping} title="Pick the FXServer artifact folder">
@@ -1270,6 +1274,7 @@
 						title="Value configured with rcon_password in server.cfg."
 						class="rounded-sm font-mono text-xs"
 					/>
+					{#if !platform.secureStorageSupported}<span class="text-xs text-muted-foreground">Session only. Secure password storage is unavailable.</span>{/if}
 				</label>
 			</div>
 
@@ -1330,7 +1335,7 @@
 								setTxDataPath(nextPath);
 							}}
 							onchange={handleTxDataInput}
-							placeholder="C:\FiveM\txData"
+							placeholder={txDataPathPlaceholder()}
 							title="Folder containing txAdmin profile folders and logs."
 							class="rounded-sm font-mono text-xs"
 						/>

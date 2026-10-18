@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { txDataPathPlaceholder } from "$lib/core/platform.svelte";
 	// Log loop/cap fixes adapted from Huntercorlett's fork (53f1834).
 	import AlertCircleIcon from "@lucide/svelte/icons/alert-circle";
 	import CheckCircle2Icon from "@lucide/svelte/icons/check-circle-2";
@@ -258,7 +259,7 @@
 						<Input
 							bind:value={dataPath}
 							onchange={handleTxDataChange}
-							placeholder="C:\FiveM\txData"
+							placeholder={txDataPathPlaceholder()}
 							title="TXHOST_DATA_PATH folder containing profile folders and logs."
 							class="rounded-sm font-mono text-xs"
 						/>

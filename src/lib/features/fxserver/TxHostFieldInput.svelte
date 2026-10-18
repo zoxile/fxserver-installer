@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { txDataPathPlaceholder } from "$lib/core/platform.svelte";
 	import { Input } from "$lib/components/ui/input/index.js";
 	import PasswordInput from "$lib/components/ui/password-input.svelte";
 	import * as Select from "$lib/components/ui/select/index.js";
@@ -41,7 +42,7 @@
 		<Input
 			bind:value
 			type={field.type === "number" ? "number" : field.type === "url" ? "url" : "text"}
-			placeholder={field.placeholder}
+			placeholder={field.key === "TXHOST_DATA_PATH" ? txDataPathPlaceholder() : field.placeholder}
 			title={`Set ${field.key}`}
 			class="rounded-sm font-mono text-xs"
 		/>

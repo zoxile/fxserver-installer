@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { platform } from "$lib/core/platform.svelte";
 	import PlayIcon from "@lucide/svelte/icons/play";
 	import RefreshCwIcon from "@lucide/svelte/icons/refresh-cw";
 	import RotateCwIcon from "@lucide/svelte/icons/rotate-cw";
@@ -34,7 +35,7 @@
 				</div>
 				<div class="min-w-0">
 					<Card.Title>Service Status</Card.Title>
-					<Card.Description>Detected MariaDB installation and Windows service state.</Card.Description>
+					<Card.Description>Detected MariaDB installation and {platform.os === "linux" ? "systemd" : "Windows"} service state.</Card.Description>
 				</div>
 			</div>
 			<span class={["rounded-sm px-2.5 py-1 text-xs font-semibold", status?.running ? "bg-primary/10 text-primary" : "bg-destructive/10 text-destructive"]}>

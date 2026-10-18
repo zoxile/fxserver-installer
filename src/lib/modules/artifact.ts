@@ -3,6 +3,7 @@ import { trackTask } from "$lib/core/tasks.svelte";
 import { invoke as rawInvoke } from "@tauri-apps/api/core";
 import { getInstallPath } from "$lib/core/paths.svelte";
 import { log } from "$lib/core/logger.svelte";
+import { initializePlatform, platform, platformLabel } from "$lib/core/platform.svelte";
 
 const artifactsApiUrl = "https://artifacts.jgscripts.com/jsonv2";
 const devArtifactsApiUrl = "/api/jg-artifacts/jsonv2";
@@ -22,7 +23,7 @@ interface JgArtifactResponse {
 
 export interface ArtifactMetadata {
 	recommendedArtifact: string;
-	windowsDownloadLink: string;
+	downloadLink: string;
 	brokenArtifacts: ArtifactIssue[];
 	fetchedAt: string;
 	sourceUrl: string;
@@ -118,7 +119,9 @@ function normalizeIssues(value: unknown): ArtifactIssue[] {
 function normalizeMetadata(data: JgArtifactResponse): ArtifactMetadata {
 	return {
 		recommendedArtifact: ensureString(data.recommendedArtifact, "recommendedArtifact"),
-		windowsDownloadLink: ensureString(data.windowsDownloadLink, "windowsDownloadLink"),
+		downloadLink: platform.artifactPlatform === "linux"
+			? ensureString(data.linuxDownloadLink, "linuxDownloadLink")
+			: ensureString(data.windowsDownloadLink, "windowsDownloadLink"),
 		brokenArtifacts: normalizeIssues(data.brokenArtifacts),
 		fetchedAt: new Date().toISOString(),
 		sourceUrl,
@@ -126,13 +129,14 @@ function normalizeMetadata(data: JgArtifactResponse): ArtifactMetadata {
 }
 
 export async function fetchArtifactMetadata() {
-	log("Fetching Windows artifact metadata from JG Scripts.", { scope: "artifacts.api" });
+	await initializePlatform();
+	log(`Fetching ${platformLabel()} artifact metadata from JG Scripts.`, { scope: "artifacts.api" });
 
 	try {
 		if (hasTauriRuntime()) {
 			const data = await invoke<JgArtifactResponse>("get_windows_artifact_metadata");
 			const metadata = normalizeMetadata(data);
-			log(`JG Scripts recommends Windows artifact ${metadata.recommendedArtifact}.`, {
+			log(`JG Scripts recommends ${platformLabel()} artifact ${metadata.recommendedArtifact}.`, {
 				level: "success",
 				scope: "artifacts.api",
 				detail: `${metadata.brokenArtifacts.length} known problematic artifact ranges loaded.`,
@@ -151,7 +155,7 @@ export async function fetchArtifactMetadata() {
 		}
 
 		const metadata = normalizeMetadata((await response.json()) as JgArtifactResponse);
-		log(`JG Scripts recommends Windows artifact ${metadata.recommendedArtifact}.`, {
+		log(`JG Scripts recommends ${platformLabel()} artifact ${metadata.recommendedArtifact}.`, {
 			level: "success",
 			scope: "artifacts.api",
 			detail: `${metadata.brokenArtifacts.length} known problematic artifact ranges loaded.`,
@@ -209,7 +213,7 @@ export function getArtifactHealthStatus(metadata: ArtifactMetadata | null, insta
 		return {
 			urgency: "unknown",
 			label: "Not installed",
-			description: "Choose an FXServer folder and install the recommended Windows artifact.",
+			description: `Choose an FXServer folder and install the recommended ${platformLabel()} artifact.`,
 			currentVersion: null,
 			recommendedVersion: metadata.recommendedArtifact,
 		};
@@ -245,7 +249,7 @@ export function getArtifactHealthStatus(metadata: ArtifactMetadata | null, insta
 		return {
 			urgency: "recommended",
 			label: "Update recommended",
-			description: "A newer healthy Windows artifact is available.",
+			description: `A newer healthy ${platformLabel()} artifact is available.`,
 			currentVersion: installed.version,
 			recommendedVersion: metadata.recommendedArtifact,
 		};
@@ -262,7 +266,6 @@ export function getArtifactHealthStatus(metadata: ArtifactMetadata | null, insta
 }
 
 // Enhanced wire types adapted from Huntercorlett's fork (53f1834).
-export const enhancedDownloadUrl = "https://docs.fivem.net/docs/server-download/?platform=enhanced&os=windows";
 export interface EnhancedArtifactBuild { version: string; downloadUrl: string; }
 export interface EnhancedArtifactCatalog { builds: EnhancedArtifactBuild[]; sourceUrl: string; warning: string | null; }
 export function fetchEnhancedCatalog() {
@@ -312,7 +315,7 @@ export async function installWindowsArtifact(metadata: ArtifactMetadata, destina
 		throw new Error("Choose an install folder before installing artifacts.");
 	}
 
-	log(`Installing Windows FXServer artifact ${metadata.recommendedArtifact}.`, {
+	log(`Installing ${platformLabel()} FXServer artifact ${metadata.recommendedArtifact}.`, {
 		scope: "artifacts.install",
 		detail: destination,
 	});
@@ -321,18 +324,18 @@ export async function installWindowsArtifact(metadata: ArtifactMetadata, destina
 		const result = await invoke<ArtifactInstallResult>("install_windows_artifact", {
 			request: {
 				version: metadata.recommendedArtifact,
-				url: metadata.windowsDownloadLink,
+				url: metadata.downloadLink,
 				destination,
 			},
 		});
-		log(`Windows FXServer artifact ${result.version} installed.`, {
+		log(`${platformLabel()} FXServer artifact ${result.version} installed.`, {
 			level: "success",
 			scope: "artifacts.install",
 			detail: result.destination,
 		});
 		return result;
 	} catch (error) {
-		log("Windows FXServer artifact install failed.", {
+		log(`${platformLabel()} FXServer artifact install failed.`, {
 			level: "error",
 			scope: "artifacts.install",
 			detail: errorMessage(error),
