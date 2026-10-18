@@ -28,6 +28,8 @@ ACK = "github-container-v1"
 USER = "fxi-db-ci"
 DATABASE = "fxi_ci_fixture"
 OUTPUT_LIMIT = 4 * 1024 * 1024
+FIXTURE_LOGS = ("bootstrap.log", "server.log", "daemon-output.log")
+LOG_READ_LIMIT = 16 * 1024
 
 
 def option_value(value):
@@ -37,6 +39,28 @@ def option_value(value):
 def require(condition, message):
     if not condition:
         raise RuntimeError(message)
+
+
+def read_fixture_log(root, name):
+    require(name in FIXTURE_LOGS, "Only known fixture error logs may be read.")
+    require(root.parent == Path("/tmp") and root.name.startswith("fxi-mariadb-integration-")
+            and root.resolve() == root, "Invalid fixture log directory.")
+    directory = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=directory)
+    finally:
+        os.close(directory)
+    with os.fdopen(descriptor, "rb") as source:
+        metadata = os.fstat(source.fileno())
+        require(stat.S_ISREG(metadata.st_mode) and metadata.st_nlink == 1,
+                "Fixture error log must be a single-link regular file.")
+        offset = max(0, metadata.st_size - LOG_READ_LIMIT)
+        source.seek(offset)
+        content = source.read(LOG_READ_LIMIT)
+        if offset:
+            # Drop a partial first line, which could contain a truncated secret.
+            content = content.partition(b"\n")[2]
+        return content.decode("utf-8", "replace")
 
 
 def check_context():
@@ -186,9 +210,27 @@ class Fixture:
         return value
 
     def checked(self, command, **kwargs):
-        code, out, err = run(command, env=self.environment, **kwargs)
-        require(code == 0, f"Command failed ({code}): {self.redact(out + err)[-6000:]}")
+        executable = json.dumps(self.redact(Path(command[0]).name))
+        try:
+            code, out, err = run(command, env=self.environment, **kwargs)
+        except Exception as error:
+            detail = json.dumps(self.redact(str(error))[-6000:])
+            raise RuntimeError(f"Command {executable} could not complete: {detail}") from None
+        if code != 0:
+            detail = self.redact(out + "\n" + err).strip()[-6000:] or "No stdout or stderr was produced."
+            raise RuntimeError(f"Command {executable} failed ({code}): {json.dumps(detail)}")
         return out
+
+    def failure_logs(self):
+        for name in FIXTURE_LOGS:
+            try:
+                contents = read_fixture_log(self.root, name)
+                diagnostic = {"log": name, "output": self.redact(contents).strip()[-6000:] or "Log is empty."}
+            except FileNotFoundError:
+                diagnostic = {"log": name, "status": "not created"}
+            except Exception as error:
+                diagnostic = {"log": name, "error": self.redact(str(error))[:1000]}
+            print("DIAGNOSTIC " + json.dumps(diagnostic), file=sys.stderr, flush=True)
 
     def cli(self, *arguments, secret=None, success=True, tty=False, timeout=90):
         code, out, err = run([self.args.binary, "--config", self.config, *arguments],
@@ -287,8 +329,7 @@ class Fixture:
                 require(not path.is_symlink(), "Unexpected symlink in disposable initial database.")
                 os.chown(path, self.user.pw_uid, self.user.pw_gid)
         if not (self.datadir / "mysql").is_dir():
-            self.checked(["mariadb-install-db", "--no-defaults", f"--datadir={self.datadir}",
-                          "--auth-root-authentication-method=normal", "--skip-test-db"], user=self.user, timeout=120)
+            self.bootstrap()
         self.write_private(self.datadir / ".fxi-ci-owned", os.environ["GITHUB_RUN_ID"])
         if self.args.systemd:
             self.configure_systemd()
@@ -301,6 +342,16 @@ class Fixture:
                f"GRANT SELECT ON {DATABASE}.* TO 'fxi_ci_reader'@'127.0.0.1';")
         self.checked(["mariadb", "--no-defaults", "--protocol=SOCKET", f"--socket={self.socket}", "--user=root"], stdin=sql.encode())
         require(self.query("SELECT @@datadir;")["rows"] == [[str(self.datadir) + "/"]], "Connected to the wrong data directory.")
+
+    def bootstrap(self):
+        log = self.root / "bootstrap.log"
+        self.write_private(log, "")
+        command = ["mariadb-install-db", "--no-defaults"]
+        if self.results["distro"] == "arch":
+            command.append("--basedir=/usr")
+        command.extend([f"--datadir={self.datadir}", "--auth-root-authentication-method=normal",
+                        "--skip-test-db", f"--log-error={log}"])
+        self.checked(command, user=self.user, timeout=120)
 
     def daemon_arguments(self):
         binary = shutil.which("mariadbd")
@@ -455,6 +506,7 @@ def main():
             fixture.preserve_uninstall(candidate)
         print(json.dumps(fixture.results, indent=2), flush=True)
     except Exception as error:
+        fixture.failure_logs()
         print("FAIL " + fixture.redact(str(error)), file=sys.stderr, flush=True)
         raise SystemExit(1) from None
     finally:

@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import sys
+import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
@@ -91,6 +92,92 @@ class DiagnosticTests(unittest.TestCase):
         fixture.port = 13306
         fixture.user = object()
         return fixture
+
+    def test_arch_bootstrap_has_explicit_basedir_and_private_error_log(self):
+        fixture = self.fixture()
+        fixture.checked = Mock()
+        fixture.write_private = Mock()
+        for distro in ["arch", "debian", "fedora", "ubuntu"]:
+            fixture.results = {"distro": distro}
+            fixture.bootstrap()
+            command = fixture.checked.call_args.args[0]
+            self.assertEqual(command[:2], ["mariadb-install-db", "--no-defaults"])
+            self.assertEqual("--basedir=/usr" in command, distro == "arch")
+            self.assertIn(f"--datadir={fixture.datadir}", command)
+            self.assertIn(f"--log-error={fixture.root / 'bootstrap.log'}", command)
+            self.assertIn("--skip-test-db", command)
+            self.assertIs(fixture.checked.call_args.kwargs["user"], fixture.user)
+            self.assertEqual(fixture.checked.call_args.kwargs["timeout"], 120)
+            fixture.write_private.assert_called_with(fixture.root / "bootstrap.log", "")
+
+    def test_checked_identifies_executable_without_exposing_arguments(self):
+        fixture = self.fixture()
+        command = ["/usr/bin/mariadb-install-db", "PRIVATE SQL ARGUMENT", fixture.password]
+        for out, err in [("\nFATAL ERROR: Missing bootstrap SQL\n", ""), ("", "")]:
+            with patch.object(harness, "run", return_value=(1, out, err)):
+                with self.assertRaises(RuntimeError) as error:
+                    fixture.checked(command)
+            message = str(error.exception)
+            self.assertIn('Command "mariadb-install-db" failed (1):', message)
+            self.assertNotIn("PRIVATE SQL ARGUMENT", message)
+            self.assertNotIn(fixture.password, message)
+            self.assertNotIn("\n", message)
+            self.assertIn("FATAL ERROR" if out else "No stdout or stderr", message)
+
+    def test_checked_redacts_failures_and_process_exceptions(self):
+        fixture = self.fixture()
+        with patch.object(harness, "run", return_value=(1, "x" * 9000 + fixture.password, "")):
+            with self.assertRaises(RuntimeError) as error:
+                fixture.checked(["mariadb"])
+        self.assertLess(len(str(error.exception)), 6100)
+        self.assertNotIn(fixture.password, str(error.exception))
+        with patch.object(harness, "run", side_effect=RuntimeError("deadline exceeded")):
+            with self.assertRaisesRegex(RuntimeError, 'Command "mariadb" could not complete: "deadline exceeded"'):
+                fixture.checked(["mariadb"])
+
+    def test_failure_logs_are_allowlisted_bounded_redacted_and_single_line(self):
+        fixture = self.fixture()
+        responses = ["x" * 8000 + fixture.password + "\n::error::untrusted", FileNotFoundError(), OSError("symlink refused")]
+        with patch.object(harness, "read_fixture_log", side_effect=responses) as read, \
+                patch.object(sys, "stderr", new_callable=io.StringIO) as output:
+            fixture.failure_logs()
+        self.assertEqual([call.args[1] for call in read.call_args_list], list(harness.FIXTURE_LOGS))
+        lines = output.getvalue().splitlines()
+        self.assertEqual(len(lines), 3)
+        diagnostics = [json.loads(line.removeprefix("DIAGNOSTIC ")) for line in lines]
+        self.assertLessEqual(len(diagnostics[0]["output"]), 6000)
+        self.assertNotIn(fixture.password, output.getvalue())
+        self.assertIn("[redacted]", diagnostics[0]["output"])
+        self.assertEqual(diagnostics[1]["status"], "not created")
+        self.assertEqual(diagnostics[2]["error"], "symlink refused")
+
+    def test_unknown_log_and_outside_directory_are_refused_before_open(self):
+        with patch.object(os, "open") as open_file:
+            with self.assertRaisesRegex(RuntimeError, "Only known fixture"):
+                harness.read_fixture_log(Path("/tmp/fxi-mariadb-integration-unit"), "fixture.json")
+            with self.assertRaisesRegex(RuntimeError, "Invalid fixture"):
+                harness.read_fixture_log(Path("/var/log"), "server.log")
+        open_file.assert_not_called()
+
+    @unittest.skipUnless(sys.platform == "linux", "Linux no-follow file descriptors")
+    def test_fixture_log_reader_bounds_tail_and_refuses_links_and_pipes(self):
+        with tempfile.TemporaryDirectory(prefix="fxi-mariadb-integration-unit-", dir="/tmp") as directory:
+            root = Path(directory)
+            target = root / "bootstrap.log"
+            target.write_bytes(b"x" * (harness.LOG_READ_LIMIT + 100) + b"\nlast complete line\n")
+            self.assertEqual(harness.read_fixture_log(root, "bootstrap.log"), "last complete line\n")
+            alias = root / "server.log"
+            alias.symlink_to(target)
+            with self.assertRaises(OSError):
+                harness.read_fixture_log(root, "server.log")
+            alias.unlink()
+            os.link(target, alias)
+            with self.assertRaisesRegex(RuntimeError, "single-link regular"):
+                harness.read_fixture_log(root, "server.log")
+            alias.unlink()
+            os.mkfifo(alias)
+            with self.assertRaisesRegex(RuntimeError, "single-link regular"):
+                harness.read_fixture_log(root, "server.log")
 
     def test_redaction_covers_raw_option_sql_json_and_hex_encodings(self):
         fixture = self.fixture()
