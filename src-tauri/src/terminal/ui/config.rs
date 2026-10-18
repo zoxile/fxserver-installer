@@ -1,4 +1,4 @@
-use super::render_list;
+use super::lists;
 use crate::{
     models::fxserver::ServerConfigFile,
     terminal::{safe_text, settings::Settings},
@@ -12,6 +12,9 @@ use ratatui::{
 };
 use ratatui_textarea::TextArea;
 use unicode_width::UnicodeWidthChar;
+
+mod navigation;
+use navigation::Navigation;
 
 const MAX_BYTES: usize = 512 * 1024;
 
@@ -30,6 +33,7 @@ struct Editor {
     original: String,
     newline: &'static str,
     text: TextArea<'static>,
+    navigation: Navigation,
     bytes: usize,
     changed: bool,
 }
@@ -78,6 +82,15 @@ impl Panel {
         let Some(editor) = &mut self.editor else {
             return;
         };
+        if editor.navigation.is_open() {
+            self.notice = editor
+                .navigation
+                .paste(text)
+                .err()
+                .unwrap_or_default()
+                .into();
+            return;
+        }
         let pasted_newline = match newline_style(text) {
             Ok(newline) => newline,
             Err(error) => {
@@ -110,6 +123,12 @@ impl Panel {
     pub(super) fn key(&mut self, key: KeyEvent) -> Event {
         self.notice.clear();
         if let Some(editor) = &mut self.editor {
+            if editor
+                .navigation
+                .key(&mut editor.text, key, &mut self.notice)
+            {
+                return Event::None;
+            }
             let control = key.modifiers.contains(KeyModifiers::CONTROL);
             match key.code {
                 KeyCode::Esc if editor.changed => {
@@ -173,8 +192,13 @@ impl Panel {
     }
 
     pub(super) fn draw(&self, frame: &mut Frame, area: Rect) {
+        let prompt_open = self
+            .editor
+            .as_ref()
+            .is_some_and(|editor| editor.navigation.is_open());
+        let footer_height = if prompt_open { 2 } else { 1 };
         let body = Rect {
-            height: area.height.saturating_sub(1),
+            height: area.height.saturating_sub(footer_height),
             ..area
         };
         if let Some(editor) = &self.editor {
@@ -183,32 +207,39 @@ impl Panel {
                 safe_text(&editor.name),
                 if editor.changed { " *" } else { "" }
             );
-            let block = Block::default().borders(Borders::ALL).title(title);
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .title(title)
+                .title_bottom("Ctrl+F: find  Ctrl+G: line");
             let inner = block.inner(body);
             frame.render_widget(block, body);
             frame.render_widget(&editor.text, inner);
             editor.highlight(frame, inner);
         } else {
-            let items = self
-                .files
-                .iter()
-                .map(|file| {
-                    ListItem::new(format!("{}  ({} bytes)", safe_text(&file.name), file.size))
-                })
-                .collect();
-            render_list(
+            lists::draw(
                 frame,
                 body,
-                items,
+                self.files.len(),
                 self.selected,
+                |index| {
+                    let file = &self.files[index];
+                    ListItem::new(format!("{}  ({} bytes)", safe_text(&file.name), file.size))
+                },
                 "No config files loaded. Refresh [R]",
             );
         }
-        if area.height > 0 {
+        if area.height > u16::from(prompt_open) {
             frame.render_widget(
                 Paragraph::new(&*self.notice).style(Style::new().fg(Color::Yellow)),
                 Rect::new(area.x, area.bottom() - 1, area.width, 1),
             );
+        }
+        if prompt_open && area.height > 0 {
+            if let Some(editor) = &self.editor {
+                editor
+                    .navigation
+                    .draw(frame, Rect::new(area.x, body.bottom(), area.width, 1));
+            }
         }
     }
 }
@@ -239,6 +270,7 @@ impl Editor {
             original: file.content.clone(),
             newline,
             text,
+            navigation: Navigation::default(),
             bytes: file.content.len(),
             changed: false,
         })
@@ -283,8 +315,13 @@ impl Editor {
                         let cell = column + offset;
                         if cell >= left as usize && cell - (left as usize) < text_width {
                             let x = area.x + gutter + (cell - left as usize) as u16;
-                            frame.buffer_mut()[(x, area.y + (index - top as usize) as u16)]
-                                .set_fg(color);
+                            let cell = &mut frame.buffer_mut()
+                                [(x, area.y + (index - top as usize) as u16)];
+                            if self.navigation.is_match(index, character) {
+                                cell.set_fg(Color::Black).set_bg(Color::Yellow);
+                            } else {
+                                cell.set_fg(color);
+                            }
                         }
                     }
                 }
@@ -382,6 +419,306 @@ mod tests {
         panel.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert!(panel.editor.is_some());
         panel
+    }
+
+    fn control(panel: &mut Panel, character: char) -> Event {
+        panel.key(KeyEvent::new(
+            KeyCode::Char(character),
+            KeyModifiers::CONTROL,
+        ))
+    }
+
+    fn press(panel: &mut Panel, code: KeyCode) {
+        panel.key(KeyEvent::new(code, KeyModifiers::NONE));
+    }
+
+    fn find(panel: &mut Panel, query: &str) {
+        control(panel, 'f');
+        control(panel, 'u');
+        panel.paste(query);
+        press(panel, KeyCode::Enter);
+    }
+
+    #[test]
+    fn find_uses_unicode_character_columns_and_literal_text() {
+        let query = "界e\u{301}";
+        let original = format!("α {query}\r\n{query}");
+        let mut panel = panel(&original);
+        find(&mut panel, query);
+        let editor = panel.editor.as_ref().unwrap();
+        assert_eq!(editor.text.cursor(), (0, 2));
+        assert!(editor.navigation.is_match(0, 2));
+        assert!(editor.navigation.is_match(0, 4));
+        assert!(!editor.navigation.is_match(0, 5));
+        assert!(editor.text.search_pattern().is_none());
+        press(&mut panel, KeyCode::Enter);
+        assert_eq!(panel.editor.as_ref().unwrap().text.cursor(), (1, 0));
+        assert_eq!(panel.editor.as_ref().unwrap().content(), original);
+        assert!(!panel.dirty());
+
+        let literal = r".*[x](a)?+^$\end";
+        let mut literal_panel = self::panel(&format!("prefix {literal}"));
+        find(&mut literal_panel, literal);
+        assert_eq!(literal_panel.editor.as_ref().unwrap().text.cursor(), (0, 7));
+    }
+
+    #[test]
+    fn find_next_and_previous_wrap_in_both_directions() {
+        let mut panel = panel("hit\nskip\nhit");
+        find(&mut panel, "hit");
+        assert_eq!(panel.editor.as_ref().unwrap().text.cursor(), (0, 0));
+        press(&mut panel, KeyCode::Enter);
+        assert_eq!(panel.editor.as_ref().unwrap().text.cursor(), (2, 0));
+        press(&mut panel, KeyCode::Enter);
+        assert_eq!(panel.editor.as_ref().unwrap().text.cursor(), (0, 0));
+        assert!(panel.notice.contains("wrapped"));
+        panel.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT));
+        assert_eq!(panel.editor.as_ref().unwrap().text.cursor(), (2, 0));
+        assert!(panel.notice.contains("wrapped"));
+        press(&mut panel, KeyCode::Up);
+        assert_eq!(panel.editor.as_ref().unwrap().text.cursor(), (0, 0));
+        press(&mut panel, KeyCode::Down);
+        assert_eq!(panel.editor.as_ref().unwrap().text.cursor(), (2, 0));
+    }
+
+    #[test]
+    fn previous_search_from_end_of_line_finds_the_last_match() {
+        use ratatui_textarea::CursorMove;
+        let mut panel = panel("界 hit hit");
+        panel
+            .editor
+            .as_mut()
+            .unwrap()
+            .text
+            .move_cursor(CursorMove::End);
+        control(&mut panel, 'f');
+        panel.paste("hit");
+        panel.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT));
+        assert_eq!(panel.editor.as_ref().unwrap().text.cursor(), (0, 6));
+    }
+
+    #[test]
+    fn empty_and_missing_searches_do_not_move_or_modify_the_draft() {
+        let mut panel = panel("ensure chat");
+        panel.paste("# draft ");
+        let content = panel.editor.as_ref().unwrap().content();
+        let cursor = panel.editor.as_ref().unwrap().text.cursor();
+        find(&mut panel, "");
+        assert_eq!(panel.notice, "Find text is empty.");
+        find(&mut panel, "missing");
+        assert_eq!(panel.notice, "No matches.");
+        press(&mut panel, KeyCode::Up);
+        assert_eq!(panel.notice, "No matches.");
+        let editor = panel.editor.as_ref().unwrap();
+        assert_eq!(editor.text.cursor(), cursor);
+        assert_eq!(editor.content(), content);
+        assert!(editor.changed);
+        assert!(!editor.navigation.is_match(cursor.0, cursor.1));
+    }
+
+    #[test]
+    fn escaping_prompts_preserves_clean_and_dirty_editors_and_find_text() {
+        for dirty in [false, true] {
+            let mut panel = panel("ensure chat");
+            if dirty {
+                panel.paste("# draft ");
+            }
+            let content = panel.editor.as_ref().unwrap().content();
+            find(&mut panel, "chat");
+            let cursor = panel.editor.as_ref().unwrap().text.cursor();
+            press(&mut panel, KeyCode::Esc);
+            let editor = panel.editor.as_ref().unwrap();
+            assert!(!editor.navigation.is_open());
+            assert_eq!(editor.text.cursor(), cursor);
+            assert_eq!(editor.content(), content);
+            assert_eq!(panel.dirty(), dirty);
+            control(&mut panel, 'f');
+            press(&mut panel, KeyCode::Enter);
+            assert!(panel.notice.starts_with("Match "));
+            control(&mut panel, 'g');
+            panel.paste("1");
+            press(&mut panel, KeyCode::Esc);
+            assert_eq!(panel.editor.as_ref().unwrap().text.cursor(), cursor);
+            assert_eq!(panel.editor.as_ref().unwrap().content(), content);
+            press(&mut panel, KeyCode::Esc);
+            assert_eq!(panel.editor.is_some(), dirty);
+        }
+    }
+
+    #[test]
+    fn save_undo_and_redo_pass_through_prompts_without_editing_prompt_text_into_document() {
+        let original = "ensure chat\r\n";
+        let mut panel = panel(original);
+        panel.paste("# draft\n");
+        let content = panel.editor.as_ref().unwrap().content();
+        find(&mut panel, "chat");
+        let Event::Save {
+            original: saved_original,
+            content: saved_content,
+            ..
+        } = control(&mut panel, 's')
+        else {
+            panic!("expected the existing save event");
+        };
+        assert_eq!(saved_original, original);
+        assert_eq!(saved_content, content);
+        assert!(!panel.editor.as_ref().unwrap().navigation.is_open());
+        control(&mut panel, 'g');
+        panel.paste("1");
+        control(&mut panel, 'z');
+        assert_eq!(panel.editor.as_ref().unwrap().content(), original);
+        assert!(!panel.dirty());
+        control(&mut panel, 'f');
+        control(&mut panel, 'y');
+        assert_eq!(panel.editor.as_ref().unwrap().content(), content);
+        assert!(panel.dirty());
+    }
+
+    #[test]
+    fn go_to_line_rejects_invalid_input_without_moving_then_accepts_last_line() {
+        use ratatui_textarea::CursorMove;
+        let mut panel = panel("one\r\ntwo");
+        panel
+            .editor
+            .as_mut()
+            .unwrap()
+            .text
+            .move_cursor(CursorMove::End);
+        for value in ["", "0", "-1", "3", "abc", "9999999999"] {
+            control(&mut panel, 'g');
+            panel.paste(value);
+            press(&mut panel, KeyCode::Enter);
+            assert!(panel.editor.as_ref().unwrap().navigation.is_open());
+            assert_eq!(panel.notice, "Line must be 1..2.");
+            assert_eq!(panel.editor.as_ref().unwrap().text.cursor(), (0, 3));
+        }
+        control(&mut panel, 'u');
+        panel.paste("2");
+        press(&mut panel, KeyCode::Enter);
+        assert_eq!(panel.editor.as_ref().unwrap().text.cursor(), (1, 0));
+        assert!(!panel.editor.as_ref().unwrap().navigation.is_open());
+        assert_eq!(panel.editor.as_ref().unwrap().content(), "one\r\ntwo");
+        assert!(!panel.dirty());
+    }
+
+    #[test]
+    fn prompt_input_is_bounded_and_rejects_multiline_and_control_pastes() {
+        let query = "é".repeat(128);
+        let mut panel = panel(&query);
+        control(&mut panel, 'f');
+        panel.paste(&query);
+        press(&mut panel, KeyCode::Char('é'));
+        assert!(panel.notice.contains("256 bytes"));
+        for value in ["x", "\n", "\r", "\x1b"] {
+            panel.paste(value);
+            assert!(!panel.notice.is_empty());
+        }
+        press(&mut panel, KeyCode::Enter);
+        assert!(panel.notice.starts_with("Match "));
+        control(&mut panel, 'u');
+        for value in ["a\nb", "a\r\nb", "\r", "\t", "\x1b[31m"] {
+            panel.paste(value);
+            assert!(!panel.notice.is_empty());
+            press(&mut panel, KeyCode::Enter);
+            assert_eq!(panel.notice, "Find text is empty.");
+        }
+        control(&mut panel, 'g');
+        panel.paste("12345678901");
+        assert!(!panel.notice.is_empty());
+        press(&mut panel, KeyCode::Enter);
+        assert_eq!(panel.notice, "Line must be 1..1.");
+        assert_eq!(panel.editor.as_ref().unwrap().content(), query);
+        assert!(!panel.dirty());
+    }
+
+    #[test]
+    fn navigation_leaves_plain_keys_and_altgr_for_the_existing_key_handlers() {
+        let mut navigation = Navigation::default();
+        let mut text = TextArea::default();
+        let mut notice = String::new();
+        for key in [
+            KeyEvent::new(KeyCode::Left, KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Char('界'), KeyModifiers::NONE),
+            KeyEvent::new(
+                KeyCode::Char('f'),
+                KeyModifiers::CONTROL | KeyModifiers::ALT,
+            ),
+            KeyEvent::new(
+                KeyCode::Char('g'),
+                KeyModifiers::CONTROL | KeyModifiers::ALT,
+            ),
+        ] {
+            assert!(!navigation.key(&mut text, key, &mut notice));
+            assert!(!navigation.is_open());
+        }
+        let mut panel = panel("");
+        press(&mut panel, KeyCode::Char('界'));
+        assert_eq!(panel.editor.as_ref().unwrap().content(), "界");
+    }
+
+    #[test]
+    fn search_and_go_to_line_keep_the_document_cursor_visible_after_rendering() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let content = format!(
+            "{}{}{}needle",
+            "ensure chat\n".repeat(80),
+            "\t".repeat(20),
+            "界".repeat(30)
+        );
+        let mut panel = panel(&content);
+        find(&mut panel, "needle");
+        let mut terminal = Terminal::new(TestBackend::new(24, 10)).unwrap();
+        terminal
+            .draw(|frame| panel.draw(frame, frame.area()))
+            .unwrap();
+        let editor = panel.editor.as_ref().unwrap();
+        assert_eq!(editor.text.cursor(), (80, 50));
+        let (top, left) = editor.text.scroll_offset();
+        assert!(top as usize <= 80 && 80 < top as usize + 6);
+        let visible_width = 22 - editor.text.line_number_width();
+        assert!(left as usize <= 140 && 140 < left as usize + visible_width as usize);
+        assert_eq!(editor.content(), content);
+
+        control(&mut panel, 'g');
+        panel.paste("1");
+        press(&mut panel, KeyCode::Enter);
+        terminal
+            .draw(|frame| panel.draw(frame, frame.area()))
+            .unwrap();
+        let editor = panel.editor.as_ref().unwrap();
+        assert_eq!(editor.text.cursor(), (0, 0));
+        assert_eq!(editor.text.scroll_offset(), (0, 0));
+        assert!(!panel.dirty());
+    }
+
+    #[test]
+    fn prompt_cursor_and_suffix_stay_visible_in_narrow_terminals() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let mut panel = panel("ensure chat");
+        control(&mut panel, 'f');
+        panel.paste(&format!("{}tail", "界".repeat(40)));
+        for width in [1, 4, 9, 12, 40] {
+            for height in [1, 2, 6] {
+                let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+                terminal
+                    .draw(|frame| panel.draw(frame, frame.area()))
+                    .unwrap();
+                let cursor = terminal.get_cursor_position().unwrap();
+                assert!(cursor.x < width && cursor.y < height);
+                let rendered: String = terminal
+                    .backend()
+                    .buffer()
+                    .content()
+                    .iter()
+                    .map(|cell| cell.symbol())
+                    .collect();
+                if width >= 9 {
+                    assert!(rendered.contains("tail"));
+                }
+            }
+        }
+        assert_eq!(panel.editor.as_ref().unwrap().content(), "ensure chat");
+        assert!(!panel.dirty());
     }
 
     #[test]

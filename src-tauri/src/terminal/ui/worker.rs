@@ -156,11 +156,11 @@ fn handle_job(manager: &FxserverManager, runtime: &Runtime, job: Job) -> Update 
         Job::Resources(settings) => {
             let result = runtime
                 .block_on(fxserver::scan_fxserver_resources(ResourceScanRequest {
-                    tx_data_path: settings.tx_data_path,
-                    profile: settings.profile,
+                    tx_data_path: settings.tx_data_path.clone(),
+                    profile: settings.profile.clone(),
                 }))
                 .map(|result| result.resources);
-            Update::Resources(result)
+            Update::Resources(settings, result)
         }
         Job::Catalog => {
             let result = runtime

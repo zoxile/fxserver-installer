@@ -18,7 +18,7 @@ use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Color, Style, Stylize},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Tabs, Wrap},
+    widgets::{Block, Borders, ListItem, Paragraph, Tabs, Wrap},
     Frame,
 };
 use std::{
@@ -37,8 +37,10 @@ use tokio::runtime::Runtime;
 
 mod actions;
 mod config;
+mod lists;
 mod performance;
 mod render;
+mod resources;
 mod worker;
 use render::{ConfirmationPreview, Input};
 use worker::{monitor, worker};
@@ -68,6 +70,7 @@ const FIELDS: [&str; 11] = [
     "Database password",
 ];
 const MAX_LINES: usize = 2000;
+const FRAME_INTERVAL: Duration = Duration::from_millis(16);
 
 enum Job {
     LoadCredentials(Box<operations::Context>),
@@ -103,7 +106,7 @@ enum Update {
     Action(Result<operations::Outcome, String>),
     Complete(Result<String, String>),
     Rcon(Result<String, String>),
-    Resources(Result<Vec<FxserverResourceInfo>, String>),
+    Resources(Settings, Result<Vec<FxserverResourceInfo>, String>),
     Catalog(Result<Vec<ArtifactBuild>, String>),
     Sample(Option<FxserverStatus>, Vec<FxserverTerminalEntry>),
     SqlFile(Result<String, String>),
@@ -152,6 +155,7 @@ struct App {
     input: Input,
     edit: Option<Edit>,
     confirm: Option<(ConfirmationPreview, Job)>,
+    confirmation_visible: bool,
     busy: bool,
     server_transition: bool,
     quitting: bool,
@@ -159,7 +163,7 @@ struct App {
     error: bool,
     logs: VecDeque<Line<'static>>,
     output: Vec<String>,
-    resources: Vec<FxserverResourceInfo>,
+    resources: resources::Panel,
     builds: Vec<ArtifactBuild>,
     status: Option<FxserverStatus>,
     scroll: usize,
@@ -186,6 +190,7 @@ impl App {
             input: Input::default(),
             edit: None,
             confirm: None,
+            confirmation_visible: false,
             busy: false,
             server_transition: false,
             quitting: false,
@@ -193,7 +198,7 @@ impl App {
             error: false,
             logs: VecDeque::new(),
             output: Vec::new(),
-            resources: Vec::new(),
+            resources: resources::Panel::default(),
             builds: Vec::new(),
             status: None,
             scroll: 0,
@@ -203,6 +208,13 @@ impl App {
         app
     }
     fn paste(&mut self, value: &str) {
+        if self.picker.is_some() {
+            return;
+        }
+        if self.tab == 2 && self.edit.is_none() && self.confirm.is_none() && !self.quitting {
+            self.resources.paste(value);
+            return;
+        }
         if self.tab == 8 && self.confirm.is_none() && !self.quitting {
             self.config.paste(value);
             return;
@@ -242,7 +254,7 @@ impl App {
     fn open_actions(&mut self) {
         let mut actions = operations::list(&self.context());
         if self.tab == 2 {
-            if let Some(resource) = self.resources.get(self.selected) {
+            if let Some(resource) = self.resources.selected() {
                 for action in &mut actions {
                     for field in &mut action.fields {
                         if field.key == "resource_path"
@@ -301,6 +313,7 @@ impl App {
             return;
         }
         self.confirm = Some((ConfirmationPreview::new(title), job));
+        self.confirmation_visible = false;
     }
     fn set_result(&mut self, result: Result<String, String>) {
         self.busy = false;
@@ -515,14 +528,22 @@ impl App {
                     self.scroll = 0;
                 }
             }
-            Update::Resources(result) => match result {
-                Ok(resources) => {
-                    self.resources = resources;
-                    self.selected = 0;
-                    self.set_result(Ok(format!("{} resources", self.resources.len())));
+            Update::Resources(settings, result) => {
+                if settings.artifact_path != self.settings.artifact_path
+                    || settings.tx_data_path != self.settings.tx_data_path
+                    || settings.profile != self.settings.profile
+                {
+                    self.set_result(Ok("Resource scope changed; stale scan ignored.".into()));
+                } else {
+                    match result {
+                        Ok(resources) => {
+                            self.resources.replace(resources);
+                            self.set_result(Ok(format!("{} resources", self.resources.len())));
+                        }
+                        Err(error) => self.set_result(Err(error)),
+                    }
                 }
-                Err(error) => self.set_result(Err(error)),
-            },
+            }
             Update::Catalog(result) => match result {
                 Ok(builds) => {
                     self.builds = builds;
@@ -592,6 +613,27 @@ impl App {
         }
         None
     }
+
+    fn update_affects_view(&self, update: &Update) -> bool {
+        let Update::Sample(status, entries) = update else {
+            return true;
+        };
+        if status.as_ref().is_some_and(|status| {
+            self.status.as_ref().is_some_and(|old| old.running) != status.running
+        }) {
+            return true;
+        }
+        if self.picker.is_some() || self.confirm.is_some() {
+            return false;
+        }
+        match self.tab {
+            0 => status
+                .as_ref()
+                .is_some_and(|status| status.running || self.status.is_none()),
+            1 => !entries.is_empty(),
+            _ => false,
+        }
+    }
     fn field(&self, index: usize) -> String {
         match index {
             0 => self.settings.artifact_path.clone(),
@@ -653,6 +695,7 @@ impl App {
         }
         if scope_changed {
             self.config = config::Panel::default();
+            self.resources = resources::Panel::default();
         }
         self.notice = if index >= 9 {
             "Credential updated for this session only."
@@ -671,6 +714,17 @@ impl App {
             self.credential_revision.rcon = self.credential_revision.rcon.wrapping_add(1);
         }
     }
+
+    fn handle_event(&mut self, event: Event, sender: &SyncSender<Job>) -> bool {
+        match event {
+            Event::Key(key) if key.kind == KeyEventKind::Press => self.key(key, sender),
+            Event::Paste(value) => self.paste(&value),
+            Event::Resize(_, _) => self.confirmation_visible = false,
+            _ => return false,
+        }
+        true
+    }
+
     fn key(&mut self, key: KeyEvent, sender: &SyncSender<Job>) {
         #[cfg(windows)]
         let key = normalize_windows_altgr(key);
@@ -683,7 +737,7 @@ impl App {
         }
         if self.confirm.is_some() {
             match key.code {
-                KeyCode::Char('y') | KeyCode::Char('Y') => {
+                KeyCode::Char('y') | KeyCode::Char('Y') if self.confirmation_visible => {
                     if let Some((_, job)) = self.confirm.take() {
                         self.submit(sender, job);
                     }
@@ -817,6 +871,9 @@ impl App {
             }
             return;
         }
+        if self.tab == 2 && !matches!(key.code, KeyCode::F(1..=9)) && self.resources.key(key) {
+            return;
+        }
         match key.code {
             KeyCode::Char('p') if self.tab == 6 => {
                 self.submit(sender, Job::Profiles(self.settings.clone()))
@@ -914,7 +971,7 @@ impl App {
                 }
             }
             KeyCode::Char(key @ ('s' | 'x' | 'e' | 't')) if self.tab == 2 => {
-                if let Some(resource) = self.resources.get(self.selected) {
+                if let Some(resource) = self.resources.selected() {
                     let action = match key {
                         's' => "start",
                         'x' => "stop",
@@ -940,7 +997,6 @@ impl App {
     }
     fn row_count(&self) -> usize {
         match self.tab {
-            2 => self.resources.len(),
             4 => self.builds.len(),
             6 => FIELDS.len(),
             _ => 1,
@@ -1048,7 +1104,7 @@ pub(super) fn run(config: Settings, path: PathBuf, runtime: Runtime) -> Result<(
     app.progress = Some(progress);
     app.submit(&send, Job::LoadCredentials(Box::new(app.context())));
     let mut dirty = true;
-    let mut last_draw = Instant::now();
+    let mut last_draw = Instant::now() - FRAME_INTERVAL;
     let result = (|| loop {
         if shutdown.requested() {
             return Ok(());
@@ -1059,31 +1115,32 @@ pub(super) fn run(config: Settings, path: PathBuf, runtime: Runtime) -> Result<(
                 dirty = true;
             }
         }
-        for update in receive.try_iter().take(32) {
-            dirty = true;
+        for update in receive.try_iter().take(4) {
+            dirty |= app.update_affects_view(&update);
             if let Some(result) = app.update(update) {
                 return result;
             }
         }
-        if dirty || (app.busy && last_draw.elapsed() >= Duration::from_millis(200)) {
+        if (dirty && last_draw.elapsed() >= FRAME_INTERVAL)
+            || (app.busy && last_draw.elapsed() >= Duration::from_millis(200))
+        {
             terminal
                 .draw(|frame| draw(frame, &mut app))
                 .map_err(|e| e.to_string())?;
             dirty = false;
             last_draw = Instant::now();
         }
-        if event::poll(Duration::from_millis(50)).map_err(|e| e.to_string())? {
-            match event::read().map_err(|e| e.to_string())? {
-                Event::Key(key) if key.kind == KeyEventKind::Press => {
-                    app.key(key, &send);
-                    dirty = true;
+        let wait = if dirty {
+            FRAME_INTERVAL.saturating_sub(last_draw.elapsed())
+        } else {
+            Duration::from_millis(50)
+        };
+        if event::poll(wait).map_err(|e| e.to_string())? {
+            for _ in 0..64 {
+                dirty |= app.handle_event(event::read().map_err(|e| e.to_string())?, &send);
+                if !event::poll(Duration::ZERO).map_err(|e| e.to_string())? {
+                    break;
                 }
-                Event::Paste(value) => {
-                    app.paste(&value);
-                    dirty = true;
-                }
-                Event::Resize(_, _) => dirty = true,
-                _ => {}
             }
         }
         if worker.is_finished() {
@@ -1130,7 +1187,7 @@ fn tab_titles(width: u16, selected: usize) -> Vec<&'static str> {
 fn footer_lines(tab: usize, width: u16) -> Vec<Line<'static>> {
     let actions = match tab {
         1 => "Enter: command  PgUp/PgDn: scroll",
-        2 => "R: refresh S: start X: stop T: restart E: ensure",
+        2 => "/: find R: scan S/X/T/E: start/stop/restart/ensure",
         3 => "Enter: SQL  D: databases  F: SQL file",
         4 => "R: refresh  Enter: install",
         5 => "R: run preflight",
@@ -1149,6 +1206,7 @@ fn footer_lines(tab: usize, width: u16) -> Vec<Line<'static>> {
 }
 
 fn draw(frame: &mut Frame, app: &mut App) {
+    app.confirmation_visible = false;
     let area = frame.area();
     if area.width < 50 || area.height < 14 {
         frame.render_widget(
@@ -1214,31 +1272,15 @@ fn draw(frame: &mut Frame, app: &mut App) {
                 .collect();
             frame.render_widget(Paragraph::new(lines), body);
         }
-        2 => {
-            let items: Vec<_> = app
-                .resources
-                .iter()
-                .map(|r| {
-                    ListItem::new(format!(
-                        "{}  {}",
-                        safe_text(&r.name),
-                        r.version.as_deref().unwrap_or("no version")
-                    ))
-                })
-                .collect();
-            render_list(
+        2 => app.resources.draw(frame, body),
+        4 => {
+            lists::draw(
                 frame,
                 body,
-                items,
+                app.builds.len(),
                 app.selected,
-                "No resources loaded. Refresh [R]",
-            );
-        }
-        4 => {
-            let items: Vec<_> = app
-                .builds
-                .iter()
-                .map(|b| {
+                |index| {
+                    let b = &app.builds[index];
                     ListItem::new(Line::from(vec![
                         Span::styled(format!("{:<8}", b.version), Style::new().bold()),
                         Span::styled(
@@ -1252,21 +1294,18 @@ fn draw(frame: &mut Frame, app: &mut App) {
                             },
                         ),
                     ]))
-                })
-                .collect();
-            render_list(
-                frame,
-                body,
-                items,
-                app.selected,
+                },
                 "No artifacts loaded. Refresh [R]",
             );
         }
         6 => {
-            let items = FIELDS
-                .iter()
-                .enumerate()
-                .map(|(index, name)| {
+            lists::draw(
+                frame,
+                body,
+                FIELDS.len(),
+                app.selected,
+                |index| {
+                    let name = FIELDS[index];
                     let value = if index >= 9 {
                         if app.field(index).is_empty() {
                             "not set".into()
@@ -1277,9 +1316,9 @@ fn draw(frame: &mut Frame, app: &mut App) {
                         safe_text(&app.field(index))
                     };
                     ListItem::new(format!("{name:<20} {value}"))
-                })
-                .collect();
-            render_list(frame, body, items, app.selected, "");
+                },
+                "",
+            );
         }
         7 => app.actions.draw(frame, body),
         8 => app.config.draw(frame, body),
@@ -1344,15 +1383,12 @@ fn draw(frame: &mut Frame, app: &mut App) {
         let inner = block.inner(modal);
         frame.render_widget(ratatui::widgets::Clear, modal);
         frame.render_widget(block, modal);
-        render_list(
+        lists::draw(
             frame,
             inner,
-            picker
-                .values
-                .iter()
-                .map(|value| ListItem::new(safe_text(value)))
-                .collect(),
+            picker.values.len(),
             picker.selected,
+            |index| ListItem::new(safe_text(&picker.values[index])),
             "No matches found.",
         );
     }
@@ -1361,28 +1397,8 @@ fn draw(frame: &mut Frame, app: &mut App) {
         let height = area.height.saturating_sub(6);
         let modal = Rect::new(3, 3, width, height);
         preview.draw(frame, modal);
+        app.confirmation_visible = true;
     }
-}
-
-fn render_list(
-    frame: &mut Frame,
-    area: Rect,
-    items: Vec<ListItem<'_>>,
-    selected: usize,
-    empty: &str,
-) {
-    if items.is_empty() {
-        frame.render_widget(Paragraph::new(empty), area);
-        return;
-    }
-    let mut state = ListState::default().with_selected(Some(selected));
-    frame.render_stateful_widget(
-        List::new(items)
-            .highlight_symbol("> ")
-            .highlight_style(Style::new().fg(Color::Cyan).bold()),
-        area,
-        &mut state,
-    );
 }
 
 fn render_output<'a>(
@@ -1415,6 +1431,196 @@ fn render_output<'a>(
 mod tests {
     use super::*;
     use ratatui::{backend::TestBackend, Terminal};
+
+    fn resource(name: &str) -> FxserverResourceInfo {
+        FxserverResourceInfo {
+            name: name.into(),
+            path: format!("/resources/{name}"),
+            manifest_path: String::new(),
+            manifest_name: "fxmanifest.lua".into(),
+            version: None,
+            repository: None,
+        }
+    }
+
+    fn sample(running: bool, with_log: bool) -> Update {
+        Update::Sample(
+            Some(FxserverStatus {
+                running,
+                pid: running.then_some(42),
+                artifact_path: None,
+                started_at: None,
+                uptime_seconds: None,
+                resources: None,
+            }),
+            if with_log {
+                vec![FxserverTerminalEntry {
+                    id: 1,
+                    stream: "stdout".into(),
+                    line: "test log".into(),
+                    plain_line: "test log".into(),
+                    segments: vec![],
+                    timestamp: String::new(),
+                }]
+            } else {
+                vec![]
+            },
+        )
+    }
+
+    #[test]
+    fn hidden_samples_are_collected_without_redrawing_unrelated_views() {
+        let mut app = App::new(Settings::default(), PathBuf::new());
+        app.update(sample(true, false));
+        for tab in 2..9 {
+            app.tab = tab;
+            for _ in 0..100 {
+                let update = sample(true, true);
+                assert!(!app.update_affects_view(&update));
+                app.update(update);
+            }
+        }
+        assert_eq!(app.logs.len(), 700);
+        app.tab = 1;
+        assert!(app.update_affects_view(&sample(true, true)));
+        assert!(!app.update_affects_view(&sample(true, false)));
+        app.tab = 0;
+        assert!(app.update_affects_view(&sample(true, false)));
+        app.tab = 8;
+        assert!(
+            app.update_affects_view(&sample(false, false)),
+            "Running badge must update in every view"
+        );
+    }
+
+    #[test]
+    fn unchanged_stopped_status_does_not_repaint() {
+        let mut app = App::new(Settings::default(), PathBuf::new());
+        assert!(app.update_affects_view(&sample(false, false)));
+        app.update(sample(false, false));
+        assert!(!app.update_affects_view(&sample(false, false)));
+    }
+
+    #[test]
+    fn resource_scans_are_scoped_and_profile_changes_clear_the_list() {
+        let mut app = App::new(Settings::default(), PathBuf::new());
+        let previous = app.settings.clone();
+        app.update(Update::Resources(
+            previous.clone(),
+            Ok(vec![resource("alpha")]),
+        ));
+        assert_eq!(app.resources.len(), 1);
+        app.set_field(2, "another-profile".into()).unwrap();
+        assert_eq!(app.resources.len(), 0);
+        app.busy = true;
+        app.update(Update::Resources(previous, Ok(vec![resource("stale")])));
+        assert_eq!(app.resources.len(), 0);
+        assert!(!app.busy);
+    }
+
+    #[test]
+    fn filtered_resource_controls_use_the_selected_match() {
+        let mut app = App::new(Settings::default(), PathBuf::new());
+        app.tab = 2;
+        app.resources
+            .replace(vec![resource("alpha"), resource("second")]);
+        let (send, receive) = mpsc::sync_channel(1);
+        app.key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE), &send);
+        app.paste("second");
+        app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &send);
+        app.key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE), &send);
+        assert!(receive.try_recv().is_err());
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        app.key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE), &send);
+        let Job::Rcon(request) = receive.try_recv().unwrap() else {
+            panic!("Expected RCON job")
+        };
+        assert_eq!(request.command, "stop second");
+    }
+
+    #[test]
+    fn queued_approval_cannot_skip_rendering_the_confirmation() {
+        let mut app = App::new(Settings::default(), PathBuf::new());
+        let (send, receive) = mpsc::sync_channel(1);
+        for key in ['x', 'y'] {
+            app.key(KeyEvent::new(KeyCode::Char(key), KeyModifiers::NONE), &send);
+        }
+        assert!(app.confirm.is_some());
+        assert!(receive.try_recv().is_err());
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        app.key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE), &send);
+        assert!(matches!(receive.try_recv(), Ok(Job::Stop)));
+    }
+
+    #[test]
+    fn hidden_confirmation_cannot_be_approved_in_an_undersized_terminal() {
+        let mut app = App::new(Settings::default(), PathBuf::new());
+        let (send, receive) = mpsc::sync_channel(1);
+        app.require_confirmation("Stop?".into(), Job::Stop);
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        assert!(app.confirmation_visible);
+        app.handle_event(Event::Resize(20, 8), &send);
+        app.handle_event(
+            Event::Key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE)),
+            &send,
+        );
+        assert!(app.confirm.is_some());
+        assert!(receive.try_recv().is_err());
+        let mut small = Terminal::new(TestBackend::new(20, 8)).unwrap();
+        small.draw(|frame| draw(frame, &mut app)).unwrap();
+        app.key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE), &send);
+        assert!(app.confirm.is_some());
+        assert!(receive.try_recv().is_err());
+    }
+
+    #[test]
+    fn paste_under_a_picker_cannot_change_the_resource_filter() {
+        let mut app = App::new(Settings::default(), PathBuf::new());
+        app.tab = 2;
+        app.resources
+            .replace(vec![resource("alpha"), resource("second")]);
+        app.resources
+            .key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
+        app.paste("alpha");
+        app.picker = Some(Picker {
+            kind: Selection::Database,
+            values: vec!["database".into()],
+            selected: 0,
+        });
+        app.paste("hidden");
+        assert_eq!(app.resources.selected().unwrap().name, "alpha");
+    }
+
+    #[test]
+    #[ignore = "manual rendering benchmark"]
+    fn benchmark_large_resource_list() {
+        let mut app = App::new(Settings::default(), PathBuf::new());
+        app.tab = 2;
+        app.resources.replace(
+            (0..20_000)
+                .map(|index| FxserverResourceInfo {
+                    name: format!("resource-{index:05}"),
+                    path: format!("/server/resources/resource-{index:05}"),
+                    manifest_path: String::new(),
+                    manifest_name: "fxmanifest.lua".into(),
+                    version: Some("1.0.0".into()),
+                    repository: None,
+                })
+                .collect(),
+        );
+        app.resources
+            .key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let start = Instant::now();
+        for _ in 0..200 {
+            terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        }
+        eprintln!("20,000 resources, 200 frames: {:?}", start.elapsed());
+    }
 
     fn queue_job(app: &mut App, job: Job) {
         let (send, jobs) = mpsc::sync_channel(1);
@@ -1911,7 +2117,10 @@ mod tests {
                         <= width as usize
                 );
                 let footer = footer_lines(tab, width);
-                assert!(footer.iter().all(|line| line.width() <= width as usize));
+                assert!(
+                    footer.iter().all(|line| line.width() <= width as usize),
+                    "Footer {tab} exceeds {width} columns"
+                );
                 terminal.draw(|frame| draw(frame, &mut app)).unwrap();
                 let buffer = terminal.backend().buffer();
                 let tab_row: String = (0..width).map(|x| buffer[(x, 1)].symbol()).collect();
