@@ -4,6 +4,9 @@ FXServer Installer is a Windows desktop app for setting up, configuring, and mai
 
 The app is built with Svelte, TypeScript, Tauri, Tailwind CSS v4, shadcn-svelte, Vite, Rust, and npm.
 
+> [!IMPORTANT]
+> The `codex/linux-terminal-support` development branch adds Linux desktop support and a standalone terminal manager for Windows and Linux. This work is not part of the published Windows release and is still undergoing native validation. See [Linux and Terminal Builds](docs/linux-terminal.md) for commands, prerequisites, and current limitations.
+
 Quick note: The main purpose of this app was for me to learn how to build with Tauri and hopefully create something useful along the way. I have really enjoyed making this project, and I hope it helps you too.
 
 > [!WARNING]
@@ -65,6 +68,7 @@ Quick note: The main purpose of this app was for me to learn how to build with T
 ## Documentation
 
 - [User Guide](docs/user-guide.md): Install, build, update, and operate the app without relying on the installer workflow.
+- [Linux and Terminal Builds](docs/linux-terminal.md): Build the desktop or headless manager, use the TUI and CLI, and review platform-specific limits.
 - [Live Bridge](docs/live-bridge.md): Optional local pairing, real runtime data, installation, removal, and security limits.
 - [Reviewed Operations](docs/operations-guide.md): Maintenance plans, query tools, dependency inspection, profiler recording, and config validation.
 - [Security Policy](SECURITY.md): Report vulnerabilities privately and review the application's trust boundaries.
