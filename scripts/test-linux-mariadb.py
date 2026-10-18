@@ -409,9 +409,9 @@ class Fixture:
                 self.daemon_log = None
 
     def exercise(self):
-        self.query("CREATE TABLE items (id INT PRIMARY KEY, label VARCHAR(80)) ENGINE=InnoDB; INSERT INTO items VALUES (1,'preserve-me'),(2,CONVERT(0xE4B8ADE69687 USING utf8mb4));")
+        self.query("CREATE TABLE items (id INT PRIMARY KEY, label VARCHAR(80)) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4; INSERT INTO items VALUES (1,'preserve-me'),(2,CONVERT(0xE4B8ADE69687 USING utf8mb4));")
         rows = self.query("SELECT id, label FROM items ORDER BY id;")["rows"]
-        require(len(rows) == 2 and rows[0] == ["1", "preserve-me"], "Query result mismatch.")
+        require(rows == [["1", "preserve-me"], ["2", "\u4e2d\u6587"]], "Query result or Unicode decoding mismatch.")
         self.cli("query", "SELECT 1", "--execute", "--host", "127.0.0.1", "--port", str(self.port),
                  "--user", "fxi_ci_admin", "--password-stdin", secret="wrong-password", success=False)
         require(self.query("SELECT id, label FROM items ORDER BY id;", reader=True)["rows"] == rows, "Reader cannot read fixture.")
