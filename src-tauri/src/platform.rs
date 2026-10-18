@@ -1,4 +1,7 @@
 use sha2::{Digest, Sha256};
+#[cfg(all(test, target_os = "linux", feature = "desktop"))]
+mod glib_regression;
+
 use std::{
     fs::{self, File, OpenOptions},
     path::{Path, PathBuf},
