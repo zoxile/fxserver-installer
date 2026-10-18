@@ -59,9 +59,9 @@ Mutations require explicit confirmation. Some higher-risk operations also requir
 | Area | Available in the TUI |
 | --- | --- |
 | MariaDB | Detect installation/service, inspect package versions, install/update/uninstall, service start/stop/restart, validate/change connection, securely remember/load/forget login. Installer messages appear during the operation. |
-| Database browser | List databases/tables, inspect columns/indexes, bounded filtered/sorted row pages, export filtered CSV to a new file. F3 then `d` opens a database picker for the current session. |
+| Database browser | List databases/tables, inspect columns/indexes, bounded filtered/sorted row pages, export filtered CSV to a new file. F4 then `d` opens a database picker for the current session. |
 | Administration | Create accounts, change passwords, delete exact accounts, add database-scoped privileges, inspect grants, preview/apply database or table creation and table maintenance. |
-| SQL and diagnostics | F3 Enter opens SQL input; `f` reads a SQL file for review. Actions includes server/database inspection and SQL compatibility checks. SQL runs in the selected database, or global scope if it is empty. |
+| SQL and diagnostics | F4 Enter opens SQL input; `f` reads a SQL file for review. Actions includes server/database inspection and SQL compatibility checks. SQL runs in the selected database, or global scope if it is empty. |
 | Backups | Database or table dumps, schema/data/full modes, optional routines/triggers/events, and isolated restore-test preview/apply/owned-database cleanup. Back up independently before installer or destructive SQL actions. |
 | Resources | Manifest scanning and RCON start/stop/restart/ensure, version checks, staged update previews, protected files, snapshots, rollback previews and apply. Resource update and rollback operations require the selected server to be stopped. |
 | Artifacts | Host-platform Legacy and Enhanced catalogs and exact-version installation. Enhanced remains early access; health warnings are not a stability guarantee. |
