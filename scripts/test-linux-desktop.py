@@ -17,16 +17,28 @@ BASE = "http://127.0.0.1:4444"
 ELEMENT = "element-6066-11e4-a52e-4f735466cecf"
 
 
-def request(method, route, body=None):
+def request(method, route, body=None, *, read_only=False):
     data = None if body is None else json.dumps(body).encode()
-    try:
-        with urlopen(Request(BASE + route, data=data, method=method, headers={"Content-Type": "application/json"}), timeout=40) as response:
-            return json.load(response).get("value")
-    except HTTPError as error:
-        raise RuntimeError(error.read().decode()) from error
+    for attempt in range(2):
+        try:
+            with urlopen(Request(BASE + route, data=data, method=method, headers={"Content-Type": "application/json"}), timeout=40) as response:
+                return json.load(response).get("value")
+        except HTTPError as error:
+            raise RuntimeError(error.read().decode()) from error
+        except (ConnectionResetError, URLError) as error:
+            reason = error.reason if isinstance(error, URLError) else error
+            # RemoteDisconnected subclasses ConnectionResetError. Only explicitly
+            # read-only commands may be replayed after an ambiguous response loss.
+            if not read_only or attempt != 0 or not isinstance(reason, ConnectionResetError):
+                raise
+            print(
+                f"WARNING: WebDriver {method} {route}: {type(reason).__name__}; "
+                "retrying read-only request once without replacing the session.",
+                file=sys.stderr, flush=True,
+            )
 
 
-def wait_until(action, timeout=30):
+def wait_until(action, timeout=30, *, wait_for_connection=False):
     deadline = time.monotonic() + timeout
     last_error = None
     while time.monotonic() < deadline:
@@ -34,7 +46,11 @@ def wait_until(action, timeout=30):
             value = action()
             if value:
                 return value
-        except (OSError, URLError, RuntimeError) as error:
+        except URLError as error:
+            # Startup may precede the listening socket. Once reachable, transport
+            # failures and WebDriver errors must not become another polling retry.
+            if not wait_for_connection or not isinstance(error.reason, ConnectionRefusedError):
+                raise
             last_error = error
         time.sleep(0.2)
     raise AssertionError(f"Timed out waiting for desktop state: {last_error}")
@@ -54,14 +70,14 @@ def smoke(binary, output):
         ) as driver:
             session = None
             try:
-                wait_until(lambda: request("GET", "/status"))
+                wait_until(lambda: request("GET", "/status", read_only=True), wait_for_connection=True)
                 capabilities = {"capabilities": {"alwaysMatch": {"tauri:options": {"application": str(binary)}}}}
                 session = request("POST", "/session", capabilities)["sessionId"]
                 prefix = f"/session/{session}"
                 request("POST", prefix + "/timeouts", {"script": 30000, "implicit": 1000})
 
-                def execute(script, *args):
-                    return request("POST", prefix + "/execute/sync", {"script": script, "args": list(args)})
+                def execute(script, *args, read_only=False):
+                    return request("POST", prefix + "/execute/sync", {"script": script, "args": list(args)}, read_only=read_only)
 
                 def native(command, args=None):
                     result = request("POST", prefix + "/execute/async", {
@@ -87,43 +103,43 @@ def smoke(binary, output):
 
                 def navigate(parent, child, heading):
                     selector = f'nav[aria-label="Workspace navigation"] [title="{parent}"]'
-                    if execute("return document.querySelector(arguments[0])?.getAttribute('aria-expanded')", selector) != "true":
+                    if execute("return document.querySelector(arguments[0])?.getAttribute('aria-expanded')", selector, read_only=True) != "true":
                         click(selector)
                     click(f'nav[aria-label="Workspace navigation"] [title="{child}"]')
-                    wait_until(lambda: execute("return [...document.querySelectorAll('h1,h2')].some(e=>e.textContent.trim()===arguments[0])", heading))
+                    wait_until(lambda: execute("return [...document.querySelectorAll('h1,h2')].some(e=>e.textContent.trim()===arguments[0])", heading, read_only=True))
 
                 def screenshot(name):
-                    content = request("GET", prefix + "/screenshot")
+                    content = request("GET", prefix + "/screenshot", read_only=True)
                     (output / f"{name}.png").write_bytes(base64.b64decode(content, validate=True))
 
-                wait_until(lambda: execute("return !!document.querySelector('nav[aria-label=\"Workspace navigation\"]')"))
+                wait_until(lambda: execute("return !!document.querySelector('nav[aria-label=\"Workspace navigation\"]')", read_only=True))
                 execute("window.nativeTestErrors=[]; addEventListener('error',e=>nativeTestErrors.push(e.message)); addEventListener('unhandledrejection',e=>nativeTestErrors.push(String(e.reason)));")
                 info = native("get_platform_info")
                 assert info["os"] == "linux" and info["artifactPlatform"] == "linux", info
                 assert not info["clientLogsSupported"], info
                 screenshot("home")
                 navigate("Artifacts", "Install Artifact", "Install Artifact")
-                wait_until(lambda: execute("return document.body.innerText.includes('Install Linux Artifact')"))
+                wait_until(lambda: execute("return document.body.innerText.includes('Install Linux Artifact')", read_only=True))
                 screenshot("artifacts")
                 navigate("MariaDB", "Manage MariaDB", "Manage MariaDB")
-                wait_until(lambda: execute("return document.body.innerText.includes('Install Configuration')"))
-                assert not execute("return document.body.innerText.includes('HeidiSQL')")
+                wait_until(lambda: execute("return document.body.innerText.includes('Install Configuration')", read_only=True))
+                assert not execute("return document.body.innerText.includes('HeidiSQL')", read_only=True)
                 screenshot("mariadb")
                 navigate("FXServer", "Manage Server", "Manage Server")
-                wait_until(lambda: execute("return document.body.innerText.includes('Performance')"))
+                wait_until(lambda: execute("return document.body.innerText.includes('Performance')", read_only=True))
                 screenshot("server")
                 navigate("Logs", "Client Logs", "Client Logs")
-                wait_until(lambda: execute("return document.body.innerText.includes('client log discovery is unavailable')"))
-                assert not execute("return document.documentElement.scrollWidth > innerWidth + 1")
-                assert execute("return nativeTestErrors") == []
+                wait_until(lambda: execute("return document.body.innerText.includes('client log discovery is unavailable')", read_only=True))
+                assert not execute("return document.documentElement.scrollWidth > innerWidth + 1", read_only=True)
+                assert execute("return nativeTestErrors", read_only=True) == []
                 screenshot("client-logs")
-                assert execute("return !!document.querySelector('[title=\"Quit application\"]')")
+                assert execute("return !!document.querySelector('[title=\"Quit application\"]')", read_only=True)
                 print(json.dumps({"platform": info, "pages": ["home", "artifacts", "mariadb", "server", "client-logs"], "nativeIpc": True}))
             except Exception:
                 if session:
                     try:
                         screenshot("failure")
-                        (output / "failure.txt").write_text(execute("return document.body.innerText"), encoding="utf-8")
+                        (output / "failure.txt").write_text(execute("return document.body.innerText", read_only=True), encoding="utf-8")
                     except (OSError, URLError, RuntimeError):
                         pass
                 raise
