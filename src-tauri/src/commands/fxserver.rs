@@ -155,7 +155,7 @@ fn resource_process_id(process: &ManagedFxserverProcess) -> u32 {
 
 #[derive(Default)]
 struct TerminalState {
-    entries: Vec<FxserverTerminalEntry>,
+    entries: VecDeque<FxserverTerminalEntry>,
     incidents: VecDeque<ConsoleIncident>,
     workspace_id: String,
     next_id: u64,
@@ -945,9 +945,7 @@ fn get_fxserver_terminal_blocking(
     let start = if let Some(after_id) = after_id {
         let first_new = terminal
             .entries
-            .iter()
-            .position(|entry| entry.id > after_id)
-            .unwrap_or(terminal.entries.len());
+            .partition_point(|entry| entry.id <= after_id);
         let new_count = terminal.entries.len().saturating_sub(first_new);
 
         if new_count > max_lines {
@@ -960,7 +958,7 @@ fn get_fxserver_terminal_blocking(
     };
 
     Ok(FxserverTerminalResult {
-        entries: terminal.entries[start..].to_vec(),
+        entries: terminal.entries.iter().skip(start).cloned().collect(),
     })
 }
 
@@ -2367,12 +2365,10 @@ fn append_terminal_generation(
             message: entry.plain_line.chars().take(2000).collect(),
         });
     }
-    terminal.entries.push(entry);
-
-    if terminal.entries.len() > 5000 {
-        let overflow = terminal.entries.len() - 5000;
-        terminal.entries.drain(0..overflow);
+    if terminal.entries.len() == 5000 {
+        terminal.entries.pop_front();
     }
+    terminal.entries.push_back(entry);
 
     Ok(())
 }
@@ -3731,6 +3727,107 @@ mod tests {
         clear_terminal(&manager.terminal).unwrap();
         append_terminal_line(&manager.terminal, "stdout", "after").unwrap();
         assert_eq!(manager.terminal.lock().unwrap().next_id, next_id + 1);
+        let result = manager.terminal(Some(50), Some(next_id - 1)).unwrap();
+        assert_eq!(result.entries.len(), 1);
+        assert_eq!(result.entries[0].plain_line, "after");
+    }
+
+    fn terminal_fixture() -> FxserverManager {
+        let manager = FxserverManager::default();
+        manager.terminal.lock().unwrap().entries = (100..5100)
+            .map(|id| FxserverTerminalEntry {
+                id,
+                stream: "stdout".into(),
+                line: "fixture".into(),
+                plain_line: "fixture".into(),
+                segments: Vec::new(),
+                timestamp: String::new(),
+            })
+            .collect();
+        manager.terminal.lock().unwrap().next_id = 5100;
+        manager
+    }
+
+    #[test]
+    fn terminal_cursor_preserves_tail_limits_and_handles_eviction() {
+        let manager = terminal_fixture();
+        for (cursor, limit, first, count) in [
+            (None, Some(50), 5050, 50),
+            (Some(1), Some(50), 5050, 50),
+            (Some(5049), Some(50), 5050, 50),
+            (Some(5090), Some(50), 5091, 9),
+            (Some(5099), Some(50), 0, 0),
+            (Some(u64::MAX), None, 0, 0),
+            (None, Some(0), 5050, 50),
+            (None, Some(10_000), 100, 5000),
+            (None, None, 4600, 500),
+        ] {
+            let result = manager.terminal(limit, cursor).unwrap();
+            assert_eq!(result.entries.len(), count, "cursor {cursor:?}");
+            if count > 0 {
+                assert_eq!(result.entries[0].id, first);
+                assert_eq!(result.entries[count - 1].id, 5099);
+            }
+        }
+        manager.terminal.lock().unwrap().entries.clear();
+        assert!(manager
+            .terminal(None, Some(5099))
+            .unwrap()
+            .entries
+            .is_empty());
+    }
+
+    #[test]
+    fn terminal_ring_retains_order_and_cursor_across_wraparound() {
+        let manager = terminal_fixture();
+        for _ in 0..6100 {
+            append_terminal_line(&manager.terminal, "stdout", "new output").unwrap();
+        }
+        let retained = manager.terminal(Some(5000), None).unwrap().entries;
+        assert_eq!(retained.len(), 5000);
+        assert_eq!(retained.first().unwrap().id, 6200);
+        assert_eq!(retained.last().unwrap().id, 11199);
+        assert!(retained.windows(2).all(|pair| pair[1].id == pair[0].id + 1));
+        let result = manager.terminal(Some(50), Some(11197)).unwrap();
+        assert_eq!(result.entries.len(), 2);
+        assert_eq!(result.entries[0].id, 11198);
+        assert!(manager
+            .terminal(None, Some(11199))
+            .unwrap()
+            .entries
+            .is_empty());
+    }
+
+    #[test]
+    #[ignore = "manual console polling benchmark"]
+    fn benchmark_idle_terminal_polling() {
+        let manager = terminal_fixture();
+        let start = Instant::now();
+        for _ in 0..20_000 {
+            let result = manager
+                .terminal(Some(500), Some(std::hint::black_box(5099)))
+                .unwrap();
+            assert!(std::hint::black_box(result).entries.is_empty());
+        }
+        eprintln!(
+            "20,000 idle polls with 5,000 retained entries: {:?}",
+            start.elapsed()
+        );
+    }
+
+    #[test]
+    #[ignore = "manual console ingestion benchmark"]
+    fn benchmark_retained_terminal_ingestion() {
+        let manager = terminal_fixture();
+        let start = Instant::now();
+        for _ in 0..20_000 {
+            append_terminal_line(&manager.terminal, "stdout", "fixture").unwrap();
+        }
+        eprintln!(
+            "20,000 appends with 5,000 retained entries: {:?}",
+            start.elapsed()
+        );
+        assert_eq!(manager.terminal.lock().unwrap().entries.len(), 5000);
     }
 
     #[test]
