@@ -162,7 +162,11 @@ def console_history(probe, root):
     probe.send(b"x")
     probe.contains("Stop the managed server?")
     probe.send(b"y")
-    probe.contains("Server stopped.")
+    probe.expect(
+        lambda text: "STOPPED" in text and "Complete" in text
+        and "Confirm Y" not in text and (txdata / "fixture.stopped").exists(),
+        "Server view completes stop and the synthetic launcher acknowledges graceful quit",
+    )
     assert (txdata / "fixture.stopped").read_text() == "stopped", "Fixture did not receive graceful quit"
     assert not (txdata / "fixture.unexpected-input").exists(), "A console edit was sent to the fixture"
     child = int((txdata / "fixture.pid").read_text())
