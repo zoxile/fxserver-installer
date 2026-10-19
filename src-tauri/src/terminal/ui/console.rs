@@ -208,7 +208,11 @@ impl Panel {
             return true;
         }
         let start = self.visible_range().start;
-        let last = self.matches.len().saturating_sub(self.height.max(1));
+        let last = self
+            .matches
+            .len()
+            .saturating_sub(self.height.max(1))
+            .max(start);
         let index = match key.code {
             KeyCode::Up => start.saturating_sub(1),
             KeyCode::Down => start.saturating_add(1).min(last),
@@ -513,6 +517,33 @@ mod tests {
         assert_eq!(visible(&panel)[0], "row-7");
         key(&mut panel, KeyCode::End);
         assert_eq!(visible(&panel)[0], "row-8");
+        assert!(panel.anchor.is_none());
+    }
+
+    #[test]
+    fn resizing_a_paused_tail_never_makes_forward_navigation_move_backward() {
+        let mut panel = Panel {
+            height: 3,
+            ..Panel::default()
+        };
+        for index in 0..10 {
+            panel.append(entry(&format!("row-{index}")));
+        }
+        key(&mut panel, KeyCode::Char(' '));
+        screen(&mut panel, 80, 10);
+        assert_eq!(panel.height, 8);
+        assert_eq!(visible(&panel)[0], "row-7");
+        for code in [KeyCode::Down, KeyCode::PageDown] {
+            key(&mut panel, code);
+            assert_eq!(visible(&panel)[0], "row-7");
+        }
+        for index in 10..16 {
+            panel.append(entry(&format!("row-{index}")));
+        }
+        key(&mut panel, KeyCode::Down);
+        assert_eq!(visible(&panel)[0], "row-8");
+        assert!(panel.anchor.is_some());
+        key(&mut panel, KeyCode::End);
         assert!(panel.anchor.is_none());
     }
 
