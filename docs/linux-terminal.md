@@ -46,7 +46,7 @@ Passwords are session-only by default and never written to `terminal.json`. Acti
 2. Press `p` to discover and choose a txAdmin profile. An empty txData path can be discovered from the artifact directory. Press `s` to save non-secret settings.
 3. Open F6 and press `r` to review preflight checks. Resolve blocking findings before starting the server.
 4. Open F1 and press `s` to start, `x` to stop, or `r` to restart. Stop/restart ask for confirmation. Force start is `f`, after reviewing the checks.
-5. Open F2 and press Enter to enter an RCON command. Set the RCON password in Settings first. PgUp/PgDn scroll the bounded console; End follows its latest output.
+5. Open F2 and press Enter to enter an RCON command. Set the RCON password in Settings first. PgUp/PgDn scroll the bounded console; End follows its latest output. The controls below help read busy output without stopping collection.
 
 Server history retains up to an hour of samples while this TUI is running. On F1, keys `1`-`5` select 30 seconds, 5 minutes, 10 minutes, 30 minutes, or one hour. CPU and RAM use separate colors; session lows/highs reset for a new managed process. Small terminals show the numeric summary instead of squeezing in unreadable charts.
 
@@ -75,6 +75,16 @@ In an action result, Ctrl+F opens exact-text search. Enter finds the next occurr
 ### Finding Resources
 
 On F3, press `r` to scan the selected profile, then `/` or Ctrl+F to filter by resource name, version, or repository. Search is case-insensitive and accepts multiple words. Enter keeps the filter and returns to list navigation. Esc leaves the search field; another Esc clears the filter. Arrows, PgUp/PgDn, Home, and End move through matches. Start/stop/restart/ensure and context-sensitive Actions use the selected matching resource. Changing profiles clears the old list and ignores any old scan still in flight.
+
+### Reading The Console
+
+On F2, `/` or Ctrl+F opens a case-insensitive filter. All words must occur in the same line; the filter treats punctuation literally and keeps the original log colors. Enter or Esc leaves the filter field without clearing it; Esc outside the field clears it. The filter is session-only and limited to 256 UTF-8 bytes.
+
+Space pauses or resumes following, Up/Down and PgUp/PgDn browse history, and Home goes to the oldest retained matches. End resumes following the newest matches. Switching tabs or receiving an RCON response preserves a paused reading position. Pausing affects the view only: collection continues at the same cadence, and the status reports incoming output.
+
+The TUI retains at most 2,000 lines. Older lines still expire while paused; if the line you were reading expires, the view reports this and advances to the oldest retained matches. Filtering searches this retained history, not the server's complete log files. Use the log actions to inspect other available logs.
+
+Enter outside the filter opens RCON input. While typing a command, spaces, slashes and navigation keys edit that input rather than changing the log view. Esc cancels it. Submitted commands are not saved as command history or echoed into the console; responses can still contain sensitive server data.
 
 ### Editing Configuration
 
@@ -205,6 +215,8 @@ cargo test --manifest-path src-tauri/Cargo.toml --locked --no-default-features -
 ```
 
 It renders 200 frames with 20,000 inert resource records. Compare the same build profile and terminal dimensions; this measures list rendering, not whole-app throughput. The ordinary tests verify that only visible rows are formatted and hidden log updates do not request unrelated redraws.
+
+For shared console-buffer benchmarks, run the same command with `benchmark_idle_terminal_polling` or `benchmark_retained_terminal_ingestion` in place of `benchmark_large_resource_list`. Each performs 20,000 operations with 5,000 retained entries, entirely in memory. These measure cursor lookup and bounded ingestion, not server throughput. Regression tests cover ring wraparound, cursor continuity after resets, paused-view eviction, filtering and native terminal input routing.
 
 `.github/workflows/linux-checks.yml` runs on pull requests, manual dispatch, and pushes to `feature/linux-terminal-support`. All jobs use Ubuntu 24.04 x86_64 runners with stable Rust:
 
