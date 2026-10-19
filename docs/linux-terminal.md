@@ -206,7 +206,7 @@ cargo test --manifest-path src-tauri/Cargo.toml --locked --no-default-features -
 
 It renders 200 frames with 20,000 inert resource records. Compare the same build profile and terminal dimensions; this measures list rendering, not whole-app throughput. The ordinary tests verify that only visible rows are formatted and hidden log updates do not request unrelated redraws.
 
-`.github/workflows/linux-checks.yml` runs on pull requests, manual dispatch, and pushes to `codex/linux-terminal-support`. All jobs use Ubuntu 24.04 x86_64 runners with stable Rust:
+`.github/workflows/linux-checks.yml` runs on pull requests, manual dispatch, and pushes to `feature/linux-terminal-support`. All jobs use Ubuntu 24.04 x86_64 runners with stable Rust:
 
 | Environment | Automated coverage | Time limit |
 | --- | --- | --- |

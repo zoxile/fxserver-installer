@@ -2,7 +2,7 @@ name: Linux Checks
 
 on:
   push:
-    branches: [codex/linux-terminal-support]
+    branches: [feature/linux-terminal-support]
   pull_request:
   workflow_dispatch:
 
