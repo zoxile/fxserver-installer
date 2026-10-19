@@ -22,7 +22,6 @@ use ratatui::{
     Frame,
 };
 use std::{
-    collections::VecDeque,
     io::{self, IsTerminal},
     path::PathBuf,
     sync::{
@@ -37,6 +36,7 @@ use tokio::runtime::Runtime;
 
 mod actions;
 mod config;
+mod console;
 mod lists;
 mod performance;
 mod render;
@@ -161,7 +161,7 @@ struct App {
     quitting: bool,
     notice: String,
     error: bool,
-    logs: VecDeque<Line<'static>>,
+    console: console::Panel,
     output: Vec<String>,
     resources: resources::Panel,
     builds: Vec<ArtifactBuild>,
@@ -196,7 +196,7 @@ impl App {
             quitting: false,
             notice: "Ready".into(),
             error: false,
-            logs: VecDeque::new(),
+            console: console::Panel::default(),
             output: Vec::new(),
             resources: resources::Panel::default(),
             builds: Vec::new(),
@@ -209,6 +209,10 @@ impl App {
     }
     fn paste(&mut self, value: &str) {
         if self.picker.is_some() {
+            return;
+        }
+        if self.tab == 1 && self.edit.is_none() && self.confirm.is_none() && !self.quitting {
+            self.console.paste(value);
             return;
         }
         if self.tab == 2 && self.edit.is_none() && self.confirm.is_none() && !self.quitting {
@@ -499,34 +503,16 @@ impl App {
             Update::Rcon(result) => {
                 self.busy = false;
                 self.error = result.is_err();
-                let (label, text) = match result {
-                    Ok(text) => ("RCON", text),
-                    Err(error) => ("RCON error", error),
+                let text = match result {
+                    Ok(text) | Err(text) => text,
                 };
-                let text = safe_text(&text);
                 self.notice = if self.error {
                     "RCON failed. See Console."
                 } else {
                     "RCON complete. See Console."
                 }
                 .into();
-                if text.trim().is_empty() {
-                    self.logs
-                        .push_back(Line::raw(format!("[{label}] No response text.")));
-                } else {
-                    for line in text.lines() {
-                        self.logs.push_back(Line::raw(format!("[{label}] {line}")));
-                        while self.logs.len() > MAX_LINES {
-                            self.logs.pop_front();
-                        }
-                    }
-                }
-                while self.logs.len() > MAX_LINES {
-                    self.logs.pop_front();
-                }
-                if self.tab == 1 {
-                    self.scroll = 0;
-                }
+                self.console.rcon(&text, self.error);
             }
             Update::Resources(settings, result) => {
                 if settings.artifact_path != self.settings.artifact_path
@@ -559,35 +545,8 @@ impl App {
                 if status.is_some() {
                     self.status = status;
                 }
-                if self.tab == 1 && self.scroll > 0 {
-                    self.scroll = self.scroll.saturating_add(entries.len()).min(MAX_LINES);
-                }
                 for entry in entries {
-                    let line = if entry.segments.is_empty() {
-                        Line::raw(safe_text(&entry.plain_line))
-                    } else {
-                        Line::from(
-                            entry
-                                .segments
-                                .into_iter()
-                                .map(|segment| {
-                                    let color = segment
-                                        .color
-                                        .and_then(|color| color.parse::<Color>().ok())
-                                        .unwrap_or(Color::Reset);
-                                    let mut style = Style::new().fg(color);
-                                    if segment.emphasis == Some(true) {
-                                        style = style.bold();
-                                    }
-                                    Span::styled(safe_text(&segment.text), style)
-                                })
-                                .collect::<Vec<_>>(),
-                        )
-                    };
-                    self.logs.push_back(line);
-                }
-                while self.logs.len() > MAX_LINES {
-                    self.logs.pop_front();
+                    self.console.append(entry);
                 }
             }
             Update::SqlFile(result) => {
@@ -630,6 +589,7 @@ impl App {
             0 => status
                 .as_ref()
                 .is_some_and(|status| status.running || self.status.is_none()),
+            // Paused history still shows incoming counts and retention changes.
             1 => !entries.is_empty(),
             _ => false,
         }
@@ -872,6 +832,15 @@ impl App {
             return;
         }
         if self.tab == 2 && !matches!(key.code, KeyCode::F(1..=9)) && self.resources.key(key) {
+            return;
+        }
+        if self.tab == 1
+            && !matches!(
+                key.code,
+                KeyCode::F(1..=9) | KeyCode::Tab | KeyCode::BackTab
+            )
+            && self.console.key(key)
+        {
             return;
         }
         match key.code {
@@ -1186,7 +1155,7 @@ fn tab_titles(width: u16, selected: usize) -> Vec<&'static str> {
 
 fn footer_lines(tab: usize, width: u16) -> Vec<Line<'static>> {
     let actions = match tab {
-        1 => "Enter: command  PgUp/PgDn: scroll",
+        1 => "Enter: RCON  Space: pause/follow  End: follow",
         2 => "/: find R: scan S/X/T/E: start/stop/restart/ensure",
         3 => "Enter: SQL  D: databases  F: SQL file",
         4 => "R: refresh  Enter: install",
@@ -1250,28 +1219,17 @@ fn draw(frame: &mut Frame, app: &mut App) {
             .divider(" | "),
         layout[1],
     );
-    let block = Block::default().borders(Borders::ALL).title(TABS[app.tab]);
+    let mut block = Block::default().borders(Borders::ALL).title(TABS[app.tab]);
+    if app.tab == 1 {
+        block = block.title_bottom(app.console.footer());
+    }
     let body = block.inner(layout[2]);
     frame.render_widget(block, layout[2]);
     match app.tab {
         0 => app
             .performance
             .draw(frame, body, app.status.as_ref(), &app.settings),
-        1 => {
-            let end = app
-                .logs
-                .len()
-                .saturating_sub(app.scroll.min(app.logs.len().saturating_sub(1)));
-            let start = end.saturating_sub(body.height as usize);
-            let lines: Vec<_> = app
-                .logs
-                .iter()
-                .skip(start)
-                .take(end - start)
-                .cloned()
-                .collect();
-            frame.render_widget(Paragraph::new(lines), body);
-        }
+        1 => app.console.draw(frame, body),
         2 => app.resources.draw(frame, body),
         4 => {
             lists::draw(
@@ -1468,6 +1426,181 @@ mod tests {
         )
     }
 
+    fn console_screen(app: &mut App, width: u16, height: u16) -> Vec<String> {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal.draw(|frame| draw(frame, app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        (0..height)
+            .map(|y| (0..width).map(|x| buffer[(x, y)].symbol()).collect())
+            .collect()
+    }
+
+    fn console_sample(text: &str) -> Update {
+        let Update::Sample(_, mut entries) = sample(false, true) else {
+            unreachable!()
+        };
+        entries[0].plain_line = text.into();
+        Update::Sample(None, entries)
+    }
+
+    #[test]
+    fn console_filter_and_rcon_inputs_do_not_share_text_or_shortcuts() {
+        let (send, jobs) = mpsc::sync_channel(1);
+        let mut app = App::new(Settings::default(), PathBuf::new());
+        app.tab = 1;
+        app.update(console_sample("keep row"));
+        app.update(console_sample("other row"));
+        app.key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE), &send);
+        app.paste("keep");
+        app.key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE), &send);
+        app.key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE), &send);
+        app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &send);
+        assert!(app.edit.is_none());
+        assert!(app.input.value.is_empty());
+        assert!(jobs.try_recv().is_err());
+        let screen = console_screen(&mut app, 80, 24).join("\n");
+        assert!(screen.contains("1 matches"));
+        assert!(screen.contains("keep row") && !screen.contains("other row"));
+
+        app.key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE), &send);
+        app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &send);
+        app.paste("status / command-secret");
+        app.key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE), &send);
+        app.key(
+            KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL),
+            &send,
+        );
+        app.key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE), &send);
+        assert_eq!(app.input.value, "status / command-secret ");
+        assert!(matches!(app.edit, Some(Edit::Console)));
+        assert!(console_screen(&mut app, 80, 24)
+            .join("\n")
+            .contains("Paused"));
+        app.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &send);
+        assert!(jobs.try_recv().is_err());
+        assert!(app.input.value.is_empty());
+        let screen = console_screen(&mut app, 80, 24).join("\n");
+        assert!(screen.contains("1 matches") && !screen.contains("command-secret"));
+        app.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &send);
+        assert!(console_screen(&mut app, 80, 24)
+            .join("\n")
+            .contains("2 matches"));
+
+        app.key(
+            KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL),
+            &send,
+        );
+        app.paste("keep");
+        app.key(
+            KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL),
+            &send,
+        );
+        assert_eq!(app.tab, 7);
+        app.key(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE), &send);
+        assert!(console_screen(&mut app, 80, 24)
+            .join("\n")
+            .contains("Filter (Enter/Esc: done)"));
+        app.key(
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+            &send,
+        );
+        assert!(matches!(jobs.try_recv(), Ok(Job::Quit)));
+    }
+
+    #[test]
+    fn console_anchor_survives_samples_rcon_tab_switches_and_other_view_scrolling() {
+        let (send, jobs) = mpsc::sync_channel(1);
+        let mut app = App::new(Settings::default(), PathBuf::new());
+        app.tab = 1;
+        for index in 0..60 {
+            app.update(console_sample(&format!("history-{index:03}")));
+        }
+        console_screen(&mut app, 80, 24);
+        app.key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE), &send);
+        for _ in 0..5 {
+            app.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &send);
+        }
+        let history = |app: &mut App| -> Vec<String> {
+            console_screen(app, 80, 24)
+                .into_iter()
+                .filter(|line| line.contains("history-"))
+                .collect()
+        };
+        let original = history(&mut app);
+        assert!(original[0].contains("history-005"));
+        for (away, back) in [
+            (KeyCode::F(1), KeyCode::F(2)),
+            (KeyCode::Tab, KeyCode::BackTab),
+            (KeyCode::BackTab, KeyCode::Tab),
+            (KeyCode::F(8), KeyCode::F(2)),
+        ] {
+            app.key(KeyEvent::new(away, KeyModifiers::NONE), &send);
+            app.update(console_sample("arrived offscreen"));
+            app.key(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE), &send);
+            app.key(KeyEvent::new(back, KeyModifiers::NONE), &send);
+            assert_eq!(history(&mut app), original);
+        }
+        app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &send);
+        app.paste("private-command");
+        app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &send);
+        assert!(matches!(jobs.try_recv(), Ok(Job::Rcon(_))));
+        app.update(Update::Rcon(Ok("separate response".into())));
+        app.update(console_sample("arrived after RCON"));
+        assert_eq!(history(&mut app), original);
+        assert!(!app
+            .console
+            .lines()
+            .any(|line| line.to_string().contains("private-command")));
+        for (width, height) in [(50, 14), (140, 40)] {
+            let resized = console_screen(&mut app, width, height);
+            assert!(resized
+                .iter()
+                .find(|line| line.contains("history-"))
+                .unwrap()
+                .contains("history-005"));
+        }
+    }
+
+    #[test]
+    fn paused_samples_update_counts_but_hidden_samples_and_modal_content_do_not_redraw() {
+        let (send, _) = mpsc::sync_channel(1);
+        let mut app = App::new(Settings::default(), PathBuf::new());
+        app.tab = 1;
+        app.update(sample(false, false));
+        app.key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE), &send);
+        assert!(app.update_affects_view(&sample(false, true)));
+        assert!(!app.update_affects_view(&sample(false, false)));
+        app.update(sample(false, true));
+        assert!(console_screen(&mut app, 50, 14)
+            .join("\n")
+            .contains("1 new"));
+        app.tab = 2;
+        assert!(!app.update_affects_view(&sample(false, true)));
+        app.tab = 1;
+        app.require_confirmation("Guarded operation".into(), Job::Stop);
+        assert!(!app.update_affects_view(&sample(false, true)));
+        assert!(app.update_affects_view(&sample(true, true)));
+        assert!(app.update_affects_view(&Update::Rcon(Ok("reply".into()))));
+    }
+
+    #[test]
+    fn console_retention_notice_and_log_row_fit_the_smallest_supported_view() {
+        let (send, _) = mpsc::sync_channel(1);
+        let mut app = App::new(Settings::default(), PathBuf::new());
+        app.tab = 1;
+        app.update(console_sample("old anchor"));
+        console_screen(&mut app, 50, 14);
+        app.key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE), &send);
+        for _ in 0..MAX_LINES + 5 {
+            app.update(console_sample("retained row"));
+        }
+        let screen = console_screen(&mut app, 50, 14).join("\n");
+        assert!(screen.contains("Paused rows expired; oldest retained shown."));
+        assert!(screen.contains("retained row"));
+        assert!(screen.contains("999+ new"));
+        assert_eq!(app.console.lines().len(), MAX_LINES);
+    }
+
     #[test]
     fn hidden_samples_are_collected_without_redrawing_unrelated_views() {
         let mut app = App::new(Settings::default(), PathBuf::new());
@@ -1480,7 +1613,7 @@ mod tests {
                 app.update(update);
             }
         }
-        assert_eq!(app.logs.len(), 700);
+        assert_eq!(app.console.lines().len(), 700);
         app.tab = 1;
         assert!(app.update_affects_view(&sample(true, true)));
         assert!(!app.update_affects_view(&sample(true, false)));
@@ -2215,7 +2348,7 @@ mod tests {
         };
         assert!(request.command.contains("command-secret"));
         assert!(
-            app.logs.is_empty(),
+            app.console.lines().len() == 0,
             "Do not echo submitted commands into console history"
         );
         app.output = vec!["previous SQL result".into()];
@@ -2225,7 +2358,7 @@ mod tests {
             &request.rcon.password,
         )));
         assert!(!app.busy && !app.error);
-        assert_eq!(app.scroll, 0);
+        assert_eq!(app.scroll, 10);
         assert_eq!(app.output, ["previous SQL result"]);
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
         terminal.draw(|frame| draw(frame, &mut app)).unwrap();
@@ -2239,20 +2372,20 @@ mod tests {
         assert!(content.contains("[RCON] online: 3"));
         assert!(!content.contains("session-secret") && !content.contains("command-secret"));
         assert!(!app
-            .logs
-            .iter()
+            .console
+            .lines()
             .any(|line| line.to_string().contains('\x1b')));
         app.update(Update::Rcon(Ok("line\n".repeat(MAX_LINES + 10))));
-        assert_eq!(app.logs.len(), MAX_LINES);
+        assert_eq!(app.console.lines().len(), MAX_LINES);
         app.update(Update::Rcon(redact_rcon_password(
             Err("denied session-secret".into()),
             &request.rcon.password,
         )));
         assert!(app.error);
         assert_eq!(
-            app.logs.back().unwrap().to_string(),
+            app.console.lines().next_back().unwrap().to_string(),
             "[RCON error] denied [redacted]"
         );
-        assert_eq!(app.logs.len(), MAX_LINES);
+        assert_eq!(app.console.lines().len(), MAX_LINES);
     }
 }
