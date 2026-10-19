@@ -64,7 +64,7 @@ jobs:
         run: cargo install cargo-audit --version 0.22.2 --locked
 
       - name: Audit native dependencies
-        run: cargo audit --file src-tauri/Cargo.lock
+        run: python scripts/audit-rust.py
 
       - name: Check app
         run: npm run check

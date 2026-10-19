@@ -74,7 +74,7 @@ jobs:
           cargo install tauri-driver --version 2.1.0 --locked
 
       - name: Audit Rust dependencies
-        run: cargo audit --file src-tauri/Cargo.lock
+        run: python3 scripts/audit-rust.py
 
       - name: Verify pinned GLib security backport
         run: |
