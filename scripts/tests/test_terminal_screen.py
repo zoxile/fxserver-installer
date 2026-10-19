@@ -77,6 +77,31 @@ class ScreenTests(unittest.TestCase):
         with self.assertRaisesRegex(AssertionError, "output limit"):
             probe.contains("absent")
 
+    def test_remains_consumes_queued_frames_and_ignores_idle_reads(self):
+        chunks = iter([None, b"\x1b[HFollowing\x1b[2;1Hupdated"])
+        probe = terminal.Probe(lambda _: None, lambda _: next(chunks, None))
+        probe.screen.feed(b"Following")
+        ticks = iter(index / 100 for index in range(1000))
+        with patch.object(terminal.time, "monotonic", side_effect=lambda: next(ticks)):
+            probe.remains(lambda text: "Following" in text, "follow state is unchanged")
+        self.assertIn("updated", probe.screen.text)
+        self.assertGreater(probe.total, 0)
+
+    def test_remains_rejects_a_transient_violation_even_if_later_restored(self):
+        chunks = iter([b"\x1b[2J\x1b[HPaused", b"\x1b[2J\x1b[HFollowing"])
+        probe = terminal.Probe(lambda _: None, lambda _: next(chunks, None))
+        probe.screen.feed(b"Following")
+        with self.assertRaisesRegex(AssertionError, "Changed during"):
+            probe.remains(lambda text: "Following" in text, "input must not pause")
+
+    def test_remains_keeps_eof_and_output_budget_guards(self):
+        for chunk, total, message in ((b"", 0, "closed"), (b"x", 2 * 1024 * 1024, "output limit")):
+            with self.subTest(message=message):
+                probe = terminal.Probe(lambda _: None, lambda _: chunk)
+                probe.total = total
+                with self.assertRaisesRegex(AssertionError, message):
+                    probe.remains(lambda _: True, "bounded live screen")
+
     def test_confirmation_probe_batches_input_then_cancels_the_visible_dialog(self):
         writes, chunks = [], []
 
@@ -165,6 +190,87 @@ class ScreenTests(unittest.TestCase):
                         terminal.assert_unchanged(files)
                     path.write_bytes(files[path])
             terminal.assert_unchanged(files)
+
+
+class ConsoleScenarioTests(unittest.TestCase):
+    def run_console_script(self, unexpected_reply=False, accept_overflow=False):
+        query, replacement, command = "MiXeD multi word q/s", "retained on escape", "fixture / two words q"
+
+        def frame(mode="Following", query="", command=None, reply="", filtering=False):
+            status = "Paused | 0/2000 | 0 matches | 0 new" if mode == "Paused" else "Following | 0/2000 rows | 0 matches"
+            label = "Filter (Enter/Esc: done): " if filtering else "Filter / Ctrl+F (Esc: clear): "
+            lines = [status, label + query[-49:], "No console output yet."]
+            if command is not None:
+                lines.extend(["RCON command", command])
+            lines.extend([reply, "Enter: RCON | Space: pause/follow"])
+            return b"\x1b[2J\x1b[H" + "\r\n".join(lines).encode()
+
+        following = frame(query=query)
+        paused = frame("Paused", query)
+        editing_command = frame("Paused", query, command)
+        capped = "x" * 250 + "CAP256"
+        steps = [
+            (b"\x1bOQ", frame()),
+            (b" ", frame("Paused")),
+            (b"\x1b[F", frame()),
+            (b"/", frame(filtering=True)),
+            (query.encode(), frame(query=query, filtering=True)),
+            (b"\r", following),
+            (b" ", paused),
+            (b"\x1bOP", b"\x1b[2J\x1b[HS: start"),
+            (b"\x1bOQ", paused),
+            (b"\t", b"\x1b[2J\x1b[HNo resources loaded."),
+            (b"\x1b[Z", paused),
+            (b"\r", frame("Paused", query, "")),
+            (command.encode(), editing_command),
+            (b"\x06", editing_command),
+            (b"\x1b[F", editing_command),
+            (b"\x1b", paused),
+            (b"\r", frame("Paused", query, "")),
+            (b"\r", frame("Paused", query, reply="[RCON error] unexpected submission" if unexpected_reply else "")),
+            (b"\x06", frame("Paused", query, filtering=True)),
+            (b"\x15", frame("Paused", filtering=True)),
+            (b"\x1b[200~" + replacement.encode() + b"\x1b[201~", frame("Paused", replacement, filtering=True)),
+            (b"\x1b", frame("Paused", replacement)),
+            (b" ", frame(query=replacement)),
+            (b"\x1b", frame()),
+            (b"/", frame(filtering=True)),
+            (capped.encode(), frame(query=capped, filtering=True)),
+            (b"OVERFLOW", frame(query=capped + ("OVERFLOW" if accept_overflow else ""), filtering=True)),
+            (b"\x15", frame(filtering=True)),
+            (b"cleared", frame(query="cleared", filtering=True)),
+            (b"\r", frame(query="cleared")),
+            (b"\x1b", frame()),
+        ]
+        writes, chunks = [], []
+
+        def send(data):
+            self.assertTrue(steps, f"Unexpected extra input {data!r}")
+            expected, output = steps.pop(0)
+            self.assertEqual(data, expected)
+            writes.append(data)
+            chunks.append(output)
+
+        probe = terminal.Probe(send, lambda _: chunks.pop(0) if chunks else None)
+        ticks = iter(index / 100 for index in range(10000))
+        with patch.object(terminal.time, "monotonic", side_effect=lambda: next(ticks)):
+            terminal.console_controls(probe)
+        self.assertFalse(steps)
+        self.assertFalse(chunks)
+        return writes
+
+    def test_console_script_cancels_typed_rcon_and_allows_an_rcon_footer_hint(self):
+        writes = self.run_console_script()
+        typed = writes.index(b"fixture / two words q")
+        self.assertEqual(writes[typed + 1:typed + 4], [b"\x06", b"\x1b[F", b"\x1b"])
+
+    def test_console_script_rejects_an_actual_rcon_result(self):
+        with self.assertRaisesRegex(AssertionError, "empty command does not produce an RCON response"):
+            self.run_console_script(unexpected_reply=True)
+
+    def test_console_script_rejects_a_filter_larger_than_256_bytes(self):
+        with self.assertRaisesRegex(AssertionError, "bounded at 256 bytes"):
+            self.run_console_script(accept_overflow=True)
 
 
 if __name__ == "__main__":

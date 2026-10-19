@@ -108,6 +108,12 @@ jobs:
           python3 scripts/test-terminal-pty.py src-tauri/target/debug/fxins
           python3 scripts/test-terminal-pty.py src-tauri/target/debug/fxserver-manager
 
+      - name: Test console traffic in a native terminal
+        timeout-minutes: 5
+        env:
+          FXINS_CONSOLE_PTY_BINARY: src-tauri/target/debug/fxins
+        run: python3 -m unittest discover -s scripts/tests -p test_terminal_console_pty.py -v
+
       - name: Build frontend
         id: frontend
         run: npm run build
