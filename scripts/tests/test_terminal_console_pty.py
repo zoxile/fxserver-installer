@@ -13,7 +13,7 @@ import sys
 import tempfile
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 
 SCRIPTS = Path(__file__).resolve().parents[1]
@@ -119,7 +119,16 @@ def console_history(probe, root):
     probe.send(b"absent-synthetic-row")
     probe.expect(lambda text: "| 0 matches" in text and "No matching console rows." in text and not rows(text), "nonmatching filter hides all synthetic rows")
     probe.send(b"\r")
+    probe.expect(
+        lambda text: "Filter / Ctrl+F (Esc: clear):" in text and "absent-synthetic-row" in text and "No matching console rows." in text and "RCON command" not in text,
+        "Enter visibly closes filter editing while retaining the no-match query",
+    )
     probe.send(b"\x1b")
+    # A bare Esc must be decoded before the next ESC-prefixed key is written.
+    probe.expect(
+        lambda text: "Filter / Ctrl+F (Esc: clear):" in text and "absent-synthetic-row" not in text and "No matching console rows." not in text and bool(rows(text)),
+        "Esc visibly clears the filter before sending End",
+    )
     probe.send(b"\x1b[F")
     probe.expect(lambda text: "Following" in text and "row-0100" in text, "cleared filter and End reveal logs collected while paused")
     probe.send(b"\x1b[H")
@@ -161,6 +170,38 @@ def console_history(probe, root):
 
 
 class ConsoleFixtureTests(unittest.TestCase):
+    def test_filter_exit_waits_for_closed_and_cleared_frames_before_end(self):
+        class ReachedFollowCheck(Exception):
+            pass
+
+        probe = Mock()
+        probe.screen.text = "fixture-keep Alpha row-0001\nfixture-keep Alpha row-0004"
+
+        def stop_after_transition(predicate, description, **kwargs):
+            if description == "cleared filter and End reveal logs collected while paused":
+                raise ReachedFollowCheck
+
+        probe.expect.side_effect = stop_after_transition
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "txData").mkdir()
+            with self.assertRaises(ReachedFollowCheck):
+                console_history(probe, root)
+
+        calls = probe.method_calls
+        query = next(index for index, (name, args, _) in enumerate(calls) if name == "send" and args == (b"absent-synthetic-row",))
+        transition = calls[query + 2:]
+        self.assertEqual([name for name, _, _ in transition], ["send", "expect", "send", "expect", "send", "expect"])
+        self.assertEqual([args[0] for name, args, _ in transition if name == "send"], [b"\r", b"\x1b", b"\x1b[F"])
+        closed, cleared = transition[1][1][0], transition[3][1][0]
+        editing = "Paused | 101/2000 | 0 matches | 0 new\nFilter (Enter/Esc: done): absent-synthetic-row\nNo matching console rows."
+        inactive = editing.replace("Filter (Enter/Esc: done):", "Filter / Ctrl+F (Esc: clear):")
+        empty_filter = "Paused | 101/2000 | 101 matches | 0 new\nFilter / Ctrl+F (Esc: clear): \nfixture-keep Alpha row-0100"
+        self.assertFalse(closed(editing), "Enter acknowledgment must not accept the pre-Enter frame")
+        self.assertTrue(closed(inactive))
+        self.assertFalse(cleared(inactive), "Esc acknowledgment must not accept the pre-Esc frame")
+        self.assertTrue(cleared(empty_filter))
+
     def test_synthetic_fixture_tracks_all_immutable_files_and_uses_no_real_binary(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
