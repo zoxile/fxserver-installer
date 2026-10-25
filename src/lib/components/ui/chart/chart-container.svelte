@@ -1,4 +1,5 @@
 <script lang="ts">
+	import "layerchart/core.css";
 	import type { Snippet } from "svelte";
 	import { cn } from "$lib/utils.js";
 	import type { HTMLAttributes } from "svelte/elements";
@@ -23,7 +24,7 @@
 <div
 	data-chart=""
 	class={cn(
-		"flex aspect-auto justify-center text-xs text-muted-foreground [&_.layerchart-axis-line]:stroke-border [&_.layerchart-axis-tick-line]:stroke-border [&_.layerchart-axis-tick-text]:fill-muted-foreground [&_.layerchart-grid-line]:stroke-border/60 [&_.layerchart-tooltip]:rounded-sm [&_.layerchart-tooltip]:border-border [&_.layerchart-tooltip]:bg-popover [&_.layerchart-tooltip]:text-popover-foreground",
+		"flex aspect-auto justify-center text-xs text-muted-foreground [&_.lc-axis-rule]:stroke-border [&_.lc-axis-tick]:stroke-border [&_.lc-axis-tick-label]:fill-muted-foreground",
 		className,
 	)}
 	style={[style, colorStyle].filter(Boolean).join("; ")}

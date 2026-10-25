@@ -64,7 +64,8 @@
 	import { Dialog } from "bits-ui";
 	import { scaleTime } from "d3-scale";
 	import { curveNatural } from "d3-shape";
-	import { AreaChart } from "layerchart";
+	import { AreaChart } from "layerchart/svg";
+	import type { AreaChartProps } from "layerchart";
 	import { onDestroy, onMount, tick, untrack } from "svelte";
 	import { Checkbox } from "$lib/components/ui/checkbox/index.js";
 	import * as Card from "$lib/components/ui/card/index.js";
@@ -147,16 +148,19 @@
 	const chartAxisProps = {
 		xAxis: {
 			format: (date: Date) => timeFormatter.format(date),
+			tickSpacing: 90,
+			tickOcclusion: true,
 			tickLabelProps: { fill: "var(--muted-foreground)" },
+			motion: "none",
 		},
-		grid: { x: true, y: true, class: "stroke-border/65" },
+		grid: { x: true, y: true, classes: { line: "stroke-border/65" }, motion: "none" },
 		area: {
 			curve: curveNatural,
 			fillOpacity: 0.28,
-			line: { class: "stroke-2" },
-			tweened: false,
+			line: { class: "stroke-2", motion: "none" },
+			motion: "none",
 		},
-	};
+	} satisfies AreaChartProps<{ date: Date; cpu: number; memory: number }>["props"];
 
 	const workspaceId = getWorkspaceId();
 	const workspaceRevision = workspaceSession.revision;
@@ -1073,9 +1077,11 @@
 							data={resourceChartData}
 							x="date"
 							xScale={scaleTime()}
+							motion="none"
+							tooltipContext={{ mode: "bisect-x" }}
 							yDomain={[0, 100]}
 							axis="x"
-							padding={{ left: 0, right: 2, top: 2, bottom: 24 }}
+							padding={{ left: 28, right: 28, top: 2, bottom: 24 }}
 							series={[
 								{
 									key: "cpu",
@@ -1085,14 +1091,15 @@
 							]}
 							props={chartAxisProps}
 						>
-							<Chart.Tooltip
-								slot="tooltip"
-								indicator="dot"
-								dataKey="cpu"
-								label="CPU"
-								labelFormatter={() => "CPU Usage"}
-								valueFormatter={(value) => (typeof value === "number" ? `${value.toFixed(2)}%` : String(value ?? ""))}
-							/>
+							{#snippet tooltip()}
+								<Chart.Tooltip
+									indicator="dot"
+									dataKey="cpu"
+									label="CPU"
+									labelFormatter={() => "CPU Usage"}
+									valueFormatter={(value) => (typeof value === "number" ? `${value.toFixed(2)}%` : String(value ?? ""))}
+								/>
+							{/snippet}
 						</AreaChart>
 					</Chart.Container>
 					{#if visibleResourceSamples.length < 2}
@@ -1134,9 +1141,11 @@
 							data={resourceChartData}
 							x="date"
 							xScale={scaleTime()}
+							motion="none"
+							tooltipContext={{ mode: "bisect-x" }}
 							yDomain={[0, 100]}
 							axis="x"
-							padding={{ left: 0, right: 2, top: 2, bottom: 24 }}
+							padding={{ left: 28, right: 28, top: 2, bottom: 24 }}
 							series={[
 								{
 									key: "memory",
@@ -1146,14 +1155,15 @@
 							]}
 							props={chartAxisProps}
 						>
-							<Chart.Tooltip
-								slot="tooltip"
-								indicator="dot"
-								dataKey="memory"
-								label="RAM"
-								labelFormatter={() => "RAM Usage"}
-								valueFormatter={(value) => (typeof value === "number" ? `${value.toFixed(2)}%` : String(value ?? ""))}
-							/>
+							{#snippet tooltip()}
+								<Chart.Tooltip
+									indicator="dot"
+									dataKey="memory"
+									label="RAM"
+									labelFormatter={() => "RAM Usage"}
+									valueFormatter={(value) => (typeof value === "number" ? `${value.toFixed(2)}%` : String(value ?? ""))}
+								/>
+							{/snippet}
 						</AreaChart>
 					</Chart.Container>
 					{#if visibleResourceSamples.length < 2}
