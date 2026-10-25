@@ -569,7 +569,7 @@ pub(crate) async fn apply_database_admin_action_with_manager(
             let error = if permit.credentials.password.is_empty() { error } else { error.replace(&permit.credentials.password, "[redacted]") };
             format!("The action did not return a confirmed success. Nontransactional DDL/maintenance may have completed or partially changed the target; no rollback is promised. Refresh {} before retrying. {}", permit.preview.confirmation, error.chars().take(2000).collect::<String>())
         };
-        let result = execute_query(credentials, sql).map_err(&uncertain)?;
+        let result = execute_query(credentials, sql).map_err(uncertain)?;
         if !result.success { return Err(uncertain(result.stderr)); }
         let maintenance = matches!(permit.request.action, AdminAction::Optimize | AdminAction::Analyze | AdminAction::Check | AdminAction::Repair);
         let issues = !result.stderr.is_empty() || result.rows.len() > 32 || (maintenance && result.rows.is_empty()) || result.rows.iter().any(|row| row.get(2).is_some_and(|kind| matches!(kind.to_ascii_lowercase().as_str(), "error" | "warning")));
