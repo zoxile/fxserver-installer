@@ -19,6 +19,7 @@
 	import { fxserverSettings, loadFxserverSettings } from "$lib/features/fxserver/fxserverSettings.svelte";
 	import { exportDiagnosticZip, previewDiagnosticExport, runPreflight, type DiagnosticPreview, type PreflightReport, type PreflightRequest } from "$lib/modules/diagnostics";
 	import PreflightResults from "./PreflightResults.svelte";
+	import FirewallCard from "./FirewallCard.svelte";
 	import ConfigDiff from "$lib/features/config-history/ConfigDiff.svelte";
 	import { applyDiagnosticConfigPatch, previewDiagnosticConfigPatch, type DiagnosticConfigPatch } from "$lib/modules/diagnostics";
 	import type { PageId } from "$lib/navigation";
@@ -171,6 +172,7 @@
 	</Card.Root>
 
 	{#if patchBusy && !patch}<p class="flex items-center gap-2 text-sm" role="status"><LoaderCircleIcon class="size-4 animate-spin" />Preparing reviewed patch...</p>{/if}
+	<FirewallCard />
 	{#if patch}
 		<section class="min-w-0 space-y-4 border-y border-border py-5" aria-label="Review configuration repair">
 			<div class="flex items-center justify-between gap-3"><h2 class="text-base font-semibold">Review rconlog startup patch</h2><Button variant="ghost" size="icon-sm" aria-label="Discard patch" title="Discard patch" disabled={patchBusy} onclick={() => patch = null}><XIcon /></Button></div>

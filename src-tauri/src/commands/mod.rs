@@ -9,6 +9,7 @@ pub mod database_browser;
 pub mod database_credentials;
 pub mod database_inspection;
 pub mod diagnostics;
+pub mod firewall;
 pub mod fxserver;
 pub mod health;
 pub mod jooat;

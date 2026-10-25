@@ -1,3 +1,4 @@
+pub mod firewall_ports;
 pub mod guided;
 pub(crate) mod parsing;
 mod redaction;

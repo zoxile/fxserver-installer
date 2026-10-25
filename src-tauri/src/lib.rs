@@ -31,6 +31,9 @@ static SINGLE_INSTANCE_LOCK_FILE: AtomicIsize = AtomicIsize::new(0);
 static SHUTDOWN_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
 
 pub fn run_elevated_helper_from_args() -> bool {
+    if services::firewall::run_firewall_helper_from_args() {
+        return true;
+    }
     let mut args = env::args().skip(1);
     let Some(first) = args.next() else {
         return false;
@@ -100,6 +103,10 @@ pub fn run() {
             commands::app_update::check_app_update,
             commands::app_update::download_app_update,
             commands::app_update::install_app_update,
+            commands::firewall::inspect_fivem_firewall,
+            commands::firewall::configure_fivem_firewall,
+            commands::firewall::remove_fivem_firewall,
+            commands::diagnostics::firewall_ports::get_fivem_firewall_ports,
             commands::artifact::get_windows_artifact_metadata,
             commands::artifact::get_windows_artifact_catalog,
             commands::artifact::get_installed_windows_artifact_info,
