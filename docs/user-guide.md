@@ -127,6 +127,10 @@ If the workflow says the tag already exists, bump the version and push again.
 
 ## Saved Data And Updates
 
+Released Windows builds from 0.6.0 support **Home > Project > Update**. Save open edits, confirm the update, and watch the download progress. The app verifies the signed package before stopping the managed server and launching the update installer. The updated app restarts; FXServer stays stopped until you start it. Ongoing tasks must finish before installation. Use the refresh button to check again.
+
+Older releases need one manual installer update to gain this feature. Development and Linux builds continue to use manual updates. Updater signing does not remove Windows SmartScreen warnings. See [Signed In-App Updates](signed-updates.md) for signing, platform support, and troubleshooting.
+
 App updates should preserve user data because app state is stored outside the install directory.
 
 Examples of saved or remembered state:
@@ -387,6 +391,8 @@ Automatic crash recovery is off by default and must be explicitly enabled for th
 Use **FXServer > Diagnostics** to prepare a report. Application and server log excerpts are optional. Inspect the redacted preview before exporting the ZIP; the export uses that exact preview rather than rereading changing files. Previews expire after 15 minutes. Raw configuration files and database dumps are not included by default. Redaction is a safeguard, not a guarantee: review any logs you choose to share for personal information or unusual secret formats.
 
 ## Guided Diagnostics
+
+**FiveM Firewall** on this page reads profile game ports, checks inbound/outbound TCP and UDP access, and offers confirmed setup or removal of app-owned rules. It does not open database or txAdmin ports, reset a firewall, or remove existing external rules. See the [Firewall Guide](firewall.md) for permissions, Linux support, and router/cloud firewall limits.
 
 Run **FXServer > Diagnostics** or review the preflight results shown by Start/Restart. Findings provide relevant panel links and concrete checks for paths, profiles, ports, config references, missing dependencies, duplicate resources, RCON, and database connectivity. Read warnings even when they do not block launch.
 

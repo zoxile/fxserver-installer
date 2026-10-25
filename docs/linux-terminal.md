@@ -36,6 +36,8 @@ Use the binary's `--help` output for the authoritative CLI options. Do not run t
 
 ## Terminal Usage
 
+The [FiveM Firewall Guide](firewall.md) covers the firewall actions and `fxins firewall` commands. UFW/firewalld changes require explicit confirmation and operating-system authorization; on a headless server, run `sudo -v` before reopening the TUI. In-app self-updates remain disabled for this development branch so it cannot be replaced by a main-branch Windows release.
+
 Run the binary with no subcommand, or with `tui`, to open the interactive interface. F1-F9 select Server, Console, Resources, Database, Artifacts, Checks, Settings, Actions, and Config. The minimum size is 50 columns by 14 rows; 100 columns by 30 rows is more comfortable for forms and charts.
 
 Passwords are session-only by default and never written to `terminal.json`. Actions includes explicit remember/load/forget operations using the same OS encryption services as the desktop. Previously remembered credentials load once when the TUI opens, scoped to the configured endpoint and server profile. Linux needs an unlocked Secret Service keyring; failure never falls back to plaintext. Save the non-secret connection settings too so the next session selects the same credential scope. Desktop workspace credentials are not silently imported.
