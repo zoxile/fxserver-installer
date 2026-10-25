@@ -64,6 +64,8 @@ Quick note: The main purpose of this app was for me to learn how to build with T
 
 ## Documentation
 
+- [In-App Updates](docs/signed-updates.md): Signed downloads, update channels, and release signing.
+- [FiveM Firewall](docs/firewall.md): Inspect game-port access and manage only the app's own firewall rules.
 - [User Guide](docs/user-guide.md): Install, build, update, and operate the app without relying on the installer workflow.
 - [Live Bridge](docs/live-bridge.md): Optional local pairing, real runtime data, installation, removal, and security limits.
 - [Reviewed Operations](docs/operations-guide.md): Maintenance plans, query tools, dependency inspection, profiler recording, and config validation.
@@ -208,6 +210,8 @@ Quick note: The main purpose of this app was for me to learn how to build with T
 
 ### Desktop App Behavior
 
+- Signed Windows in-app updates with download progress, graceful server shutdown, and installer handoff.
+- FiveM TCP/UDP firewall inspection, confirmed setup, and removal of app-owned rules only.
 - Current-user Windows installer.
 - Close-to-tray behavior for background use.
 - Quit stops monitoring and lets in-flight writes finish before the process exits.
