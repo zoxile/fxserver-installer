@@ -17,6 +17,19 @@ fn allowed_environment(values: &[String; 5]) -> bool {
         && values[4] == ACK
 }
 
+fn timed<T>(stage: &str, action: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+    let start = std::time::Instant::now();
+    let result = action();
+    eprintln!("Firewall CI {stage}: {:.2}s", start.elapsed().as_secs_f64());
+    result.map_err(|error| format!("{stage}: {error}"))
+}
+
+#[test]
+fn stage_errors_preserve_the_failed_operation() {
+    let error = timed::<()>("configure four rules", || Err("timed out".into())).unwrap_err();
+    assert_eq!(error, "configure four rules: timed out");
+}
+
 #[test]
 fn disposable_guard_rejects_workstations_and_partial_opt_in() {
     let expected = [
@@ -53,7 +66,9 @@ fn fixture(operation: &str, nonce: &str, request: FirewallRequest) -> Result<(),
     for key in ENV_KEYS {
         command.env(key, std::env::var(key).unwrap_or_default());
     }
-    super::super::runtime::checked(&mut command).map(|_| ())
+    timed(&format!("fixture {operation}"), || {
+        super::super::runtime::checked(&mut command).map(|_| ())
+    })
 }
 
 #[test]
@@ -77,7 +92,10 @@ fn disposable_windows_firewall_roundtrip() {
         tcp_port: port,
         udp_port: port + 1,
     };
-    let before = query(request, Operation::Inspect, &[]).unwrap();
+    let before = timed("initial inspection", || {
+        query(request, Operation::Inspect, &[])
+    })
+    .unwrap();
     assert!(!before.requires_elevation);
     assert!(
         before.owned.is_empty(),
@@ -86,15 +104,21 @@ fn disposable_windows_firewall_roundtrip() {
     fixture("create", &nonce, request).unwrap();
     let outcome = (|| -> Result<(), String> {
         // Exercise all four exact rule shapes without altering default policies/profiles.
-        let added = query(request, Operation::Configure, &[0, 1, 2, 3])?;
+        let added = timed("configure four rules", || {
+            query(request, Operation::Configure, &[0, 1, 2, 3])
+        })?;
         for check in request.checks() {
             assert!(added.owned.iter().any(|r| owned(r, &check)));
         }
         fixture("verify", &nonce, request)?;
         fixture("modify", &nonce, request)?;
-        let removed = execute(request, Operation::Remove)?;
+        let removed = timed("remove exact owned rules", || {
+            execute(request, Operation::Remove)
+        })?;
         assert!(removed.checks.iter().all(|c| !c.owned_rule_present));
-        let raw = query(request, Operation::Inspect, &[])?;
+        let raw = timed("verify final rule set", || {
+            query(request, Operation::Inspect, &[])
+        })?;
         assert_eq!(
             raw.owned.len(),
             1,

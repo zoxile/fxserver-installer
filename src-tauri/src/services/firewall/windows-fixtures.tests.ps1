@@ -3,7 +3,7 @@ $tokens = $null
 $parseErrors = $null
 $ast = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $PSScriptRoot 'windows.ps1'), [ref]$tokens, [ref]$parseErrors)
 if ($parseErrors.Count) { throw ($parseErrors | Out-String) }
-foreach ($name in @('Is-Owned','New-FilterIndex','Get-RuleFilter','Test-RelevantPort')) {
+foreach ($name in @('Is-Owned','New-FilterIndex','Get-RuleFilter','Test-RelevantPort','Get-MutationPlan')) {
     $definition = $ast.Find({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name }, $false)
     if (!$definition) { throw "Pure function $name not found." }
     # Load only pure functions, never the firewall command or its imports.
@@ -47,4 +47,45 @@ if (!(Test-RelevantPort $filter)) { throw 'Requested port filtered out.' }
 $filter.LocalPort=@('80'); if (Test-RelevantPort $filter) { throw 'Unrelated port was retained.' }
 $filter.LocalPort=@('30100-30200'); if (!(Test-RelevantPort $filter)) { throw 'Matching range filtered out.' }
 $filter.LocalPort=@('RPC'); if (!(Test-RelevantPort $filter)) { throw 'Dynamic ports must be checked conservatively.' }
+
+$checks = @(foreach ($direction in @('Inbound','Outbound')) {
+    foreach ($protocol in @('tcp','udp')) {
+        $port = if ($protocol -eq 'tcp') { 30120 } else { 30121 }
+        $short = if ($direction -eq 'Inbound') { 'in' } else { 'out' }
+        [pscustomobject]@{ Name="fxins-fw-v1-$short-$protocol-$port"; Direction=$direction; Protocol=$protocol; Port=$port }
+    }
+})
+$ownedRules = @(foreach ($c in $checks) {
+    $r = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'fixtures/windows_rule.json') -Raw | ConvertFrom-Json
+    $r.name=$c.Name; $r.group=$group; $r.description=$description
+    $r.direction=$c.Direction; $r.protocol=$c.Protocol; $r.localPort=@([string]$c.Port)
+    $r
+})
+$plan = @(Get-MutationPlan $ownedRules @(0,1,2,3))
+if ($plan.Count -ne 4 -or @($plan | Where-Object { !$_.Exists }).Count) { throw 'Owned mutation plan is incomplete.' }
+$emptyPlan = @(Get-MutationPlan @() @(0,1,2,3))
+if ($emptyPlan.Count -ne 4 -or @($emptyPlan | Where-Object Exists).Count) { throw 'Missing rule plan is incorrect.' }
+foreach ($case in @('modified','duplicate','invalid')) {
+    $failed=$false
+    try {
+        switch ($case) {
+            modified {
+                $ownedRules[3].description='Changed externally'
+                $null=Get-MutationPlan $ownedRules @(0,1,2,3)
+            }
+            duplicate {
+                $ownedRules[3].description=$description
+                $null=Get-MutationPlan @($ownedRules+$ownedRules[0]) @(0,1,2,3)
+            }
+            invalid { $null=Get-MutationPlan $ownedRules @(4) }
+        }
+    } catch { $failed=$true }
+    if (!$failed) { throw "Unsafe mutation plan accepted: $case" }
+}
+$mutationLoop = $ast.Find({ param($node)
+    $node -is [System.Management.Automation.Language.ForEachStatementAst] -and $node.Variable.VariablePath.UserPath -eq 'entry'
+}, $true)
+if (!$mutationLoop -or $mutationLoop.Find({ param($node)
+    $node -is [System.Management.Automation.Language.CommandAst] -and $node.GetCommandName() -eq 'Read-Rules'
+}, $true)) { throw 'Mutation loop must not repeatedly enumerate firewall filters.' }
 'Windows firewall parser and ownership fixtures passed; no firewall cmdlets were invoked.'

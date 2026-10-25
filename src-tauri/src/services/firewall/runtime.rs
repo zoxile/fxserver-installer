@@ -132,8 +132,16 @@ fn terminate(child: &mut Child) {
     let _ = child.wait();
 }
 
+#[cfg(any(target_os = "linux", test))]
 pub(super) fn checked(command: &mut Command) -> Result<String, String> {
-    let output = run(command, COMMAND_TIMEOUT)?;
+    checked_with_timeout(command, COMMAND_TIMEOUT)
+}
+
+pub(super) fn checked_with_timeout(
+    command: &mut Command,
+    timeout: Duration,
+) -> Result<String, String> {
+    let output = run(command, timeout)?;
     if output.success {
         Ok(output.stdout)
     } else {
