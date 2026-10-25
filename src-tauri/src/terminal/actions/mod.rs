@@ -6,6 +6,7 @@ use crate::{
 use std::collections::BTreeMap;
 
 pub(super) mod database;
+pub(super) mod firewall;
 pub(super) mod server;
 pub(super) mod tools;
 
@@ -133,12 +134,14 @@ pub(super) fn list(context: &Context) -> Vec<Action> {
     let mut actions = database::list(context);
     actions.extend(server::list(context));
     actions.extend(tools::list(context));
+    actions.extend(firewall::list(context));
     actions
 }
 
 pub(super) async fn execute(context: &Context, submission: &Submission) -> Result<Outcome, String> {
     match submission.id.split('.').next() {
         Some("database") => database::execute(context, submission).await,
+        Some("firewall") => firewall::execute(context, submission).await,
         Some("server" | "resource" | "artifact") => server::execute(context, submission).await,
         Some("config" | "tools" | "logs") => tools::execute(context, submission).await,
         _ => Err("Unknown terminal action.".into()),

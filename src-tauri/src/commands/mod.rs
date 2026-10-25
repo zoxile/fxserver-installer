@@ -19,6 +19,7 @@ pub mod database_credentials;
 #[cfg(any(feature = "desktop", feature = "terminal"))]
 pub mod database_inspection;
 pub mod diagnostics;
+pub mod firewall;
 pub mod fxserver;
 #[cfg(feature = "desktop")]
 pub mod health;

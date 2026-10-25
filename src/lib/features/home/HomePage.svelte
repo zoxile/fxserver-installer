@@ -116,6 +116,7 @@
 				{ label: "Resources", onclick: () => onNavigate("resource-manager") },
 				{ label: "Live Bridge", onclick: () => onNavigate("live-bridge") },
 				{ label: "Maintenance", onclick: () => onNavigate("maintenance") },
+				{ label: "Firewall", onclick: () => onNavigate("diagnostics") },
 			]}
 			onclick={() => onNavigate("server-manage")}
 		/>

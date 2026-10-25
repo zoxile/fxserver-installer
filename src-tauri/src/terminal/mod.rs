@@ -1,5 +1,6 @@
 mod actions;
 mod database;
+mod firewall;
 mod settings;
 mod shutdown;
 mod ui;
@@ -51,6 +52,11 @@ enum Action {
     Init,
     /// Check this profile without starting or modifying the server.
     Doctor,
+    /// Inspect and manage app-owned FiveM firewall rules.
+    Firewall {
+        #[command(subcommand)]
+        command: firewall::FirewallAction,
+    },
     /// Discover txAdmin profiles.
     Profiles,
     /// List resources from the chosen profile.
@@ -147,6 +153,7 @@ pub fn run() -> Result<(), String> {
     match cli.command.unwrap_or(Action::Tui) {
         Action::Tui => ui::run(config, path, runtime),
         Action::Init => unreachable!(),
+        Action::Firewall { command } => runtime.block_on(firewall::run(command)),
         Action::Doctor => {
             let report = runtime.block_on(preflight(&config, true))?;
             print_json(&report)?;

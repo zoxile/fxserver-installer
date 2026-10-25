@@ -45,6 +45,8 @@ const labels: Record<string, string> = {
 	rollback_resource_update: "Roll back resource",
 	delete_resource_snapshot: "Delete resource snapshot",
 	run_fxserver_preflight: "Check server readiness",
+	configure_fivem_firewall: "Set up FiveM firewall rules",
+	remove_fivem_firewall: "Remove app firewall rules",
 	preview_diagnostic_export: "Prepare diagnostics",
 	export_diagnostic_zip: "Export diagnostics",
 	save_backup_schedule: "Save backup schedule",

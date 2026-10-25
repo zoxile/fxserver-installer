@@ -20,6 +20,7 @@
 	import { fxserverSettings, loadFxserverSettings } from "$lib/features/fxserver/fxserverSettings.svelte";
 	import { exportDiagnosticZip, previewDiagnosticExport, runPreflight, type DiagnosticPreview, type PreflightReport, type PreflightRequest } from "$lib/modules/diagnostics";
 	import PreflightResults from "./PreflightResults.svelte";
+	import FirewallCard from "./FirewallCard.svelte";
 	import ConfigDiff from "$lib/features/config-history/ConfigDiff.svelte";
 	import { applyDiagnosticConfigPatch, previewDiagnosticConfigPatch, type DiagnosticConfigPatch } from "$lib/modules/diagnostics";
 	import type { PageId } from "$lib/navigation";
@@ -171,6 +172,8 @@
 			{#if report}<PreflightResults {report} {onNavigate} onReviewPatch={reviewPatch} disabled={checking || patchBusy} />{:else}<p class="py-6 text-center text-sm text-muted-foreground">No diagnostic results yet.</p>{/if}
 		</Card.Content>
 	</Card.Root>
+
+	<FirewallCard linux={platform.os === "linux"} />
 
 	{#if patchBusy && !patch}<p class="flex items-center gap-2 text-sm" role="status"><LoaderCircleIcon class="size-4 animate-spin" />Preparing reviewed patch...</p>{/if}
 	{#if patch}

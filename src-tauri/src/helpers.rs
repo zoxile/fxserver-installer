@@ -9,6 +9,9 @@ use std::{thread, time::Duration};
 
 #[cfg(windows)]
 pub fn run_elevated_helper_from_args() -> bool {
+    if crate::services::firewall::run_firewall_helper_from_args() {
+        return true;
+    }
     let mut args = env::args().skip(1);
     let Some(first) = args.next() else {
         return false;
@@ -38,7 +41,7 @@ pub fn run_elevated_helper_from_args() -> bool {
 
 #[cfg(not(windows))]
 pub fn run_elevated_helper_from_args() -> bool {
-    false
+    crate::services::firewall::run_firewall_helper_from_args()
 }
 
 pub fn run_fxserver_watchdog_from_args() -> bool {
