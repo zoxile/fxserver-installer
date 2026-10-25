@@ -10,7 +10,7 @@ default-run = "app"
 
 [features]
 default = ["desktop"]
-desktop = ["dep:tauri", "dep:tauri-build", "dep:tauri-plugin-log", "dep:tauri-plugin-dialog", "dep:tauri-plugin-single-instance", "dep:glib"]
+desktop = ["dep:tauri", "dep:tauri-build", "dep:tauri-plugin-log", "dep:tauri-plugin-dialog", "dep:tauri-plugin-single-instance", "dep:tauri-plugin-updater", "dep:glib"]
 terminal = ["dep:clap", "dep:crossterm", "dep:ratatui", "dep:ratatui-textarea", "dep:rpassword", "dep:unicode-width"]
 
 [[bin]]
@@ -58,6 +58,7 @@ tauri = { version = "2.11.0", features = ["tray-icon"], optional = true }
 tauri-plugin-log = { version = "2", optional = true }
 tauri-plugin-dialog = { version = "2", optional = true }
 tauri-plugin-single-instance = { version = "2", optional = true }
+tauri-plugin-updater = { version = "=2.14.0", default-features = false, features = ["native-tls"], optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"
