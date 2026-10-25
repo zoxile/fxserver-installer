@@ -23,6 +23,7 @@ async (page) => {
           case "plugin:event|listen": return ++sequence;
           case "plugin:event|unlisten": return;
           case "plugin:dialog|message": return "Yes";
+          case "get_app_update_status": return { phase: "disabled", currentVersion: "0.5.2", availableVersion: null, releaseUrl: null, downloadedBytes: 0, totalBytes: null, message: "Updates disabled in fixture.", supported: false };
           case "fetch_latest_app_release": return { version: "0.5.1", tagName: "v0.5.1", htmlUrl: "https://github.com/zoxile/fxserver-installer/releases/tag/v0.5.1", installerUrl: null };
           case "read_app_logs": return { path: "mock.log", entries: [] };
           case "append_app_log": state.logs.push(args.entry); return;

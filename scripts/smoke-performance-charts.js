@@ -22,6 +22,7 @@ async (page) => {
           case "append_app_log":
           case "initialize_health_workspace": return;
           case "read_app_logs": return { path: "fixture.log", entries: [] };
+          case "get_app_update_status": return { phase: "disabled", currentVersion: "0.5.2", availableVersion: null, releaseUrl: null, downloadedBytes: 0, totalBytes: null, message: "Updates disabled in fixture.", supported: false };
           case "fetch_latest_app_release": return { version: "0.5.2", tagName: "v0.5.2", htmlUrl: "https://github.com/zoxile/fxserver-installer/releases/tag/v0.5.2", installerUrl: null };
           case "get_fxserver_rcon_password": return "";
           case "load_database_login": return null;

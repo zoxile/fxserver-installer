@@ -21,6 +21,7 @@ async (page) => {
           case "plugin:app|version": return "0.5.1";
           case "plugin:event|listen": return ++callback;
           case "plugin:event|unlisten": case "append_app_log": case "initialize_health_workspace": case "save_database_login": return;
+          case "get_app_update_status": return { phase: "disabled", currentVersion: "0.5.2", availableVersion: null, releaseUrl: null, downloadedBytes: 0, totalBytes: null, message: "Updates disabled in fixture.", supported: false };
           case "fetch_latest_app_release": throw new Error("Offline fixture");
           case "read_app_logs": return { path: "mock.log", entries: [] };
           case "get_installed_windows_artifact_info": return { installed: true, version: "10000", destination: "C:/mock/artifacts", hasFxserverExecutable: true };

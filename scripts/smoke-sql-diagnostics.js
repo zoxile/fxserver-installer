@@ -40,6 +40,7 @@ async (page) => {
           case "read_app_logs": return { path: "mock.log", entries: [] };
           case "get_windows_artifact_metadata": return { recommendedArtifact: "10000", windowsDownloadLink: "https://example.invalid/artifact.zip", brokenArtifacts: [] };
           case "get_installed_windows_artifact_info": return { installed: false };
+          case "get_app_update_status": return { phase: "disabled", currentVersion: "0.5.2", availableVersion: null, releaseUrl: null, downloadedBytes: 0, totalBytes: null, message: "Updates disabled in fixture.", supported: false };
           case "fetch_latest_app_release": return null;
           case "get_default_mariadb_backup_output_dir": return "C:/fixture/backups";
           case "list_mariadb_databases": return ["fixture", "other_fixture"];

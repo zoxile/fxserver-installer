@@ -74,6 +74,7 @@ async (page) => {
           case "read_app_logs": return { path: "mock.log", entries: [] };
           case "load_database_login": return null;
           case "configure_live_bridge": return { workspaceId: "default", enabled: false, connected: false, snapshot: null };
+          case "get_app_update_status": return { phase: "disabled", currentVersion: "0.5.2", availableVersion: null, releaseUrl: null, downloadedBytes: 0, totalBytes: null, message: "Updates disabled in fixture.", supported: false };
           case "fetch_latest_app_release": return null;
           case "get_windows_artifact_metadata": return { recommendedArtifact: "10000", windowsDownloadLink: "https://example.invalid/artifact.zip", brokenArtifacts: [] };
           case "get_installed_windows_artifact_info": return { installed: false };

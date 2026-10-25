@@ -81,6 +81,12 @@ jobs:
       - name: Test native safeguards
         run: cargo test --manifest-path src-tauri/Cargo.toml --locked
 
+      - name: Test firewall roundtrip on disposable Windows runner
+        timeout-minutes: 5
+        env:
+          FXI_DISPOSABLE_WINDOWS_FIREWALL: github-hosted-disposable-v1
+        run: cargo test --manifest-path src-tauri/Cargo.toml --locked --lib services::firewall::windows::integration::disposable_windows_firewall_roundtrip -- --exact --ignored --nocapture
+
       - name: Smoke test both terminal commands without installing
         run: |
           cargo build --manifest-path src-tauri/Cargo.toml --locked --no-default-features --features terminal --bin fxins --bin fxserver-manager
@@ -111,29 +117,43 @@ jobs:
         id: release_version
         run: node scripts/prepare-release.mjs
 
-      - name: Check existing tag
+      - name: Check updater release configuration
+        run: node scripts/validate-updater-release.mjs config
+
+      - name: Check existing release
         id: existing_tag
         env:
-          RELEASE_TAG: ${{ steps.release_version.outputs.tag }}
-        run: |
-          $tagRef = git tag --list $env:RELEASE_TAG
-          if ($LASTEXITCODE -ne 0) { throw "Failed to check existing release tag." }
-          "exists=$((-not [string]::IsNullOrWhiteSpace($tagRef)).ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node scripts/validate-updater-release.mjs state
 
-      - name: Publish Tauri release
+      - name: Build signed Tauri draft release
+        id: tauri_release
         if: steps.existing_tag.outputs.exists != 'true'
         uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
+          releaseId: ${{ steps.existing_tag.outputs.release_id }}
           tagName: ${{ steps.release_version.outputs.tag }}
           releaseName: ${{ steps.release_version.outputs.release_name }}
           releaseBody: ${{ steps.release_version.outputs.body }}
-          releaseDraft: false
+          releaseDraft: true
           prerelease: ${{ steps.release_version.outputs.prerelease }}
           releaseCommitish: ${{ steps.release_version.outputs.commit }}
-          args: --bundles nsis
+          args: >-
+            --bundles nsis --config '{"bundle":{"createUpdaterArtifacts":true}}'
+          includeUpdaterJson: true
+          updaterJsonPreferNsis: true
           assetNamePattern: "[name]_[version]_[platform]_[arch][setup][ext]"
+
+      - name: Verify uploaded update and publish release
+        if: steps.existing_tag.outputs.exists != 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_ID: ${{ steps.tauri_release.outputs.releaseId }}
+        run: node scripts/validate-updater-release.mjs publish
 
       - name: Skip existing release
         if: steps.existing_tag.outputs.exists == 'true'

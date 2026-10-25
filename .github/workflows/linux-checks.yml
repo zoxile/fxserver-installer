@@ -114,6 +114,12 @@ jobs:
           FXINS_CONSOLE_PTY_BINARY: src-tauri/target/debug/fxins
         run: python3 -m unittest discover -s scripts/tests -p test_terminal_console_pty.py -v
 
+      - name: Test FiveM firewall in an isolated network namespace
+        timeout-minutes: 15
+        env:
+          FXI_DISPOSABLE_FIREWALL: private-network-container-v1
+        run: python3 scripts/ci/firewall_integration.py --binary src-tauri/target/debug/fxins
+
       - name: Build frontend
         id: frontend
         run: npm run build

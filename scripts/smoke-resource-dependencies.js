@@ -44,6 +44,7 @@ async (page) => {
           case "scan_resource_dependencies": if (state.failScan) throw new Error("Fixture unreadable profile"); return state.inventory;
           case "preview_resource_update": return { id: "preview", resourceName: "core", repository: "https://github.com/example/resource", branch: "main", archiveBytes: 64, archiveSha256: "a".repeat(64), createdAt: Math.floor(Date.now() / 1000), changes: [{ path: "server.lua", kind: "modified", oldSize: 1, newSize: 2, preserve: false, canPreserve: true }] };
           case "apply_resource_update": return { id: "snapshot", resourceName: "core", createdAt: Date.now() / 1000, fileCount: 1, sizeBytes: 2, reason: "update" };
+          case "get_app_update_status": return { phase: "disabled", currentVersion: "0.5.2", availableVersion: null, releaseUrl: null, downloadedBytes: 0, totalBytes: null, message: "Updates disabled in fixture.", supported: false };
           case "fetch_latest_app_release": return { version: "0.5.1", tagName: "v0.5.1", htmlUrl: "https://github.com/zoxile/fxserver-installer/releases/tag/v0.5.1", installerUrl: "https://github.com/zoxile/fxserver-installer/releases/download/v0.5.1/FXServer.Installer_0.5.1_windows_x64-setup.exe" };
           default: throw new Error(`Unmocked command: ${command}`);
         }

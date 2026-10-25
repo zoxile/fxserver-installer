@@ -27,6 +27,7 @@ try {
             case "get_platform_info": return { os, arch: "x86_64", artifactPlatform: os, clientLogsSupported: os === "windows", secureStorageSupported: os === "windows" };
             case "plugin:window|title": return "FXServer Installer";
             case "plugin:app|version": return "0.5.2";
+            case "get_app_update_status": return { phase: "disabled", currentVersion: "0.5.2", availableVersion: null, releaseUrl: null, downloadedBytes: 0, totalBytes: null, message: "Development builds use manual updates.", supported: false };
             case "plugin:event|listen": return ++state.nextId;
             case "read_app_logs": return { path: "fixture.log", entries: [] };
             case "get_windows_artifact_metadata": return { recommendedArtifact: "12345", windowsDownloadLink: "https://fixture.invalid/windows.7z", linuxDownloadLink: "https://fixture.invalid/linux.tar.xz", brokenArtifacts: [] };
