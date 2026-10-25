@@ -126,11 +126,26 @@ class FirewallIntegrationGuards(unittest.TestCase):
             for chain, option in [("ufw-user-input", "--dport"), ("ufw-user-output", "--sport")]
             for protocol, port in [("tcp", 30142), ("udp", 30143)]
         )
-        fixture.assert_kernel_ports(rules, 30142, 30143)
+        fixture.assert_kernel_ports(rules, 30142, 30143, family=4)
         with self.assertRaises(RuntimeError):
-            fixture.assert_kernel_ports(rules.replace("--sport", "--dport"), 30142, 30143)
+            fixture.assert_kernel_ports(rules.replace("--sport", "--dport"), 30142, 30143, family=4)
         with self.assertRaises(RuntimeError):
-            fixture.assert_kernel_ports(rules.replace("ACCEPT", "DROP"), 30142, 30143)
+            fixture.assert_kernel_ports(rules.replace("ACCEPT", "DROP"), 30142, 30143, family=4)
+
+    def test_kernel_assertion_checks_ipv6_chains_separately(self):
+        rules = "\n".join(
+            f"-A {chain} -p {protocol} -m {protocol} {option} {port} -j ACCEPT"
+            for chain, option in [("ufw6-user-input", "--dport"), ("ufw6-user-output", "--sport")]
+            for protocol, port in [("tcp", 30142), ("udp", 30143)]
+        )
+        fixture.assert_kernel_ports(rules, 30142, 30143, family=6)
+        with self.assertRaisesRegex(RuntimeError, "IPv4 inbound tcp"):
+            fixture.assert_kernel_ports(rules, 30142, 30143, family=4)
+        with self.assertRaisesRegex(RuntimeError, "IPv6 inbound tcp"):
+            fixture.assert_kernel_ports(rules.replace("ufw6-", "ufw-"), 30142, 30143, family=6)
+        for wrong in [rules.replace("--sport", "--dport"), rules.replace("ACCEPT", "DROP")]:
+            with self.assertRaises(RuntimeError):
+                fixture.assert_kernel_ports(wrong, 30142, 30143, family=6)
 
     def test_workflow_runs_explicit_fixture_and_restricts_sudo(self):
         workflow = (ROOT / ".github/workflows/linux-checks.yml").read_text()

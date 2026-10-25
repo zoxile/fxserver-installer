@@ -180,8 +180,11 @@ def rule_lines(text):
     return sorted(line.strip() for line in text.splitlines() if line.strip().startswith("ufw "))
 
 
-def assert_kernel_ports(text, tcp, udp):
-    for direction, chain, option in [("inbound", "ufw-user-input", "--dport"), ("outbound", "ufw-user-output", "--sport")]:
+def assert_kernel_ports(text, tcp, udp, *, family):
+    require(family in {4, 6}, "Expected IPv4 or IPv6 kernel rules.")
+    prefix = "ufw6" if family == 6 else "ufw"
+    for direction, suffix, option in [("inbound", "input", "--dport"), ("outbound", "output", "--sport")]:
+        chain = f"{prefix}-user-{suffix}"
         for protocol, port in [("tcp", tcp), ("udp", udp)]:
             found = False
             for line in text.splitlines():
@@ -190,7 +193,8 @@ def assert_kernel_ports(text, tcp, udp):
                     continue
                 pairs = {tokens[i]: tokens[i + 1] for i in range(len(tokens) - 1) if tokens[i].startswith("-")}
                 found |= pairs.get("-p") == protocol and pairs.get(option) == str(port) and pairs.get("-j") == "ACCEPT"
-            require(found, f"No real {direction} {protocol} local port {port} accept rule found.")
+            require(found, f"No real IPv{family} {direction} {protocol} local port {port} accept rule in {chain}. "
+                    f"Kernel rules: {json.dumps(text[:6000])}")
 
 
 def inside():
@@ -253,8 +257,9 @@ def inside():
     configured = cli("setup", 30142, 30143, yes=True)
     require(all(row["state"] == "owned" and row["ownedRulePresent"] for row in configured["checks"]),
             "All four explicit directions/protocols must be owned when defaults deny traffic.")
-    for tool in ["/usr/sbin/iptables-save", "/usr/sbin/ip6tables-save"]:
-        assert_kernel_ports(system(tool), 30142, 30143)
+    for family, tool in [(4, "/usr/sbin/iptables-save"), (6, "/usr/sbin/ip6tables-save")]:
+        assert_kernel_ports(system(tool), 30142, 30143, family=family)
+        print(f"Verified real IPv{family} TCP/UDP destination inbound and source outbound ports.", flush=True)
     system("/usr/sbin/ufw", "allow", "in", "proto", "tcp", "from", "any", "to", "any", "port", "30142", "comment", "fxi-ci-modified")
     cli("remove", 30142, 30143, yes=True)
     remaining = rule_lines(system("/usr/sbin/ufw", "show", "added"))
