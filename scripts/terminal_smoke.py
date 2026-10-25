@@ -381,7 +381,7 @@ def actions_and_config(probe, paste_undo_limit=1):
     console_controls(probe)
     probe.send(b"\x1b[19~")  # F8, then wrap from the first item to the last.
     probe.contains("Search actions")
-    first, last = "MariaDB installation and service status", "Resolve JOOAT hashes offline"
+    first, last = "MariaDB installation and service status", "Remove app firewall rules"
     probe.selected(first)
     probe.send(b"\x1b[A")
     probe.selected(last)
