@@ -21,11 +21,11 @@ const NO_RELEASE: &str = "Could not verify a published Windows installer for thi
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppReleaseInfo {
-    version: String,
-    tag_name: String,
-    html_url: String,
-    installer_url: String,
-    prerelease: bool,
+    pub(crate) version: String,
+    pub(crate) tag_name: String,
+    pub(crate) html_url: String,
+    pub(crate) installer_url: String,
+    pub(crate) prerelease: bool,
 }
 
 type Cached = Option<(Instant, bool, Result<AppReleaseInfo, String>)>;
@@ -65,7 +65,7 @@ fn cache_fresh(age: Duration, same_channel: bool, success: bool, force: bool) ->
     !force && same_channel && age < Duration::from_secs(if success { 60 } else { 10 })
 }
 
-fn version(tag: &str) -> Option<[u32; 3]> {
+pub(crate) fn version(tag: &str) -> Option<[u32; 3]> {
     let parts: Vec<_> = tag.strip_prefix('v').unwrap_or(tag).split('.').collect();
     if parts.len() != 3 {
         return None;

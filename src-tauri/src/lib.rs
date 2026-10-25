@@ -84,14 +84,22 @@ pub fn run() {
     exit_if_secondary_instance();
 
     tauri::Builder::default()
+        .manage(commands::app_update::AppUpdateManager::new(
+            prepare_app_update,
+        ))
         .manage(commands::fxserver::FxserverManager::default())
         .manage(commands::profiler_capture::ProfilerCaptureManager::default())
         .manage(commands::backup_manager::BackupManager::default())
         .manage(commands::health::HealthMonitor::default())
         .manage(commands::live_bridge::LiveBridge::default())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             commands::app_release::fetch_latest_app_release,
+            commands::app_update::get_app_update_status,
+            commands::app_update::check_app_update,
+            commands::app_update::download_app_update,
+            commands::app_update::install_app_update,
             commands::artifact::get_windows_artifact_metadata,
             commands::artifact::get_windows_artifact_catalog,
             commands::artifact::get_installed_windows_artifact_info,
@@ -305,6 +313,32 @@ fn hide_main_window<R: Runtime>(app: &tauri::AppHandle<R>) {
     if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
         let _ = window.hide();
     }
+}
+
+fn prepare_app_update(app: &tauri::AppHandle) -> Result<(), String> {
+    let backups = app.state::<commands::backup_manager::BackupManager>();
+    if backups.is_busy() {
+        return Err(
+            "Wait for the database backup or restore to finish before installing the update."
+                .into(),
+        );
+    }
+    commands::begin_update_shutdown()?;
+    let manager = app.state::<commands::fxserver::FxserverManager>();
+    let health = app.state::<commands::health::HealthMonitor>();
+    manager.begin_shutdown();
+    app.state::<commands::live_bridge::LiveBridge>().stop();
+    health.stop(&manager);
+    backups.stop();
+    health.wait_stopped();
+    manager.stop_running_process().map_err(|error| {
+        format!("Could not stop FXServer for the update: {error}. Restart the app before retrying.")
+    })?;
+    backups.stop_and_wait().map_err(|error| {
+        format!("Could not finish backup shutdown: {error}. Restart the app before retrying.")
+    })?;
+    commands::wait_for_background_work();
+    Ok(())
 }
 
 fn show_main_window<R: Runtime>(app: &tauri::AppHandle<R>) {
