@@ -107,21 +107,33 @@ function Is-Owned($r, $c) {
         $r.authentication -eq 'NotRequired' -and $r.encryption -eq 'NotRequired')
 }
 
-try {
-if ($operation -ne 'inspect') {
-    foreach ($index in $selected) {
+function Get-MutationPlan($existingRules, $selected) {
+    $plan = @(foreach ($index in $selected) {
+        if ($index -notin @(0,1,2,3)) { throw 'Invalid firewall rule selection.' }
         $c = $checks[$index]
-        $existing = @(Read-Rules 'PersistentStore' | Where-Object { $_.name -ceq $c.Name })
+        $existing = @($existingRules | Where-Object { $_.name -ceq $c.Name })
         if ($existing.Count -gt 1 -or ($existing.Count -eq 1 -and !(Is-Owned $existing[0] $c))) {
             throw 'A reserved firewall name has different settings; refusing to change it.'
         }
-        if ($operation -eq 'remove' -and $existing.Count -eq 1) {
+        [pscustomobject]@{ Check=$c; Exists=($existing.Count -eq 1) }
+    })
+    return $plan
+}
+
+try {
+if ($operation -ne 'inspect') {
+    # Validate the complete selection before writes, reading each filter collection only once.
+    $existingRules = @(Read-Rules 'PersistentStore')
+    $plan = @(Get-MutationPlan $existingRules $selected)
+    foreach ($entry in $plan) {
+        $c = $entry.Check
+        if ($operation -eq 'remove' -and $entry.Exists) {
             Get-NetFirewallRule -PolicyStore PersistentStore -Name $c.Name | Remove-NetFirewallRule
-        } elseif ($operation -eq 'configure' -and $existing.Count -eq 0) {
+        } elseif ($operation -eq 'configure' -and !$entry.Exists) {
             New-NetFirewallRule -PolicyStore PersistentStore -Name $c.Name -DisplayName "FiveM $($c.Protocol) $($c.Direction) $($c.Port)" `
                 -Description $description -Group $group -Direction $c.Direction -Protocol $c.Protocol -LocalPort $c.Port `
                 -RemotePort Any -LocalAddress Any -RemoteAddress Any -Profile Any -Enabled True -Action Allow | Out-Null
-        } elseif ($operation -eq 'configure' -and $existing.Count -eq 1) {
+        } elseif ($operation -eq 'configure' -and $entry.Exists) {
             Get-NetFirewallRule -PolicyStore PersistentStore -Name $c.Name | Enable-NetFirewallRule
         }
     }

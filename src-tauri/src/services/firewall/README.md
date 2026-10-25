@@ -47,8 +47,11 @@ Unix socket with kernel-verified root peer credentials; visible process argument
 are not treated as an authentication secret. Neither platform accepts script or
 output-file paths from the caller.
 
-Commands have 20-second limits, a 120-second helper work deadline and 1-MiB output
-limits. The parent waits at most 180 seconds after launching the helper. OS
+Inspections and individual Linux commands have 20-second limits. A Windows
+mutation batch has 60 seconds for up to four writes plus final verification,
+with one ownership preflight for the complete selection. All helper work remains
+bounded by a 120-second deadline and 1-MiB output limits. The parent waits at most
+180 seconds after launching the helper. OS
 approval UI can itself remain open awaiting the user. Denying approval makes no
 changes. There is no mid-transaction cancellation API: do not show an app Cancel
 button after applying starts. A disconnected requester can leave a bounded

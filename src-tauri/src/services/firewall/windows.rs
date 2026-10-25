@@ -210,6 +210,15 @@ fn snapshot(request: FirewallRequest, probe: &Probe) -> FirewallSnapshot {
 }
 
 #[cfg(windows)]
+fn command_timeout(operation: Operation) -> std::time::Duration {
+    match operation {
+        Operation::Inspect => super::runtime::COMMAND_TIMEOUT,
+        // One batch includes up to four writes and a fresh two-store snapshot.
+        Operation::Configure | Operation::Remove => std::time::Duration::from_secs(60),
+    }
+}
+
+#[cfg(windows)]
 fn query(
     request: FirewallRequest,
     operation: Operation,
@@ -220,6 +229,7 @@ fn query(
         .map(usize::to_string)
         .collect::<Vec<_>>()
         .join(",");
+    let timeout = command_timeout(operation);
     let operation = match operation {
         Operation::Inspect => "inspect",
         Operation::Configure => "configure",
@@ -231,7 +241,7 @@ fn query(
         request.udp_port,
         include_str!("windows.ps1")
     );
-    let output = super::runtime::checked(&mut powershell_command(&script)?)?;
+    let output = super::runtime::checked_with_timeout(&mut powershell_command(&script)?, timeout)?;
     let probe: Probe = serde_json::from_str(&output)
         .map_err(|e| format!("Cannot interpret Windows firewall state: {e}"))?;
     if probe.requires_elevation && super::elevation::is_elevated()? {
@@ -328,6 +338,14 @@ mod integration;
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(windows)]
+    #[test]
+    fn mutation_budget_is_bounded_separately_from_inspection() {
+        assert_eq!(command_timeout(Operation::Inspect).as_secs(), 20);
+        for operation in [Operation::Configure, Operation::Remove] {
+            assert_eq!(command_timeout(operation).as_secs(), 60);
+        }
+    }
     #[cfg(windows)]
     #[test]
     #[ignore = "Opt-in read-only Windows Defender Firewall probe; never changes rules or elevates"]
