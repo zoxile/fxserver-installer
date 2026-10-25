@@ -743,7 +743,7 @@ fn extract_archive(archive: &Path, destination: &Path) -> Result<(), String> {
     let mut total = 0_u64;
     for index in 0..zip.len() {
         let mut entry = zip.by_index(index).map_err(io_error)?;
-        let path = safe_relative(entry.name().trim_end_matches('/'))?;
+        let path = safe_relative(entry.name().map_err(io_error)?.trim_end_matches('/'))?;
         if entry
             .unix_mode()
             .is_some_and(|mode| !matches!(mode & 0o170000, 0 | 0o100000 | 0o040000))

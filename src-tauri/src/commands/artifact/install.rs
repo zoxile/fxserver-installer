@@ -163,7 +163,7 @@ fn extract(
     let mut files = Vec::new();
     for index in 0..zip.len() {
         let entry = zip.by_index(index).map_err(|e| e.to_string())?;
-        let relative = archive_path(entry.name())?;
+        let relative = archive_path(&entry.name().map_err(|e| e.to_string())?)?;
         let mode = entry.unix_mode().unwrap_or(0) & 0o170000;
         if !matches!(mode, 0 | 0o100000 | 0o040000) {
             return Err("Archive links and special files are not allowed.".into());
@@ -180,7 +180,7 @@ fn extract(
     }
     for index in 0..zip.len() {
         let mut entry = zip.by_index(index).map_err(|e| e.to_string())?;
-        let relative = archive_path(entry.name())?;
+        let relative = archive_path(&entry.name().map_err(|e| e.to_string())?)?;
         let target = destination.join(&relative);
         if entry.is_dir() {
             pins.ensure(&target, true)?;
