@@ -2,87 +2,26 @@
 	import { platform, platformLabel } from "$lib/core/platform.svelte";
 	import ArchiveIcon from "@lucide/svelte/icons/archive";
 	import CheckCircle2Icon from "@lucide/svelte/icons/check-circle-2";
-	import DatabaseIcon from "@lucide/svelte/icons/database";
-	import DownloadIcon from "@lucide/svelte/icons/download";
-	import ExternalLinkIcon from "@lucide/svelte/icons/external-link";
 	import GaugeIcon from "@lucide/svelte/icons/gauge";
-	import GitBranchIcon from "@lucide/svelte/icons/git-branch";
+	import DatabaseIcon from "@lucide/svelte/icons/database";
 	import LogsIcon from "@lucide/svelte/icons/logs";
-	import PackageIcon from "@lucide/svelte/icons/package";
-	import RefreshCwIcon from "@lucide/svelte/icons/refresh-cw";
 	import RocketIcon from "@lucide/svelte/icons/rocket";
 	import ServerCogIcon from "@lucide/svelte/icons/server-cog";
 	import TerminalIcon from "@lucide/svelte/icons/terminal";
 	import WrenchIcon from "@lucide/svelte/icons/wrench";
-	import { onMount } from "svelte";
-	import * as Card from "$lib/components/ui/card/index.js";
 	import * as Separator from "$lib/components/ui/separator/index.js";
-	import { Button } from "$lib/components/ui/button/index.js";
 	import { Notice } from "$lib/components/ui/notice/index.js";
+	import { Button } from "$lib/components/ui/button/index.js";
 	import releasePolicy from "../../../../release-policy.json";
 	import appPackage from "../../../../package.json";
-	import { openExternalUrl } from "$lib/core/openExternal";
-	import { compareVersions, fetchLatestAppRelease, getCurrentAppVersion, type AppReleaseInfo } from "$lib/modules/appRelease";
+	import ProjectCard from "./ProjectCard.svelte";
 	import HomeArtifactStatusCard from "./HomeArtifactStatusCard.svelte";
 	import HomeBentoCard from "./HomeBentoCard.svelte";
 	import { workspaceSession } from "$lib/core/workspaces.svelte";
 	import type { PageId } from "$lib/navigation";
 
-	type Props = {
-		onNavigate: (page: PageId) => void;
-	};
-
-	let { onNavigate }: Props = $props();
-	let currentVersion = $state("Checking...");
-	let latestRelease = $state<AppReleaseInfo | null>(null);
-	let releaseError = $state("");
-	let checkingRelease = $state(false);
+	let { onNavigate }: { onNavigate: (page: PageId) => void } = $props();
 	const betaBuild = releasePolicy.betaVersions.includes(appPackage.version);
-
-	const latestVersion = $derived(latestRelease?.version ?? "");
-	const updateAvailable = $derived(Boolean(latestRelease && compareVersions(latestRelease.version, currentVersion) > 0));
-	const projectStatus = $derived(
-		platform.os === "linux" ? "Source build" : releaseError ? "Check failed" : checkingRelease ? "Checking..." : !latestRelease ? "Unknown" : updateAvailable ? `Update ${latestVersion} available` : "Up to date",
-	);
-	const projectStatusTone = $derived(platform.os === "linux" ? "text-muted-foreground" : releaseError ? "text-red-300" : checkingRelease ? "text-muted-foreground" : updateAvailable ? "text-amber-400" : "text-emerald-400");
-	const projectDetails = $derived([
-		{ label: "App", value: "FXServer Installer", icon: PackageIcon },
-		{ label: "Version", value: currentVersion, icon: GaugeIcon },
-		{ label: "Git", value: "zoxile/fxserver-installer", icon: GitBranchIcon },
-	]);
-
-	onMount(() => {
-		void refreshProjectVersion();
-	});
-
-	async function refreshProjectVersion(force = false) {
-		checkingRelease = true;
-		releaseError = "";
-
-		try {
-			if (platform.os === "linux") {
-				currentVersion = await getCurrentAppVersion();
-				return;
-			}
-			const [version, release] = await Promise.all([getCurrentAppVersion(), fetchLatestAppRelease(force)]);
-			currentVersion = version;
-			latestRelease = release;
-		} catch (error) {
-			currentVersion = await getCurrentAppVersion().catch(() => "Unknown");
-			releaseError = error instanceof Error ? error.message : String(error);
-		} finally {
-			checkingRelease = false;
-		}
-	}
-
-	function openLatestInstaller() {
-		if (platform.os === "linux") {
-			void openExternalUrl("https://github.com/zoxile/fxserver-installer/releases");
-			return;
-		}
-		const url = latestRelease?.installerUrl || latestRelease?.htmlUrl || "https://github.com/zoxile/fxserver-installer/releases/latest";
-		void openExternalUrl(url);
-	}
 </script>
 
 <section class="relative space-y-6 overflow-hidden">
@@ -96,57 +35,7 @@
 			<p class="mt-3 max-w-2xl text-sm leading-6 text-muted-foreground">Move through database setup, artifact preparation, server configuration, and utility tools without losing the thread.</p>
 		</div>
 
-		<Card.Root class="flex flex-col rounded-md border-border bg-card shadow-sm">
-			<Card.Header class="border-b border-border pb-4">
-				<div class="flex items-center justify-between gap-2"><Card.Title>Project</Card.Title>{#if betaBuild}<span class="rounded-sm border border-amber-400/30 bg-amber-400/10 px-2 py-0.5 text-xs font-medium text-amber-300">Beta</span>{/if}</div>
-				<Card.Description>Workspace details and repository context.</Card.Description>
-			</Card.Header>
-			<Card.Content class="flex flex-1 flex-col gap-3">
-				<div class="grid gap-2">
-					{#each projectDetails as detail}
-						{@const Icon = detail.icon}
-						<div class="flex items-center justify-between gap-3 rounded-sm border border-border bg-background/70 px-3 py-2">
-							<div class="flex items-center gap-2 text-xs text-muted-foreground">
-								<Icon class="size-3.5" />
-								{detail.label}
-							</div>
-							<p class="truncate text-xs font-medium text-foreground">{detail.value}</p>
-						</div>
-					{/each}
-				</div>
-				<div class="flex items-center justify-between gap-3 rounded-sm border border-border bg-background/70 px-3 py-2">
-					<div class="flex items-center gap-2 text-xs text-muted-foreground">
-						<CheckCircle2Icon class={["size-3.5", projectStatusTone]} />
-						Update status
-					</div>
-					<div class="flex min-w-0 items-center gap-2">
-						<p class={["truncate text-xs font-medium", projectStatusTone]}>{projectStatus}</p>
-						<Button variant="ghost" size="icon" class="size-7 rounded-sm" onclick={() => refreshProjectVersion(true)} disabled={checkingRelease} title="Refresh latest version status">
-							<RefreshCwIcon class={["size-3.5", checkingRelease && "animate-spin"]} />
-						</Button>
-					</div>
-				</div>
-				{#if releaseError}
-					<p class="rounded-sm border border-red-400/20 bg-red-400/10 px-3 py-2 text-xs text-red-100">{releaseError}</p>
-				{/if}
-				<div class="mt-auto flex flex-wrap gap-2">
-					<Button variant={updateAvailable ? "default" : "outline"} size="sm" class="rounded-sm" onclick={openLatestInstaller} title={platform.os === "linux" ? "Open project releases" : "Open the latest installer download"}>
-						<DownloadIcon class="size-3.5" />
-						{platform.os === "linux" ? "Releases" : updateAvailable ? "Update" : "Installer"}
-					</Button>
-					<Button
-						variant="outline"
-						size="sm"
-						class="rounded-sm"
-						onclick={() => openExternalUrl("https://github.com/zoxile/fxserver-installer")}
-						title="Open GitHub repository"
-					>
-						GitHub
-						<ExternalLinkIcon class="size-3.5" />
-					</Button>
-				</div>
-			</Card.Content>
-		</Card.Root>
+		<ProjectCard {betaBuild} />
 
 		<HomeArtifactStatusCard {onNavigate} />
 	</div>

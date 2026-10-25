@@ -1,5 +1,7 @@
 #[cfg(feature = "desktop")]
 pub mod app_release;
+#[cfg(feature = "desktop")]
+pub mod app_update;
 pub mod artifact;
 #[cfg(feature = "desktop")]
 pub mod backup_manager;
@@ -73,6 +75,34 @@ pub(crate) fn begin_shutdown() {
         .lock()
         .unwrap_or_else(|error| error.into_inner())
         .closing = true;
+}
+
+#[cfg(feature = "desktop")]
+pub(crate) fn background_work_closing() -> bool {
+    BACKGROUND_WORK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .closing
+}
+
+#[cfg(feature = "desktop")]
+pub(crate) fn begin_update_shutdown() -> Result<(), String> {
+    let mut work = BACKGROUND_WORK
+        .lock()
+        .map_err(|_| "Background work lock is unavailable.")?;
+    if work.closing {
+        return Err(
+            "The application is already shutting down. Restart it before retrying the update."
+                .into(),
+        );
+    }
+    if work.active != 0 {
+        return Err(
+            "Wait for background operations to finish before installing the update.".into(),
+        );
+    }
+    work.closing = true;
+    Ok(())
 }
 
 pub(crate) fn require_other_work_idle() -> Result<(), String> {
