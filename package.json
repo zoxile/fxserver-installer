@@ -40,7 +40,7 @@
   "dependencies": {
     "@fontsource/jetbrains-mono": "^5.2.8",
     "@tailwindcss/vite": "^4.2.4",
-    "@tauri-apps/api": "^2.11.0",
+    "@tauri-apps/api": "~2.12.4",
     "@tauri-apps/cli": "^2.12.4",
     "@tauri-apps/plugin-dialog": "^2.7.1",
     "d3-scale": "^4.0.2",
