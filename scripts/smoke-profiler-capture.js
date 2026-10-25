@@ -46,6 +46,7 @@ async (page) => {
       invoke: async (command, args = {}) => {
         state.calls.push({ command, args });
         switch (command) {
+          case "get_app_update_status": return { phase: "disabled", currentVersion: "0.5.2", availableVersion: null, releaseUrl: null, downloadedBytes: 0, totalBytes: null, message: "Updates disabled in fixture.", supported: false };
           case "capture_fxserver_profile": {
             const request = args.request;
             if (Object.keys(request).sort().join(",") !== "frames,rcon") throw new Error("Unexpected capture arguments");

@@ -15,6 +15,7 @@ async (page) => {
         state.calls.push({ command, args: JSON.parse(JSON.stringify(args)) });
         const status = () => ({ installed: state.installed, running: state.running, version: state.version, serviceName: state.installed ? "MariaDB" : null, serviceDisplayName: "MariaDB", installPath: null });
         switch (command) {
+          case "get_app_update_status": return { phase: "disabled", currentVersion: "0.5.2", availableVersion: null, releaseUrl: null, downloadedBytes: 0, totalBytes: null, message: "Updates disabled in fixture.", supported: false };
           case "fetch_latest_app_release": return { version: "0.3.2", tagName: "v0.3.2", htmlUrl: "https://github.com/zoxile/fxserver-installer/releases/tag/v0.3.2" };
           case "plugin:window|title": return "FXServer Installer";
           case "plugin:app|version": return "0.4.1";

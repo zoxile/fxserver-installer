@@ -16,6 +16,7 @@ async (page) => {
       invoke: async (command, args = {}) => {
         state.calls.push({ command, args });
         switch (command) {
+          case "get_app_update_status": return { phase: "disabled", currentVersion: "0.5.2", availableVersion: null, releaseUrl: null, downloadedBytes: 0, totalBytes: null, message: "Updates disabled in fixture.", supported: false };
           case "load_database_login": return { host: "localhost", port: 3306, username: "fixture", password: "fixture", database: "fixture" };
           case "save_database_login": case "clear_database_login": case "initialize_health_workspace": case "append_app_log": case "plugin:event|unlisten": case "validate_mariadb_credentials": return;
           case "plugin:event|listen": return args.handler;
